@@ -28,10 +28,13 @@ from wing.common.logger import log
 from wing.config import get_config
 from wing.context import ContextManager
 from wing.event import (
+    EventTarget,
     LLMCallMetricsEvent,
+    SyncSessionEvent,
     ToolCallResultEvent,
     TurnResultEvent,
     UserMessageAcceptedEvent,
+    wire_dump,
 )
 from wing.event_bus import event_bus
 from wing.media import SUPPORTED_IMAGE_MIMES, MediaAccess
@@ -270,6 +273,7 @@ class Session:
 
         self._context_manager = context_manager
         self._agent = agent
+        context_manager.on_auto_compact = self._publish_compaction_sync
 
         # 将 workspace 注入 agent 作为 Bash 工具的 cwd。
         # 无论是新建（workspace 参数）还是磁盘恢复（metadata），
@@ -353,7 +357,9 @@ class Session:
         # 干净关闭旧 agent 的 worker；provider 实例归共享池，不随 agent 关闭
         # （其他会话可能正在用，且新 agent 多半解析到同一实例）。
         old_agent = self._agent
-        await old_agent.shutdown()
+        await old_agent.shutdown(
+            notify=old_agent.status != "idle" or old_agent.has_pending_input
+        )
 
         self._context_manager, self._agent = _build_runtime(
             template,
@@ -362,6 +368,7 @@ class Session:
             self._store,
             self._metadata.workspace,
         )
+        self._context_manager.on_auto_compact = self._publish_compaction_sync
         # 追加系统提示词是会话级内容（hook 注入的环境信息 + 追加指令），
         # 与模板无关：新 CM 上重新挂载持久化值（否则重启/切换后丢失）。
         if self._metadata.append_system_prompt:
@@ -684,6 +691,43 @@ class Session:
         """序列化 context window 中的消息为 dict 列表。"""
         cm = self._context_manager
         return [serialize_message(msg) for msg in cm.get_context_window()]
+
+    def sync_event(
+        self,
+        *,
+        draft: str | None = None,
+        target: EventTarget | None = None,
+        include_agent: bool = False,
+    ) -> SyncSessionEvent:
+        """Project the active history and all live state at the same point in time."""
+        cm = self.context_manager
+        agent = self.agent
+        return SyncSessionEvent(
+            session_id=self.session_id,
+            messages=self.serialize_messages(),
+            uncommitted=agent.uncommitted_message(),
+            uncommitted_tools=agent.uncommitted_tools(),
+            pending_user_messages=agent.pending_user_messages(),
+            events=[
+                wire_dump(e)
+                for e in cm.get_active_events(pending_ask_ids=agent.pending_ask_ids())
+            ],
+            status=self.status,
+            turn_started_at=(
+                agent.turn_started_at.isoformat() if agent.turn_started_at else None
+            ),
+            agent=self.to_agent_info() if include_agent else None,
+            name=self.session_name if include_agent else None,
+            draft=draft,
+            usage=self.usage,
+            target=target,
+        )
+
+    def _publish_compaction_sync(self) -> None:
+        if event_bus.subscribers_of(self.session_id):
+            self.agent.emit(
+                self.sync_event(target=EventTarget(scope="session"), include_agent=True)
+            )
 
     @property
     def last_interaction(self) -> str | None:

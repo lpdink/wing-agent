@@ -290,7 +290,7 @@ def message_semantics(record: Mapping[str, Any]) -> dict[str, Any]:
 
     参与比较：``role`` / ``content`` / ``reasoning_content`` /
     ``tool_calls``（id/name/arguments/arguments_error）/ ``tool_call_id`` /
-    ``content_blocks``（按 type 补默认字段）。
+    ``content_blocks``（按 type 补默认字段）/ ``media``（保留引用顺序）。
 
     不参与比较：``uuid`` / ``parent_uuid`` / ``unzip_last_uuid`` /
     ``usage_boundary_uuid`` / ``ts``（链拓扑与写入噪声）、``usage`` /
@@ -311,6 +311,7 @@ def message_semantics(record: Mapping[str, Any]) -> dict[str, Any]:
         "reasoning_content": record.get("reasoning_content"),
         "tool_calls": _normalize_tool_calls(record.get("tool_calls")),
         "tool_call_id": record.get("tool_call_id"),
+        "media": record.get("media") or [],
         "content_blocks": None if blocks is None else _normalize_blocks(blocks),
     }
 

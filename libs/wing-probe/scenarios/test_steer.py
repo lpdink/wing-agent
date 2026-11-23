@@ -10,12 +10,24 @@ from pathlib import Path
 
 import pytest
 import yaml
-from wing_probe import Driver, Probe, Session, ToolCall, ToolHost, Turn
+from wing_probe import (
+    Driver,
+    DriverHttpError,
+    Probe,
+    Session,
+    ToolCall,
+    ToolHost,
+    Turn,
+    assert_rewind_transition,
+)
 
 MODEL = "probe/steer-sync"
 VISION_MODEL = {"name": MODEL, "capabilities": {"vision": True}}
 PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMBAAP7BUkAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
+SECOND_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC"
 )
 TOOL_NAME = "SteerEcho"
 CALL_IDS = ["call_first", "call_second"]
@@ -28,11 +40,18 @@ from wing.hooks import hooks
 
 @hooks.on("before_user_message")
 async def wait_for_release(content):
-    if content not in ("same\\nsame", "hold"):
+    if content not in ("same\\nsame", "hold", "hold swap"):
         return None
     Path("hook-entered").touch()
-    while not Path("hook-release").exists():
-        await asyncio.sleep(0.02)
+    try:
+        while not Path("hook-release").exists():
+            await asyncio.sleep(0.02)
+    except asyncio.CancelledError:
+        if content == "hold swap":
+            Path("hook-cancelled").touch()
+            while not Path("hook-release").exists():
+                await asyncio.sleep(0.02)
+        raise
     return f"hooked: {content}"
 """
 
@@ -110,6 +129,9 @@ async def test_steer_syncs_batched_input_after_every_tool_result(
         media = (await session.driver.http.upload_media(session.session_id, PNG))[
             "media"
         ]
+        second_media = (
+            await session.driver.http.upload_media(session.session_id, SECOND_PNG)
+        )["media"]
         async with _subscribe(probe, session) as observer:
             sync = await observer.watch.expect("sync_session")
             assert sync.data["pending_user_messages"] == []
@@ -140,7 +162,7 @@ async def test_steer_syncs_batched_input_after_every_tool_result(
             await observer.watch.expect(
                 "user_message_queued", where={"origin_request_id": http_id}
             )
-            mixed_id = await session.send("same", media=[media])
+            mixed_id = await session.send("same", media=[second_media])
             await observer.watch.expect(
                 "user_message_queued", where={"origin_request_id": mixed_id}
             )
@@ -150,7 +172,11 @@ async def test_steer_syncs_batched_input_after_every_tool_result(
             pending = [
                 {"origin_request_id": text_id, "content": "same", "media": []},
                 {"origin_request_id": http_id, "content": "", "media": [media]},
-                {"origin_request_id": mixed_id, "content": "same", "media": [media]},
+                {
+                    "origin_request_id": mixed_id,
+                    "content": "same",
+                    "media": [second_media],
+                },
             ]
             assert len(probe.requests_for(MODEL)) == 1
             assert not observer.watch.events("tool_call_result")
@@ -169,6 +195,12 @@ async def test_steer_syncs_batched_input_after_every_tool_result(
 
             release.set()
             await _wait_for_file(probe.env.root / "hook-entered")
+            with pytest.raises(DriverHttpError) as rejected:
+                await session.rewind(start.data["message_uuid"])
+            assert rejected.value.call.status == 409
+            assert (await session.rewind("current"))["ok"]
+            current = await observer.watch.expect("sync_session")
+            assert current.data["pending_user_messages"] == pending
             async with _subscribe(probe, session) as joined:
                 sync = await joined.watch.expect("sync_session")
                 assert sync.data["pending_user_messages"] == pending
@@ -187,7 +219,7 @@ async def test_steer_syncs_batched_input_after_every_tool_result(
             assert commit.data == joined_commit.data
             assert commit.data["origin_request_ids"] == [text_id, http_id, mixed_id]
             assert commit.data["content"] == "hooked: same\nsame"
-            assert commit.data["media"] == [media, media]
+            assert commit.data["media"] == [media, second_media]
             await observer.watch.expect("done")
             await session.watch.expect("done")
             for subscriber in (session, observer):
@@ -270,8 +302,20 @@ async def test_steer_syncs_batched_input_after_every_tool_result(
         assert [b["text"] for b in blocks if b["type"] == "text"] == [
             commit.data["content"]
         ]
-        assert [base64.b64decode(image) for image in data] == [PNG, PNG]
-        history = probe.history(session).messages()
+        assert [base64.b64decode(image) for image in data] == [PNG, SECOND_PNG]
+        view = probe.history(session)
+        disk_messages = [
+            m for m in view.records if m.get("uuid") == commit.data["message_uuid"]
+        ]
+        assert len(disk_messages) == 1
+        disk_message = disk_messages[0]
+        assert disk_message["role"] == "user"
+        assert disk_message["content"] == commit.data["content"]
+        assert disk_message["media"] == [
+            {k: value for k, value in ref.items() if value is not None}
+            for ref in commit.data["media"]
+        ]
+        history = view.messages()
         assert [
             (m["tool_call_id"], m["content"]) for m in history if m["role"] == "tool"
         ] == list(zip(CALL_IDS, TOOL_TEXTS, strict=True))
@@ -298,17 +342,8 @@ async def test_tool_results_without_pending_input(probe: Probe) -> None:
     assert len(session.watch.events("user_message_committed")) == 1
 
 
-@pytest.mark.probe_env(models=[MODEL])
-@pytest.mark.parametrize("boundary", ["disabled", "max_turns", "interrupt"])
-async def test_steer_respects_turn_boundaries(probe: Probe, boundary: str) -> None:
-    if boundary == "disabled":
-        config = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
-        config["steer"] = False
-        probe.env.config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
-        result = await probe.driver_required.http.request("POST", "/api/system/reload")
-        assert result["ok"], result
-
-    ask_call = ToolCall(
+def _ask_call() -> ToolCall:
+    return ToolCall(
         "AskUserQuestion",
         {
             "questions": [
@@ -322,7 +357,19 @@ async def test_steer_respects_turn_boundaries(probe: Probe, boundary: str) -> No
         },
         id="call_ask",
     )
-    turns = [Turn.of(tool_calls=[ask_call])]
+
+
+@pytest.mark.probe_env(models=[MODEL])
+@pytest.mark.parametrize("boundary", ["disabled", "max_turns", "interrupt"])
+async def test_steer_respects_turn_boundaries(probe: Probe, boundary: str) -> None:
+    if boundary == "disabled":
+        config = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
+        config["steer"] = False
+        probe.env.config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+        result = await probe.driver_required.http.request("POST", "/api/system/reload")
+        assert result["ok"], result
+
+    turns = [Turn.of(tool_calls=[_ask_call()])]
     if boundary == "disabled":
         turns.append(Turn.of(text="tool follow-up"))
     turns.append(Turn.of(text="next turn"))
@@ -353,7 +400,9 @@ async def test_steer_respects_turn_boundaries(probe: Probe, boundary: str) -> No
         assert len(probe.requests_for(MODEL)) == 1
         next_id = await session.send("after interrupt")
     else:
-        answer_id = await session.answer(ask, "Choice: one")
+        answer_id = await session.answer(
+            ask, "" if boundary == "disabled" else "Choice: one"
+        )
         finished = await session.watch.expect("turn_result")
         assert finished.data["subtype"] == (
             "error_max_turns" if boundary == "max_turns" else "success"
@@ -387,11 +436,15 @@ async def test_steer_respects_turn_boundaries(probe: Probe, boundary: str) -> No
 
 
 @pytest.mark.probe_env(models=[MODEL], hooks=["hooks/*.py"])
-async def test_interrupt_distinguishes_preparing_and_queued_input(probe: Probe) -> None:
+@pytest.mark.parametrize("replace_agent", [False, True])
+async def test_cancel_confirms_preparing_and_queued_input(
+    probe: Probe, replace_agent: bool
+) -> None:
     await _install_hook(probe)
     probe.register(MODEL, Turn.of(text="recovered"))
     session = await probe.session(model=MODEL)
-    preparing_id = await session.send("hold")
+    preparing_content = "hold swap" if replace_agent else "hold"
+    preparing_id = await session.send(preparing_content)
     await _wait_for_file(probe.env.root / "hook-entered")
     queued_id = await session.send("later")
     await session.watch.expect(
@@ -402,14 +455,51 @@ async def test_interrupt_distinguishes_preparing_and_queued_input(probe: Probe) 
         sync = await observer.watch.expect("sync_session")
         assert sync.data["messages"] == []
         assert sync.data["pending_user_messages"] == [
-            {"origin_request_id": preparing_id, "content": "hold", "media": []},
+            {
+                "origin_request_id": preparing_id,
+                "content": preparing_content,
+                "media": [],
+            },
             {"origin_request_id": queued_id, "content": "later", "media": []},
         ]
-        await session.interrupt()
+        if replace_agent:
+            http = session.driver.http
+            replacement = asyncio.create_task(
+                http.request(
+                    "POST",
+                    "/api/session/update",
+                    body={
+                        "session_id": session.session_id,
+                        "agent": "default",
+                        "model_id": MODEL,
+                    },
+                )
+            )
+            try:
+                await _wait_for_file(probe.env.root / "hook-cancelled")
+                with pytest.raises(DriverHttpError) as failure:
+                    await http.request(
+                        "POST",
+                        "/api/session/send",
+                        body={
+                            "session_id": session.session_id,
+                            "request_id": "during-swap",
+                            "content": "late",
+                        },
+                    )
+                assert failure.value.call.status == 409
+            finally:
+                (probe.env.root / "hook-release").touch()
+                assert (await replacement)["ok"]
+            observer.watch.assert_never(
+                "user_message_queued", where={"origin_request_id": "during-swap"}
+            )
+        else:
+            await session.interrupt()
         dropped = await observer.watch.expect("user_messages_dropped")
         assert dropped.data["origin_request_ids"] == [preparing_id]
         interrupted = await observer.watch.expect("interrupted")
-        assert interrupted.data["dropped_request_ids"] == [queued_id]
+        assert interrupted.data["dropped_request_ids"] == [preparing_id, queued_id]
         observer.watch.assert_never(["user_message_committed", "turn_started"])
         assert not probe.requests_for(MODEL)
 
@@ -417,3 +507,89 @@ async def test_interrupt_distinguishes_preparing_and_queued_input(probe: Probe) 
         sync = await observer.watch.expect("sync_session")
         assert sync.data["messages"] == sync.data["pending_user_messages"] == []
     assert (await session.chat("try again")).data["result"] == "recovered"
+
+
+@pytest.mark.probe_env(models=[MODEL])
+async def test_empty_ordinary_input_is_rejected_on_both_transports(
+    probe: Probe,
+) -> None:
+    probe.register(MODEL, Turn.of(text="recovered"))
+    session = await probe.session(model=MODEL)
+    with pytest.raises(DriverHttpError) as failure:
+        await session.driver.http.request(
+            "POST",
+            "/api/session/send",
+            body={
+                "session_id": session.session_id,
+                "content": "",
+                "request_id": "http-empty",
+            },
+        )
+    assert failure.value.call.status == 400
+    empty_id = await session.send("")
+    event = await session.watch.expect("error", where={"request_id": empty_id})
+    assert "content or media" in event.data["message"]
+    assert (await session.get())["messages"] == []
+    session.watch.assert_never(["user_message_queued", "user_message_committed"])
+    assert (await session.chat("valid")).data["result"] == "recovered"
+
+
+@pytest.mark.probe_env(models=[VISION_MODEL])
+async def test_rewind_to_steer_preserves_tool_media(probe: Probe) -> None:
+    (probe.workspace / "tool.png").write_bytes(PNG)
+    probe.register(
+        MODEL,
+        Turn.of(
+            tool_calls=[
+                _ask_call(),
+                ToolCall("ReadImage", {"path": "tool.png"}, id="call_image"),
+            ]
+        ),
+        Turn.of(text="steered"),
+        Turn.of(text="after rewind"),
+    )
+    session = await probe.session(model=MODEL, tools=["AskUserQuestion", "ReadImage"])
+    await session.send("begin")
+    ask = await session.watch.expect("ask")
+    steer_id = await session.send("follow up")
+    await session.watch.expect(
+        "user_message_queued", where={"origin_request_id": steer_id}
+    )
+    await session.answer(ask, "Choice: one")
+    committed = await session.watch.expect(
+        "user_message_committed", where={"origin_request_ids": [steer_id]}
+    )
+    await session.watch.expect("done")
+
+    target = committed.data["message_uuid"]
+    before = probe.history(session)
+    image_tool = before.messages()[-3]
+    assert image_tool["tool_call_id"] == "call_image"
+    assert image_tool["media"]
+    assert (await session.rewind(target))["draft"] == "follow up"
+    after = probe.history(session)
+    material = assert_rewind_transition(before, after, target)
+    assert material["source_uuid"] == image_tool["uuid"]
+    tool = after.messages()[-1]
+    assert [tool[key] for key in ("content", "tool_call_id", "media")] == [
+        image_tool[key] for key in ("content", "tool_call_id", "media")
+    ]
+    async with _subscribe(probe, session) as reader:
+        sync = await reader.watch.expect("sync_session")
+        assert sync.data["messages"][-1]["media"][0]["id"] == tool["media"][0]["id"]
+    assert (await session.chat("continue")).data["result"] == "after rewind"
+    context = probe.context(MODEL, 2)
+    context.assert_tool_pairing()
+    tool_results = context.messages_of("tool")
+    assert [(m.tool_call_id, m.content) for m in tool_results][-1] == (
+        "call_image",
+        image_tool["content"],
+    )
+    images = [
+        part["image_url"]["url"]
+        for message in context.body["messages"]
+        if isinstance(message["content"], list)
+        for part in message["content"]
+        if part.get("type") == "image_url"
+    ]
+    assert [base64.b64decode(url.split(",", 1)[1]) for url in images] == [PNG]

@@ -235,12 +235,29 @@ class TestSteerAcceptance:
         )
 
     @pytest.mark.asyncio
-    async def test_steer_disabled_defers_to_next_turn(self, runtime: Any):
-        """steer 关闭时消息留在 inbox，由下一轮 run_turn 发射。"""
+    @pytest.mark.parametrize("prepare_error", [False, True])
+    async def test_unavailable_steer_defers_to_next_turn(
+        self, runtime: Any, monkeypatch: pytest.MonkeyPatch, prepare_error: bool
+    ):
+        """配置关闭或启动下次调用之前的准备失败时，下轮消费同一条输入。"""
         session = runtime.create_session()
         agent = session.agent
         await _stop_worker(agent)
-        agent._loop.steer = False
+        agent._loop.steer = prepare_error
+        if prepare_error:
+            original = agent.context_manager.append_with_pending_compact
+            failed = False
+
+            def fail_once(message, tools):
+                nonlocal failed
+                if message.content == "next turn" and not failed:
+                    failed = True
+                    raise OSError("compact preparation failed")
+                return original(message, tools)
+
+            monkeypatch.setattr(
+                agent.context_manager, "append_with_pending_compact", fail_once
+            )
 
         async def _echo(input: str = "") -> str:
             _put(agent, "next turn", "req-late")
@@ -287,7 +304,8 @@ class TestSteerAcceptance:
         _put(agent, "go", "req-0")
         with patch.object(agent.model_provider, "generate", _generate):
             await agent._loop.run_turn()
-            # 第一条消息的 turn 结束后，"next turn" 仍在 inbox
+            assert agent._inbox.has_pending
+            assert not any(e.type == "user_messages_dropped" for e in events)
             assert not any(
                 isinstance(e, UserMessageAcceptedEvent)
                 and e.origin_request_id == "req-late"

@@ -27,6 +27,7 @@ from wing.hooks import hooks
 from wing.request_context import reset_request_context, set_request_context
 from wing.schema import ContentBlock, LLMUsage, Message, usage_wire
 from wing.schema.cache import PURPOSE_MAIN
+from wing.store import HistoryWriteUncertain
 
 from .event_sink import AgentEventSink
 from .inbox import Inbound, Inbox
@@ -60,6 +61,7 @@ class _TurnAccumulator:
     """单次 turn 的累计状态（局部对象，不暴露）。"""
 
     num_turns: int = 0
+    compaction_applied: bool = False
     last_text: str = ""
     usage: LLMUsage = field(default_factory=LLMUsage)
     start_time: float = field(default_factory=time.time)
@@ -147,6 +149,16 @@ class ReActLoop:
         """当前一轮 LLM 调用的流累积状态（None 表示无进行中轮次）。"""
         return self._current_acc
 
+    @property
+    def preparing_input(self) -> bool:
+        return bool(self._preparing_input)
+
+    def preparing_request_ids(self) -> list[str]:
+        return [
+            item.origin_request_id
+            for item in self._pending_items(self._preparing_input)
+        ]
+
     def pending_user_messages(self) -> list[PendingUserMessage]:
         return self._pending_items(self._preparing_input + self._inbox.snapshot())
 
@@ -158,7 +170,14 @@ class ReActLoop:
             if (pending := item.pending_user_message()) is not None
         ]
 
-    async def _commit_user_batch(self, batch: list[Inbound]) -> Message | None:
+    async def _commit_user_batch(
+        self,
+        batch: list[Inbound],
+        ctx: _TurnAccumulator,
+        *,
+        next_turn_index: int,
+        steer: bool = False,
+    ) -> Message | None:
         users = [item.message for item in batch if item.message.role == "user"]
         content = "\n".join(msg.content for msg in users if msg.content)
         media = [ref for msg in users for ref in (msg.media or [])]
@@ -169,6 +188,7 @@ class ReActLoop:
         origin_ids = [item.origin_request_id for item in pending]
         # The drained batch remains visible until the hook and append settle.
         self._preparing_input = batch
+        suppress_drop = False
         try:
             modified = await hooks.invoke_async("before_user_message", content)
             task = asyncio.current_task()
@@ -178,18 +198,45 @@ class ReActLoop:
                 content = modified
             require_utf8(content, field="message content")
             message = Message(role="user", content=content, media=media or None)
-            self._cm.add_message(message)
-        except BaseException:
-            with self._sink.best_effort():
-                self._sink.user_messages_dropped(origin_ids)
+            can_call = self._can_call_llm(next_turn_index)
+            if steer and not can_call:
+                self._inbox.prepend(batch)
+                suppress_drop = True
+                return None
+            if can_call:
+                try:
+                    if steer:
+                        self._current_provider()
+                    ctx.compaction_applied = self._cm.append_with_pending_compact(
+                        message, self._current_tools
+                    )
+                except HistoryWriteUncertain:
+                    raise
+                except Exception:
+                    if steer:
+                        self._inbox.prepend(batch)
+                        suppress_drop = True
+                    raise
+            if not ctx.compaction_applied:
+                self._cm.add_message(message)
+        except HistoryWriteUncertain:
+            # Indeterminate appends are reconciled from an authoritative snapshot.
+            suppress_drop = True
             raise
+        else:
+            suppress_drop = True
         finally:
             self._preparing_input = []
+            if not suppress_drop:
+                with self._sink.best_effort():
+                    self._sink.user_messages_dropped(origin_ids)
 
         self._sink.user_message_committed(message, origin_ids)
         with self._sink.best_effort():
             for item in pending:
                 self._sink.user_message_accepted(item.content, item.origin_request_id)
+        if ctx.compaction_applied:
+            self._cm.publish_compaction_sync()
         return message
 
     def _can_call_llm(self, num_turns: int) -> bool:
@@ -205,7 +252,9 @@ class ReActLoop:
         token = set_request_context(request_id=first.request_id, session_id=self._cm.id)
         ctx = _TurnAccumulator()
         try:
-            message = await self._commit_user_batch(batch)
+            message = await self._commit_user_batch(
+                batch, ctx, next_turn_index=ctx.num_turns
+            )
             if message is None:
                 return
             self._sink.turn_started()
@@ -297,10 +346,13 @@ class ReActLoop:
         if (
             interrupted_exc is None
             and pending_tool_calls
+            and self._inbox.has_pending
             and self.steer
             and self._can_call_llm(ctx.num_turns + 1)
         ):
-            await self._commit_user_batch(self._inbox.drain())
+            await self._commit_user_batch(
+                self._inbox.drain(), ctx, next_turn_index=ctx.num_turns + 1, steer=True
+            )
 
         count, tokens = self._cm.get_context_stats()
         ctx_window = self._cm.context_window_tokens
@@ -346,11 +398,14 @@ class ReActLoop:
         # 触发后台 compact 用触发时刻的 provider / options 快照（compact 是
         # 预计算：允许因 reload 退场而失败——下一轮重新触发）。CM 把 system 侧
         # 分段交回来（cache_parts），与**发送时刻**解析出的探针一起交给 provider。
+        compaction_applied = ctx.compaction_applied
+        ctx.compaction_applied = False
         llm_result = await self._cm.get_messages_for_llm(
             model=model,
             model_provider=self._current_provider(),
             current_tools=self._current_tools,
             options=self._current_options(),
+            compaction_applied=compaction_applied,
         )
         # 发送时刻重新解析（晚解析纪律）：「解析 → 首次迭代」之间 MUST 无
         # await（此处到 `_call_llm` 进入流迭代全是同步代码）——池换新与

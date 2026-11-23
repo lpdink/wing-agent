@@ -29,12 +29,12 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Collection
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
 
 from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
 from wing.common.utils import is_valid_session_id, validate_session_id
-from wing.store.base import MessageLog, SessionStore
+from wing.store.base import HistoryWriteUncertain, MessageLog, SessionStore
 from wing.store.models import (
     ArchivedSession,
     FileRef,
@@ -64,14 +64,23 @@ def _is_same_entry(candidate: Path, target: Path) -> bool:
         return False
 
 
+class _HistoryTails:
+    """Byte boundaries shared by the event-loop writer and cold readers."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.offsets: dict[Path, int] = {}
+
+
 class FileMessageLog(MessageLog):
     """文件消息日志：history.jsonl（append+fsync）。"""
 
     _HISTORY = "history.jsonl"
 
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, tails: _HistoryTails | None = None) -> None:
         self._path = Path(path)
         self._sealed = False
+        self._tails = tails if tails is not None else _HistoryTails()
 
     @property
     def path(self) -> Path:
@@ -97,14 +106,23 @@ class FileMessageLog(MessageLog):
         hist = self._path / self._HISTORY
         if not hist.exists():
             return
-        with open(hist, "r", encoding="utf-8") as f:
-            for line in f:
+        with open(hist, "rb") as f:
+            with self._tails.lock:
+                remaining = self._tails.offsets.get(self._path)
+                if remaining is None:
+                    remaining = os.fstat(f.fileno()).st_size
+            # Freeze the readable prefix before iterating without holding the writer lock.
+            while remaining:
+                line = f.readline(remaining)
+                if not line:
+                    return
+                remaining -= len(line)
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     record = json.loads(line)
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     continue
                 if isinstance(record, dict):
                     yield record
@@ -134,25 +152,44 @@ class FileMessageLog(MessageLog):
             return
         blobs = [json.dumps(r, ensure_ascii=False).encode("utf-8") for r in records]
         self._path.mkdir(parents=True, exist_ok=True)
-        history = self._path / self._HISTORY
-        start = None
-        try:
-            with open(history, "ab") as f:
-                start = f.tell()
+        with open(self._path / self._HISTORY, "ab") as f:
+            with self._tails.lock:
+                previous = self._tails.offsets.get(self._path)
+                start = f.tell() if previous is None else previous
+                self._tails.offsets[self._path] = start
+            if previous is not None:
+                try:
+                    self._restore_tail(f, previous)
+                except OSError as exc:
+                    raise HistoryWriteUncertain(
+                        "history requires tail recovery"
+                    ) from exc
+            try:
                 for blob in blobs:
                     f.write(blob)
                     f.write(b"\n")
                 f.flush()
                 os.fsync(f.fileno())
-        except OSError:
-            # A buffered flush or fsync can fail after bytes reach the file.
-            # SessionStore owns the append stream, so truncate back to its prior tip.
-            if start is not None:
+            except OSError:
                 try:
-                    os.truncate(history, start)
-                except OSError:
-                    log.exception("Failed to roll back history append: %s", history)
-            raise
+                    self._restore_tail(f, start)
+                except OSError as rollback_error:
+                    raise HistoryWriteUncertain(
+                        f"history append could not be rolled back at offset {start}"
+                    ) from rollback_error
+                with self._tails.lock:
+                    self._tails.offsets.pop(self._path)
+                raise
+            with self._tails.lock:
+                self._tails.offsets.pop(self._path)
+
+    @staticmethod
+    def _restore_tail(f: BinaryIO, offset: int) -> None:
+        f.flush()
+        if os.fstat(f.fileno()).st_size < offset:
+            raise OSError("history ends before its recovery offset")
+        os.ftruncate(f.fileno(), offset)
+        os.fsync(f.fileno())
 
     # ── aux kv ────────────────────────────────
 
@@ -200,6 +237,7 @@ class FileSessionStore(SessionStore):
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
+        self._history_tails = _HistoryTails()
         # 批量索引窗口（`index_batch`）：非 None 时索引操作按序攒在这里
         # （``(kind, id, entry)``，kind ∈ {"upsert", "remove"}），窗口结束按序重放。
         # **必须有序**：同一个 id 在窗口内可能 archive → unarchive → archive，
@@ -268,7 +306,7 @@ class FileSessionStore(SessionStore):
     # ── log ───────────────────────────────────
 
     def open_log(self, session_id: str) -> FileMessageLog:
-        return FileMessageLog(self._session_dir(session_id))
+        return FileMessageLog(self._session_dir(session_id), self._history_tails)
 
     # ── 媒体字节（内容寻址，session 私有）─────────
 
@@ -683,6 +721,11 @@ class FileSessionStore(SessionStore):
         """移入归档区 + 登记索引（见基类契约；rename 与索引更新同一次调用）。"""
         safe_id = validate_session_id(session_id)
         live = self._root / safe_id
+        with self._history_tails.lock:
+            if live in self._history_tails.offsets:
+                raise HistoryWriteUncertain(
+                    "history requires tail recovery before archive"
+                )
         if not live.is_dir():
             raise FileNotFoundError(f"session dir not found: {live}")
         target = self._archive_root() / safe_id

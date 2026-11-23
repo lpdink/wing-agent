@@ -16,6 +16,7 @@ import asyncio
 import json
 import socket
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -59,6 +60,17 @@ WRITE_TIMEOUT_SECONDS = 60.0
 
 # 回收时关闭连接的上界（秒）：对手正是"不读的客户端"，回收路径自己不能挂住。
 CLOSE_TIMEOUT_SECONDS = 5.0
+
+# Account for escaping in chunk envelopes in addition to the 64 MiB reassembled payload.
+MAX_PENDING_EVENT_BYTES = 128 * 1024 * 1024
+
+
+@dataclass
+class _EventSender:
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    pending_bytes: int = 0
+    recycling: bool = False
+
 
 # 用量目录回填的周期（秒）：首轮在启动后第一个 tick，之后每天一次（差集语义，幂等）。
 CATALOG_BACKFILL_INTERVAL_SECONDS = 86400.0
@@ -160,7 +172,7 @@ class GatewayServer:
         self._in_setup_mode = True
         self._client_to_ws: dict[str, WebSocket] = {}
         self._ws_to_client: dict[WebSocket, str] = {}
-        self._event_send_locks: dict[WebSocket, asyncio.Lock] = {}
+        self._event_senders: dict[WebSocket, _EventSender] = {}
         self._remote_tools = RemoteToolManager()
         # 后台周期任务宿主（job：空闲会话逐出 + 过期会话自动归档）。interval 在
         # **进入正常模式**时读取一次——config 热重载不改变已注册 job 的间隔；
@@ -526,11 +538,44 @@ class GatewayServer:
     def _schedule_send(self, ws: WebSocket, frames: list[Frame], of_type: str) -> None:
         """调度一个事件的投递（每事件一次 task，同一事件的帧在该 task 内按序发出）。"""
         try:
-            asyncio.get_running_loop().create_task(
-                self._send_frames(ws, frames, of_type)
-            )
+            loop = asyncio.get_running_loop()
         except RuntimeError:
-            pass  # 无运行中的事件循环（进程收尾）——与既有行为一致
+            return
+        if ws not in self._ws_to_client:
+            return
+        sender = self._event_senders.get(ws)
+        if sender is None:
+            sender = self._event_senders[ws] = _EventSender()
+        if sender.recycling:
+            return
+        size = sum(frame.size for frame in frames)
+        if (
+            sender.pending_bytes
+            and sender.pending_bytes + size > MAX_PENDING_EVENT_BYTES
+        ):
+            sender.recycling = True
+            loop.create_task(
+                self._recycle_client(ws, "event backlog exceeds byte limit")
+            )
+            return
+        sender.pending_bytes += size
+        loop.create_task(self._send_event(ws, sender, frames, of_type, size))
+
+    async def _send_event(
+        self,
+        ws: WebSocket,
+        sender: _EventSender,
+        frames: list[Frame],
+        of_type: str,
+        size: int,
+    ) -> None:
+        # Keep all fragments adjacent for clients reassembling one event at a time.
+        try:
+            async with sender.lock:
+                if not sender.recycling and ws in self._ws_to_client:
+                    await self._send_frames(ws, frames, of_type)
+        finally:
+            sender.pending_bytes -= size
 
     def _receives_events(self, client_id: str) -> bool:
         """client 是否接收事件。tool_runtime（attached 且 receives_events=False）
@@ -559,7 +604,7 @@ class GatewayServer:
         if client_id is None:
             return None
         self._client_to_ws.pop(client_id, None)
-        self._event_send_locks.pop(ws, None)
+        self._event_senders.pop(ws, None)
         event_bus.route_detach_client(client_id)
         if self._remote_tools.is_attached(client_id):
             # 在途调用立即失败 + 注销远程工具（敏锐检测断连）
@@ -594,25 +639,16 @@ class GatewayServer:
         客户端被回收后（写超时 / 写失败）立即停止剩余帧——不产生二次回收、
         不产生重复失败日志。
         """
-        if ws not in self._ws_to_client:
-            return
-        lock = self._event_send_locks.get(ws)
-        if lock is None:
-            lock = self._event_send_locks[ws] = asyncio.Lock()
-        # Keep adjacent chunked events contiguous for clients reassembling one event at a time.
-        async with lock:
-            client_id = self._ws_to_client.get(ws)
-            if client_id is None:
+        client_id = self._ws_to_client.get(ws, "unknown")
+        for frame in frames:
+            if frame.size > HARD_LIMIT_BYTES:
+                log.warning(
+                    f"Dropping oversized frame for client {client_id}: "
+                    f"type={of_type} size={frame.size} > {HARD_LIMIT_BYTES}"
+                )
+                continue
+            if not await self._send_text(ws, frame.text):
                 return
-            for frame in frames:
-                if frame.size > HARD_LIMIT_BYTES:
-                    log.warning(
-                        f"Dropping oversized frame for client {client_id}: "
-                        f"type={of_type} size={frame.size} > {HARD_LIMIT_BYTES}"
-                    )
-                    continue
-                if not await self._send_text(ws, frame.text):
-                    return
 
     async def _send_text(self, ws: WebSocket, data: str) -> bool:
         """异步发送文本到 ws——有界等待，超时/失败即回收该客户端。

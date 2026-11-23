@@ -34,9 +34,11 @@ import pytest
 
 from wing_probe import (
     PENDING_KEY,
+    Driver,
     LoggedRequest,
     Probe,
     Session,
+    ToolCall,
     Turn,
     Usage,
     assert_compact_transition,
@@ -48,6 +50,7 @@ from wing_probe.history.view import COMPACT_PREFIX, HistoryView
 #: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
 EARLY_MODEL = "probe/auto-compact-early"
 RESTART_MODEL = "probe/auto-compact-restart"
+STEER_MODEL = "probe/auto-compact-steer"
 
 #: 上下文窗口旋钮（模型声明）：compact_window = 1000 - 400 = 600 tokens。
 #: 首轮无服务端 usage 时走本地估算（system + 一条 user ≈ 46 tokens）→ 不触发。
@@ -229,6 +232,97 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
         "delta",
         "post compact reply",
     ], final.describe()
+
+    commit = session.watch.events("user_message_committed", where={"content": "delta"})[
+        0
+    ]
+    uuid = commit.data["message_uuid"]
+    sync = session.watch.events("sync_session")[-1]
+    assert commit.index < sync.index
+    assert [m["uuid"] for m in sync.data["messages"] if m["content"] == "delta"] == [
+        uuid
+    ]
+    assert [m["uuid"] for m in final.messages() if m["content"] == "delta"] == [uuid]
+
+
+@pytest.mark.probe_env(
+    models=[STEER_MODEL],
+    context_window_tokens=CONTEXT_WINDOW,
+    keep_recent_tokens=KEEP_RECENT,
+)
+@pytest.mark.asyncio
+async def test_steer_input_commits_with_compaction_and_replays_the_same_uuid(
+    probe: Probe,
+) -> None:
+    ask = ToolCall(
+        "AskUserQuestion",
+        {
+            "questions": [
+                {
+                    "id": "choice",
+                    "header": "Choice",
+                    "question": "Continue?",
+                    "options": [{"label": "yes"}, {"label": "no"}],
+                }
+            ]
+        },
+        id="call_compact_steer",
+    )
+    probe.register(
+        STEER_MODEL,
+        Turn.of(text="reply one", usage=_usage(0)),
+        Turn.of(text="reply two", usage=_usage(1)),
+        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=_usage(1)),
+        Turn.of(text=SUMMARY_LOOKING_TEXT, usage=_usage(1)),
+        Turn.of(tool_calls=[ask], usage=_usage(2)),
+        Turn.of(text="finished", usage=_usage(3)),
+    )
+    session = await probe.session(model=STEER_MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    await session.chat("gamma")
+    await wait_pending(probe, session)
+
+    await session.send("run a tool before continuing")
+    question = await session.watch.expect("ask")
+    # Even after compaction the request will be over the early threshold locally.
+    text = "Please check the remaining details. " * 500
+    request_id = await session.send(text)
+    await session.watch.expect(
+        "user_message_queued", where={"origin_request_id": request_id}
+    )
+    await session.answer(question, "Choice: yes")
+    commit = await session.watch.expect(
+        "user_message_committed", where={"origin_request_ids": [request_id]}
+    )
+    live = await session.watch.expect("sync_session")
+    await session.watch.expect("done")
+    assert len(_compact_calls(probe, STEER_MODEL)) == 1
+    assert probe.history(session).aux(PENDING_KEY) is None
+    follow_up = _streamed(probe, STEER_MODEL)[-1].context()
+    follow_up.assert_tool_pairing()
+    assert follow_up.messages[-2].tool_call_id == "call_compact_steer"
+    assert follow_up.messages[-1].content == text
+
+    view = probe.history(session)
+    uuid = commit.data["message_uuid"]
+    assert view.by_uuid[uuid]["content"] == text
+    assert [m["uuid"] for m in live.data["messages"] if m["content"] == text] == [uuid]
+    assert live.data["pending_user_messages"] == []
+    compact_node, boundary = _boundary_of(probe, session)
+    assert compact_node["usage_boundary_uuid"] == uuid
+    assert boundary is not None and boundary["content"] == text
+
+    driver = await Driver.connect(probe.env)
+    try:
+        reader = await driver.attach(session.session_id)
+        sync = await reader.watch.expect("sync_session")
+        assert [m["uuid"] for m in sync.data["messages"] if m["content"] == text] == [
+            uuid
+        ]
+        assert sync.data["pending_user_messages"] == []
+    finally:
+        await driver.close()
 
 
 @pytest.mark.probe_env(

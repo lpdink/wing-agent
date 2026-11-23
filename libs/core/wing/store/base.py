@@ -32,9 +32,14 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
+    "HistoryWriteUncertain",
     "MessageLog",
     "SessionStore",
 ]
+
+
+class HistoryWriteUncertain(OSError):
+    """A history write failed and the previous durable tail could not be restored."""
 
 
 class MessageLog(ABC):

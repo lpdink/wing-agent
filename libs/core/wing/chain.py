@@ -224,11 +224,16 @@ class TrackedList(Generic[T]):
 
         调用方已自行设置好拓扑关系时使用（compact/rewind 场景）。
         """
-        self._check_type([item])
-        self._persist_append([item])
-        self._data.append(item)
-        self._last_uuid = item.uuid
-        self._update_memory(item)
+        self.extend_detached([item])
+
+    def extend_detached(self, items: list[T]) -> None:
+        """Append prelinked nodes as one log batch."""
+        self._check_type(items)
+        self._persist_append(items)
+        self._data.extend(items)
+        for item in items:
+            self._last_uuid = item.uuid
+            self._update_memory(item)
 
     def set_tip(self, uuid: str) -> None:
         """将活跃链末尾切换到指定 uuid。

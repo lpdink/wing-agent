@@ -388,6 +388,39 @@ class TestChunkedDelivery:
 
         assert "slow-client" not in event_bus.routing_table
 
+    async def test_event_backlog_recycles_only_the_slow_connection(self, monkeypatch):
+        monkeypatch.setattr("wing.gateway.server.MAX_PENDING_EVENT_BYTES", 1200)
+        server = _make_server()
+        slow = _RecordingWs()
+        fast = _RecordingWs()
+        _register(server, _as_ws(slow), "slow")
+        _register(server, _as_ws(fast), "fast")
+        entered = asyncio.Event()
+        blocked = asyncio.Event()
+        original_send = slow.send_text
+
+        async def slow_send(data: str) -> None:
+            await original_send(data)
+            if len(slow.sent) > 1:
+                entered.set()
+                await blocked.wait()
+
+        monkeypatch.setattr(slow, "send_text", slow_send)
+        try:
+            for index in range(8):
+                server._on_event(_notice(f"{index}:" + "x" * 360))
+                await wait_until_async(lambda: len(fast.sent) > index)
+                if index == 1:
+                    await asyncio.wait_for(entered.wait(), timeout=1)
+            await wait_until_async(lambda: "slow" not in server.clients)
+            assert len(slow.sent) == 2
+            assert [json.loads(frame)["message"][0] for frame in fast.sent] == list(
+                "01234567"
+            )
+            assert slow.close_calls == [(1013, "slow consumer")]
+        finally:
+            blocked.set()
+
     async def test_small_events_keep_the_single_frame_path(self):
         """小事件必须与既有实现逐字节一致（不包装、不切分）。"""
         server = _make_server()

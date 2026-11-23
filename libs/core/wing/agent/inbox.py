@@ -15,6 +15,7 @@ from collections import deque
 from dataclasses import dataclass
 
 from wing.common.logger import log, log_excerpt
+from wing.common.utils import InvalidInputError
 from wing.event import PendingUserMessage
 from wing.schema import MediaRef, Message
 
@@ -90,6 +91,11 @@ class Inbox:
     def _enqueue(self, item: Inbound) -> None:
         self._queue.append(item)
         if not self._held:
+            self._ready.set()
+
+    def prepend(self, items: list[Inbound]) -> None:
+        self._queue.extendleft(reversed(items))
+        if self._queue and not self._held:
             self._ready.set()
 
     def drain(self) -> list[Inbound]:
@@ -203,6 +209,8 @@ class Inbox:
                 f"{tool_call_id}, falling through to queue"
             )
 
+        if role == "user" and not (content or media):
+            raise InvalidInputError("message content or media is required")
         msg = Message(role=role, content=content, media=media)  # ty: ignore
         item = Inbound(message=msg, request_id=request_id)
         self._enqueue(item)
