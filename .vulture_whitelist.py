@@ -22,6 +22,8 @@ workdir
 skills_info
 service
 default_agent
+# Rust CLI and TUI use this flag before displaying reload diagnostics.
+diagnostics_redacted
 
 # 链上事件与工具 schema 字段
 created_at

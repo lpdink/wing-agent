@@ -1828,7 +1828,7 @@ fn a_gateway_save_holds_the_model_draft_until_the_receipt_and_retries_failure() 
     else {
         panic!("expected a retry");
     };
-    assert_eq!(gateway, retry);
+    assert_eq!(*gateway, *retry);
     record_pending_interface(&mut app, InterfaceSaveReport::Skipped);
     app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
         true,
