@@ -236,7 +236,7 @@ class ReActLoop:
             for item in pending:
                 self._sink.user_message_accepted(item.content, item.origin_request_id)
         if ctx.compaction_applied:
-            self._cm.publish_compaction_sync()
+            self._cm.publish_history_refresh()
         return message
 
     def _can_call_llm(self, num_turns: int) -> bool:
@@ -251,6 +251,7 @@ class ReActLoop:
 
         token = set_request_context(request_id=first.request_id, session_id=self._cm.id)
         ctx = _TurnAccumulator()
+        refresh_history = False
         try:
             message = await self._commit_user_batch(
                 batch, ctx, next_turn_index=ctx.num_turns
@@ -289,6 +290,7 @@ class ReActLoop:
         except Exception as e:
             from wing.common.utils import format_exception_chain
 
+            refresh_history = isinstance(e, HistoryWriteUncertain)
             error_detail = format_exception_chain(e)
             log.exception(f"处理消息失败: {error_detail}")
             # 上报窗口（#187）：收尾动作与它报告的故障同源——落盘失败时
@@ -313,6 +315,8 @@ class ReActLoop:
             if self._set_working:
                 self._set_working(False)
             reset_request_context(token)
+            if refresh_history:
+                self._cm.publish_history_refresh()
 
     async def _llm_turn(self, ctx: _TurnAccumulator) -> bool:
         """执行一轮 LLM 生成 + 工具执行。

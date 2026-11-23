@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -237,12 +238,83 @@ async def test_early_compact_persists_then_applies(probe: Probe) -> None:
         0
     ]
     uuid = commit.data["message_uuid"]
-    sync = session.watch.events("sync_session")[-1]
+    sync = session.watch.events("session_history_refreshed")[-1]
     assert commit.index < sync.index
+    assert len(session.watch.events("sync_session")) == 1
     assert [m["uuid"] for m in sync.data["messages"] if m["content"] == "delta"] == [
         uuid
     ]
     assert [m["uuid"] for m in final.messages() if m["content"] == "delta"] == [uuid]
+
+
+@pytest.mark.probe_env(
+    models=[EARLY_MODEL],
+    context_window_tokens=CONTEXT_WINDOW,
+    keep_recent_tokens=KEEP_RECENT,
+    hooks=["hooks/*.py"],
+)
+@pytest.mark.asyncio
+async def test_refresh_leaves_old_subscriber_pending_input_addressable(
+    probe: Probe,
+) -> None:
+    hook_dir = probe.env.root / "hooks"
+    hook_dir.mkdir()
+    (hook_dir / "gate.py").write_text(
+        """
+import asyncio
+from pathlib import Path
+
+from wing.hooks import hooks
+
+@hooks.on("before_user_message")
+async def hold_delta(content):
+    if content == "delta":
+        Path("delta-waiting").touch()
+        while not Path("delta-release").exists():
+            await asyncio.sleep(0.02)
+""",
+        encoding="utf-8",
+    )
+    assert (await probe.driver_required.http.request("POST", "/api/system/reload"))[
+        "ok"
+    ]
+    probe.register(EARLY_MODEL, *_script(), Turn.of(text="reply to queued input"))
+    session = await probe.session(model=EARLY_MODEL)
+    await session.chat("alpha")
+    await session.chat("beta")
+    await session.chat("gamma")
+    await wait_pending(probe, session)
+
+    old_driver = await Driver.connect(probe.env)
+    try:
+        old_view = await old_driver.attach(session.session_id)
+        await old_view.watch.expect("sync_session")
+        await session.send("delta")
+        async with asyncio.timeout(5):
+            while not (probe.env.root / "delta-waiting").exists():
+                await asyncio.sleep(0.02)
+        queued_id = await old_view.send("still queued")
+        await old_view.watch.expect(
+            "user_message_queued", where={"origin_request_id": queued_id}
+        )
+        (probe.env.root / "delta-release").touch()
+
+        refresh = await old_view.watch.expect("session_history_refreshed")
+        assert refresh.data["pending_user_messages"] == [
+            {"origin_request_id": queued_id, "content": "still queued", "media": []}
+        ]
+        assert [m["content"] for m in refresh.data["messages"]][-1] == "delta"
+        await old_view.watch.expect(
+            "user_message_accepted", where={"origin_request_id": queued_id}
+        )
+        result = await old_view.watch.expect(
+            "turn_result", where={"result": "reply to queued input"}
+        )
+        assert result.data["subtype"] == "success"
+        # Legacy subscribers ignore the refresh type and receive no mid-turn replacement.
+        assert len(old_view.watch.events("sync_session")) == 1
+    finally:
+        await old_driver.close()
 
 
 @pytest.mark.probe_env(
@@ -295,7 +367,7 @@ async def test_steer_input_commits_with_compaction_and_replays_the_same_uuid(
     commit = await session.watch.expect(
         "user_message_committed", where={"origin_request_ids": [request_id]}
     )
-    live = await session.watch.expect("sync_session")
+    live = await session.watch.expect("session_history_refreshed")
     await session.watch.expect("done")
     assert len(_compact_calls(probe, STEER_MODEL)) == 1
     assert probe.history(session).aux(PENDING_KEY) is None

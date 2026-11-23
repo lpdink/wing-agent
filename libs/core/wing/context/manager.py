@@ -80,7 +80,7 @@ class ContextManager:
 
         self._session_id = session_id
         self._messages = messages
-        self.on_auto_compact: Callable[[], None] | None = None
+        self.on_history_refresh: Callable[[], None] | None = None
         self._workspace = Path(workspace).resolve() if workspace else None
 
         self._skills_patterns = skills_patterns or []
@@ -468,7 +468,7 @@ class ContextManager:
         # ── Step 1: 有预计算结果？尝试 apply ──
         if self._pending_compact_result is not None:
             if self._try_apply_pending_compact(msgs, server_tokens, current_tools):
-                self.publish_compaction_sync()
+                self.publish_history_refresh()
                 return result(self.get_context_window())
             if self._pending_compact_result is not None:
                 return result(msgs)
@@ -524,9 +524,9 @@ class ContextManager:
         self._sync_declared_tools(tools)
         return True
 
-    def publish_compaction_sync(self) -> None:
-        if self.on_auto_compact is not None:
-            self.on_auto_compact()
+    def publish_history_refresh(self) -> None:
+        if self.on_history_refresh is not None:
+            self.on_history_refresh()
 
     # ── 异步 compact 内部方法 ─────────────────────
 

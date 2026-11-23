@@ -385,7 +385,7 @@ killpg 也 `start_new_session=True`（自成会话），所以**不在**那个�
 
 `probe.without_invariants(reason="...")` 关闭本场景的 teardown 不变量——**必须给理由**：理由写进 `artifacts/dump.txt` 并在终端汇总回显，空理由直接报错。用于"场景有意制造非法中间态"（例如断言失败路径的中间产物），不得用于掩盖真实失败。已发生的实例与理由：
 
-- 注入落盘故障的场景（`scenarios/test_worker_resilience.py`）断言丢弃事件只包含失败批次的请求 ID，历史仍指向最后一次成功追加，消费者可继续处理后续输入。若追加与回截连续失败，网关报告 I/O 结果不明。文件后端保留进程内可信偏移供冷读，后续写入先在同一文件上回截并同步。重新启动会丢失内存偏移，文件尾部结果仍可能不确定。
+- 注入落盘故障的场景（`scenarios/test_worker_resilience.py`）断言丢弃事件只包含失败批次的请求 ID，历史仍指向最后一次成功追加，消费者可继续处理后续输入。若追加与回截连续失败，网关报告写入结果不明，再广播 `session_history_refreshed` 对账。冷读只读取可信前缀。存储尽力在故障路径落盘恢复偏移，重启冷读仍只读取此前缀。写入前先回截并同步，再删除恢复偏移并同步目录。故障发生后若恢复偏移也无法确认耐久，重启后的文件尾部仍可能不确定。
 
 
 `probe.allow_arguments_error(reason="...")` 是同一纪律的**窄口径**逃生舱：tool 配对不变量不再把 `arguments_error` 视为违规（用于有意构造"模型吐出坏参数"的场景，见 `scenarios/test_malformed_tool_args.py`；链拓扑与"瞬态记录不落盘"继续强制）。单次断言也可以自行放开：`view.assert_tool_pairing(allow_arguments_error=True)`。

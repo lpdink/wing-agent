@@ -76,10 +76,12 @@ class FileMessageLog(MessageLog):
     """文件消息日志：history.jsonl（append+fsync）。"""
 
     _HISTORY = "history.jsonl"
+    _RECOVERY = ".history-recovery.json"
 
     def __init__(self, path: Path | str, tails: _HistoryTails | None = None) -> None:
         self._path = Path(path)
         self._sealed = False
+        self._recovery_checked = False
         self._tails = tails if tails is not None else _HistoryTails()
 
     @property
@@ -104,13 +106,21 @@ class FileMessageLog(MessageLog):
         消费方（fork 切片 / 标题回退）在 ``record.get`` 上炸掉。
         """
         hist = self._path / self._HISTORY
-        if not hist.exists():
-            return
-        with open(hist, "rb") as f:
-            with self._tails.lock:
-                remaining = self._tails.offsets.get(self._path)
-                if remaining is None:
-                    remaining = os.fstat(f.fileno()).st_size
+        with self._tails.lock:
+            offset = self._known_tail_locked()
+            try:
+                f = open(hist, "rb")
+            except FileNotFoundError as exc:
+                if offset is not None:
+                    raise HistoryWriteUncertain(
+                        "history is missing during recovery"
+                    ) from exc
+                return
+            size = os.fstat(f.fileno()).st_size
+        with f:
+            if offset is not None and size < offset:
+                raise HistoryWriteUncertain("history ends before its recovery offset")
+            remaining = size if offset is None else offset
             # Freeze the readable prefix before iterating without holding the writer lock.
             while remaining:
                 line = f.readline(remaining)
@@ -139,8 +149,7 @@ class FileMessageLog(MessageLog):
           前缀，而 fork 的批量前缀追加失败会留下"有历史没 metadata"的
           幽灵会话（该目录此后会被 list 到）；
         - **不拼大字符串**：fork/compact 的批量前缀动辄 MiB 级，``join``
-          会把同一份数据再复制一遍。逐条写即可——崩溃窗口仍是最后一行
-          可能截断（加载路径跳过损坏行）。
+          会把同一份数据再复制一遍。进程崩溃可能留下完整的批次前缀或截断行。
 
         代价是整批一份编码副本（``blobs``）——批量只出现在 fork / compact
         这类重塑路径上，换 all-or-nothing 划算；逐轮的小批量追加可忽略。
@@ -154,12 +163,14 @@ class FileMessageLog(MessageLog):
         self._path.mkdir(parents=True, exist_ok=True)
         with open(self._path / self._HISTORY, "ab") as f:
             with self._tails.lock:
-                previous = self._tails.offsets.get(self._path)
+                previous = self._known_tail_locked()
                 start = f.tell() if previous is None else previous
                 self._tails.offsets[self._path] = start
             if previous is not None:
                 try:
                     self._restore_tail(f, previous)
+                    (self._path / self._RECOVERY).unlink(missing_ok=True)
+                    self._sync_directory()
                 except OSError as exc:
                     raise HistoryWriteUncertain(
                         "history requires tail recovery"
@@ -174,14 +185,57 @@ class FileMessageLog(MessageLog):
                 try:
                     self._restore_tail(f, start)
                 except OSError as rollback_error:
+                    restart_boundary = self._record_recovery(start)
                     raise HistoryWriteUncertain(
-                        f"history append could not be rolled back at offset {start}"
+                        f"history append could not be rolled back at offset {start}; "
+                        f"write outcome unknown, {restart_boundary}"
                     ) from rollback_error
                 with self._tails.lock:
                     self._tails.offsets.pop(self._path)
                 raise
             with self._tails.lock:
                 self._tails.offsets.pop(self._path)
+
+    def _known_tail_locked(self) -> int | None:
+        offset = self._tails.offsets.get(self._path)
+        if offset is not None or self._recovery_checked:
+            return offset
+        try:
+            offset = json.loads(
+                (self._path / self._RECOVERY).read_text(encoding="utf-8")
+            )
+            if type(offset) is not int or offset < 0:
+                raise ValueError("invalid history recovery offset")
+        except FileNotFoundError:
+            self._recovery_checked = True
+            return None
+        except (OSError, ValueError) as exc:
+            raise HistoryWriteUncertain(
+                "cannot verify history recovery boundary"
+            ) from exc
+        self._tails.offsets[self._path] = offset
+        self._recovery_checked = True
+        return offset
+
+    def requires_recovery(self) -> bool:
+        with self._tails.lock:
+            return self._known_tail_locked() is not None
+
+    def _record_recovery(self, offset: int) -> str:
+        try:
+            atomic_write_json(self._path / self._RECOVERY, offset)
+            self._sync_directory()
+        except OSError:
+            log.exception("Cannot confirm history recovery boundary: %s", self._path)
+            return "restart boundary could not be confirmed"
+        return "recovery boundary saved"
+
+    def _sync_directory(self) -> None:
+        fd = os.open(self._path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     @staticmethod
     def _restore_tail(f: BinaryIO, offset: int) -> None:
@@ -721,11 +775,8 @@ class FileSessionStore(SessionStore):
         """移入归档区 + 登记索引（见基类契约；rename 与索引更新同一次调用）。"""
         safe_id = validate_session_id(session_id)
         live = self._root / safe_id
-        with self._history_tails.lock:
-            if live in self._history_tails.offsets:
-                raise HistoryWriteUncertain(
-                    "history requires tail recovery before archive"
-                )
+        if self.open_log(safe_id).requires_recovery():
+            raise HistoryWriteUncertain("history requires tail recovery before archive")
         if not live.is_dir():
             raise FileNotFoundError(f"session dir not found: {live}")
         target = self._archive_root() / safe_id

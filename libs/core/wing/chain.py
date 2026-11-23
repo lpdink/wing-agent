@@ -12,10 +12,12 @@ TrackedList — 链拓扑引擎，UUID + parentUuid 链模型。
 - 始终以类型化对象工作，存储层传输 raw dict（ts 由本类注入）
 - 内存中维护 full chain map（_all_items），find/trace_chain 从内存读取
 
-已知问题：
-1. 并发不安全。
-2. compact 的 append_detached + set_tip 之间存在崩溃窗口（见 ContextManager
-   中的 TODO(crash-safety)）。彻底修复需要 MessageLog 支持批量原子切换 tip。
+写入与恢复：
+- 写端由会话串行调用。自动压缩通过 extend_detached 批量追加摘要和重链接节点，
+  写入成功后才更新内存并切换 tip。
+- 文件日志追加失败会尝试回截。若回截也失败，存储只暴露确认过的前缀，并尽力记录
+  恢复偏移供重启读取。进程在记录偏移之前退出，或文件系统无法确认写入恢复偏移时，
+  重启可能读到批次的完整前缀。JSONL 批次本身没有跨崩溃的提交标志。
 """
 
 from __future__ import annotations

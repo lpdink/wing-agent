@@ -80,6 +80,7 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = DELTA_EVENT_TYPES | frozenset(
         "user_messages_dropped",
         # event/state_change.py
         "sync_session",
+        "session_history_refreshed",
         "session_state_changed",
         "session_init",
         # event/query_response.py

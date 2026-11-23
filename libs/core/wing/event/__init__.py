@@ -48,6 +48,7 @@ from .react import (
 from .state_change import (
     CompactDoneEvent,
     InterruptedEvent,
+    SessionHistoryRefreshedEvent,
     SessionInitEvent,
     SessionStateChangedEvent,
     SettingsChangedEvent,
@@ -158,6 +159,7 @@ __all__ = [
     "TurnResultEvent",
     # state_change
     "SyncSessionEvent",
+    "SessionHistoryRefreshedEvent",
     "SessionInitEvent",
     "InterruptedEvent",
     "CompactDoneEvent",

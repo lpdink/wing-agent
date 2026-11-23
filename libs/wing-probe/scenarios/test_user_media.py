@@ -624,3 +624,39 @@ async def test_ghost_media_reference_is_rejected(probe: Probe) -> None:
     assert probe.history(session).messages() == [], probe.history(session).describe()
     session.watch.assert_never("delivered")
     session.watch.assert_never("user_message_accepted")
+
+
+@pytest.mark.probe_env(models=[VISION_SPEC])
+@pytest.mark.asyncio
+async def test_inbound_media_integers_fit_rust_and_javascript(probe: Probe) -> None:
+    probe.register(VISION_MODEL, Turn.of(text="saw image"))
+    session = await probe.session(model=VISION_MODEL)
+    http = session.driver.http
+    ref = (await http.upload_media(session.session_id, png(2, 2, tint=0x19)))["media"]
+    for field, value in (("width", 2**32), ("height", -1), ("bytes", 2**53)):
+        invalid = {**ref, field: value}
+        with pytest.raises(DriverHttpError) as failure:
+            await http.request(
+                "POST",
+                "/api/session/send",
+                body={
+                    "session_id": session.session_id,
+                    "content": "",
+                    "media": [invalid],
+                },
+            )
+        assert failure.value.call.status == 400
+        assert field in (failure.value.call.response or {})["detail"]
+        request_id = await session.send("", media=[invalid])
+        error = await session.watch.expect("error", where={"request_id": request_id})
+        assert field in error.data["message"]
+    session.watch.assert_never(["user_message_queued", "user_message_committed"])
+    assert not probe.requests_for(VISION_MODEL)
+
+    accepted_id = await session.send("", media=[ref])
+    commit = await session.watch.expect(
+        "user_message_committed", where={"origin_request_ids": [accepted_id]}
+    )
+    assert commit.data["content"] == "" and commit.data["media"] == [ref]
+    await session.watch.expect("done")
+    assert (await session.get())["messages"][0]["media"] == [ref]
