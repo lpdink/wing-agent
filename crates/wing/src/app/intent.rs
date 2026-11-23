@@ -42,24 +42,38 @@ pub enum FetchPayload {
     /// Skills info display text.
     SkillsInfo(String),
     /// Compact session completed (original_tokens, compressed_tokens).
-    CompactDone { original: i64, compressed: i64 },
+    CompactDone {
+        original: i64,
+        compressed: i64,
+    },
     /// 手动压缩收口（被拒 / 失败 / 未连上），文案已经面向用户。
     ///
     /// 与 `Toast` 分开是因为它还携带**状态**：压缩在飞时发送被拦下，回执一到
     /// 就必须解除拦截（否则会话永远发不出消息）。因此在会话守卫**之前**分派。
-    CompactFailed { message: String },
+    CompactFailed {
+        message: String,
+    },
     /// 设置目录 + 稀疏文档快照（`GET schema` + `GET get`，并发一次拿回）。
     ///
     /// 装箱：`SettingsSchemaResponse` 带着整棵 catalog，是枚举里最大的一档
     /// （`FetchPayload` 会进 mpsc 的缓冲区，别让每个变体都按最大档算大小）。
     Settings {
+        id: u64,
         schema: Box<SettingsSchemaResponse>,
         state: Box<SettingsGetResponse>,
+    },
+    SettingsFetchError {
+        id: u64,
+        message: String,
     },
     /// 一次保存的 Gateway 半边回执（`POST /api/settings/set`）。
     SettingsSaved(Box<SettingsSetResponse>),
     /// Gateway 半边失败：`conflict` 区分 409（指纹冲突）与传输 / 协议错误。
-    SettingsSaveError { message: String, conflict: bool },
+    SettingsSaveError {
+        message: String,
+        conflict: bool,
+        unconfirmed: bool,
+    },
     /// 一条粘贴图片的压缩回执（[`AppIntent::CompressClipboardImage`]）。
     ///
     /// `Err` 是给 toast 的文案（压缩器错误已格式化）。落点靠 `target` 认领：它是
@@ -96,7 +110,10 @@ pub enum FetchPayload {
         outcome: SendOutcome,
     },
     /// Show a toast message (for errors or success feedback from background tasks).
-    Toast { message: String, is_error: bool },
+    Toast {
+        message: String,
+        is_error: bool,
+    },
 }
 
 /// Result of a background fetch intent, delivered via mpsc channel.

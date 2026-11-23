@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -62,7 +63,9 @@ async def test_extra_body_and_reasoning_effort_reach_the_next_request(
     probe: Probe,
 ) -> None:
     """保存 extra_body / reasoning_effort → 假 Provider 的下一个请求体真的带上它们。"""
-    probe.register(APPLY_MODEL, Turn.of(text="before"), Turn.of(text="after"))
+    probe.register(
+        APPLY_MODEL, Turn.of(text="before"), Turn.of(text="after"), Turn.of(text="new")
+    )
     session = await probe.session(model=APPLY_MODEL)
     http = probe.driver_required.http
 
@@ -82,6 +85,9 @@ async def test_extra_body_and_reasoning_effort_reach_the_next_request(
     provider_doc["extra_body"] = {MARKER_KEY: MARKER_VALUE}
     provider_doc["reasoning_effort"] = "high"
 
+    current["values"]["agents"][0]["system_prompt"] = "New chat defaults marker"
+    current["values"]["gateway"]["cors"] = {"origins": ["https://ui.probe.example"]}
+
     receipt = await _save(http, current["fingerprint"], current["values"])
 
     # ③ 回执：ok / 六项 reload 名字序 / changed / restart_required。
@@ -89,6 +95,10 @@ async def test_extra_body_and_reasoning_effort_reach_the_next_request(
     assert receipt["problems"] == [], receipt
     reload_result = receipt["reload"]
     assert reload_result["ok"] is True, reload_result
+    assert reload_result["new_session_defaults_changed"] is True, reload_result
+    assert reload_result["pending_restart_paths"] == ["gateway.cors.origins"], (
+        reload_result
+    )
     assert [item["name"] for item in reload_result["results"]] == RELOAD_ITEMS, (
         reload_result["results"]
     )
@@ -98,8 +108,10 @@ async def test_extra_body_and_reasoning_effort_reach_the_next_request(
     assert set(receipt["changed"]) == {
         "providers[0].extra_body",
         "providers[0].reasoning_effort",
+        "agents[0].system_prompt",
+        "gateway.cors.origins[0]",
     }, receipt["changed"]
-    assert receipt["restart_required"] == [], receipt
+    assert receipt["restart_required"] == ["gateway.cors.origins[0]"], receipt
     assert receipt["setup_mode_exited"] is False, receipt
 
     # ④ 单键 map 落盘后文件仍可解析（修复前这里是非法 YAML）。
@@ -126,3 +138,71 @@ async def test_extra_body_and_reasoning_effort_reach_the_next_request(
         body_after["tools"],
     )
     session.watch.assert_never("error")
+
+    new_session = await probe.session(model=APPLY_MODEL)
+    assert (await new_session.chat("new chat")).data["subtype"] == "success"
+    new_body = probe.request(APPLY_MODEL, 2).body
+    assert "New chat defaults marker" in str(new_body["messages"][0]), new_body
+    assert new_body[MARKER_KEY] == MARKER_VALUE, new_body
+
+
+@pytest.mark.probe_env(models=[APPLY_MODEL])
+@pytest.mark.asyncio
+async def test_saved_config_with_partial_reload_failure_can_be_retried(
+    probe: Probe, tmp_path: Path
+) -> None:
+    probe.register(
+        APPLY_MODEL,
+        Turn.of(text="before"),
+        Turn.of(text="while broken"),
+        Turn.of(text="recovered"),
+    )
+    session = await probe.session(model=APPLY_MODEL)
+    http = probe.driver_required.http
+    assert (await session.chat("warm the provider pool")).data["subtype"] == "success"
+
+    marker = "fake-secret-never-in-receipts"
+    hook = tmp_path / "broken.py"
+    hook.write_text(f"raise RuntimeError({marker!r})", encoding="utf-8")
+    command = tmp_path / "broken.md"
+    command.write_text(f"---\ndescription: {marker}\n---\n", encoding="utf-8")
+    good_command = tmp_path / "working.md"
+    good_command.write_text(
+        "---\nname: remaining-command\n---\nWorks.\n", encoding="utf-8"
+    )
+    current = await _settings(http)
+    document = current["values"]
+    document["hooks"] = [str(hook)]
+    document["commands"] = {"paths": [str(tmp_path / "*.md")]}
+    document["providers"][0].update(
+        api_key=f"{marker}é", extra_body={MARKER_KEY: MARKER_VALUE}
+    )
+    receipt = await _save(http, current["fingerprint"], document)
+    assert receipt["ok"] and not receipt["reload"]["ok"], receipt
+    assert [item["name"] for item in receipt["reload"]["results"]] == RELOAD_ITEMS
+    items = {item["name"]: item for item in receipt["reload"]["results"]}
+    assert {name for name, item in items.items() if not item["ok"]} == {
+        "hooks",
+        "prompt commands",
+        "provider",
+    }
+    assert "1 hook file" in items["hooks"]["detail"]
+    assert "1 prompt command file" in items["prompt commands"]["detail"]
+    assert marker not in str(receipt)
+    saved = await _settings(http)
+    assert saved["fingerprint"] == receipt["fingerprint"]
+    assert saved["values"]["providers"][0]["api_key"] is None
+    assert "remaining-command" in str(await http.request("GET", "/api/commands"))
+
+    assert (await session.chat("cached provider still works")).data[
+        "subtype"
+    ] == "success"
+    assert MARKER_KEY not in probe.request(APPLY_MODEL, 1).body
+
+    document["providers"][0]["api_key"] = "probe-repaired-key"
+    document.pop("hooks")
+    document["commands"]["paths"] = [str(good_command)]
+    repaired = await _save(http, saved["fingerprint"], document)
+    assert repaired["reload"]["ok"]
+    assert (await session.chat("provider reloaded")).data["subtype"] == "success"
+    assert probe.request(APPLY_MODEL, 2).body[MARKER_KEY] == MARKER_VALUE

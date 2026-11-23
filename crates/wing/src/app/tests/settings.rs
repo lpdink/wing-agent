@@ -240,6 +240,7 @@ fn gateway_state(values: Value, fingerprint: &str) -> SettingsGetResponse {
         },
     );
     SettingsGetResponse {
+        pending_restart_paths: None,
         values,
         secrets,
         fingerprint: fingerprint.into(),
@@ -348,10 +349,7 @@ fn last_cell_text(app: &App) -> (bool, String) {
 /// 把 Interface 半边记进"等 Gateway 回执"的槽里 —— 生产里是 runner 干的
 /// （`execute_intent` 的 SaveSettings 臂），回执合并读的就是这一份。
 fn record_pending_interface(app: &mut App, report: InterfaceSaveReport) {
-    app.settings_save = Some(crate::app::settings::PendingSettingsSave {
-        interface: report,
-        document: json!({}),
-    });
+    app.settings_save = Some(report);
 }
 
 fn settings_response(
@@ -918,6 +916,8 @@ fn a_full_save_reports_both_sides_in_one_notice() {
     response.changed = vec!["gateway.port".into(), "gateway.auth.enabled".into()];
     response.restart_required = vec!["gateway.port".into()];
     response.reload = Some(wing_api_client::models::ReloadResponse {
+        pending_restart_paths: Some(vec!["gateway.port".into()]),
+        new_session_defaults_changed: true,
         ok: true,
         results: vec![wing_api_client::models::ReloadResultItem {
             name: "provider".into(),
@@ -942,12 +942,9 @@ fn a_full_save_reports_both_sides_in_one_notice() {
         text.contains("✓ Interface   /home/u/.wing/tui/config.yaml（3 项）"),
         "{text}"
     );
+    assert!(text.contains("✓ Gateway     2 项变更已写入"), "{text}");
     assert!(
-        text.contains("✓ Gateway     2 项变更 · provider rebuilt 2 provider(s)"),
-        "{text}"
-    );
-    assert!(
-        text.contains("⚠ gateway.port 需重启网关才生效 — Ctrl+R 立即重启"),
+        text.contains("⚠ gateway.port 待重启 · Ctrl+R 重启网关"),
         "重启提示的文案：{text}"
     );
     assert!(
@@ -1068,10 +1065,7 @@ fn a_conflict_marks_the_panel_stale_and_points_at_reload() {
         conflict: true,
     });
     let (_, text) = last_cell_text(&app);
-    assert!(
-        text.contains("配置已被其它客户端修改，按 R 重新载入"),
-        "{text}"
-    );
+    assert!(text.contains("设置文件已更改，按 R 重新读取文件"), "{text}");
     assert!(panel(&app).is_stale(), "409 让面板亮起横幅");
 }
 
@@ -1109,7 +1103,7 @@ fn a_save_that_lost_secrets_reports_the_backend_warnings() {
     );
     assert_eq!(
         app.toast.as_ref().map(|t| t.message.as_str()),
-        Some("设置已保存 · 1 条说明（见回执）"),
+        Some("设置已保存\n1 条说明（见回执）"),
         "回执压在面板下面：toast 要指出还有说明可看"
     );
 
@@ -1390,34 +1384,36 @@ fn changed_leaf_paths_counts_added_removed_and_modified_leaves() {
 // ── 12. 缓存回写与面板基线 ────────────────────────────────
 
 #[test]
-fn a_successful_gateway_save_writes_the_document_back_to_the_cache() {
+fn a_successful_gateway_save_invalidates_cache_until_masked_get() {
     let mut app = app_with_settings_panel();
-    let document = json!({"gateway": {"port": 9999}});
-    app.settings_save = Some(crate::app::settings::PendingSettingsSave {
-        interface: InterfaceSaveReport::Skipped,
-        document: document.clone(),
-    });
+    app.settings_save = Some(InterfaceSaveReport::Skipped);
     app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
         true,
         "fp-2",
         vec![],
     )));
-    let (_, cached) = app.settings_cache.as_ref().expect("cache");
-    assert_eq!(cached.values, document);
-    assert_eq!(cached.fingerprint, "fp-2");
+    assert!(app.settings_cache.is_none());
     assert!(app.settings_save.is_none());
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+
+    let mut masked = sample_values();
+    masked["providers"][0]["api_key"] = Value::Null;
+    app.handle_settings_fetch(gateway_schema(), gateway_state(masked.clone(), "fp-2"));
+    let (_, cached) = app.settings_cache.as_ref().expect("masked GET cache");
+    assert_eq!(cached.values, masked);
+    assert_eq!(cached.fingerprint, "fp-2");
 }
 
 #[test]
-fn a_failed_gateway_save_keeps_the_cached_values() {
+fn a_failed_gateway_save_keeps_the_cached_snapshot_and_draft() {
     let mut app = app_with_settings_panel();
-    app.settings_save = Some(crate::app::settings::PendingSettingsSave {
-        interface: InterfaceSaveReport::Skipped,
-        document: json!({"gateway": {"port": 9999}}),
-    });
+    app.settings_save = Some(InterfaceSaveReport::Skipped);
     app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
         false,
-        "fp-1",
+        "new-fingerprint",
         vec![SettingProblem {
             path: Some("gateway.port".into()),
             kind: "invalid_value".into(),
@@ -1426,12 +1422,45 @@ fn a_failed_gateway_save_keeps_the_cached_values() {
         }],
     )));
     let (_, cached) = app.settings_cache.as_ref().expect("cache");
-    assert_eq!(
-        cached.values,
-        sample_values(),
-        "ok=false 时文件没变，缓存的值照旧"
+    assert_eq!(cached.values, sample_values());
+    assert_eq!(cached.fingerprint, "fp-1");
+    assert_eq!(panel(&app).fingerprint(), "fp-1");
+    assert_eq!(panel(&app).view(), View::Problems);
+}
+
+#[test]
+fn persisted_with_failed_application_warns_above_the_open_panel() {
+    let mut app = app_with_settings_panel();
+    let mut response = settings_response(true, "fp-2", vec![]);
+    response.reload = Some(wing_api_client::models::ReloadResponse {
+        pending_restart_paths: Some(vec![]),
+        new_session_defaults_changed: false,
+        ok: false,
+        results: vec![wing_api_client::models::ReloadResultItem {
+            name: "provider".into(),
+            ok: false,
+            detail: Some("InvalidURL".into()),
+        }],
+    });
+    app.settle_gateway_save(GatewaySaveReport::Saved(response));
+    let toast = app.toast.as_ref().expect("visible save feedback");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert!(
+        toast
+            .message
+            .contains("已保存，部分设置未生效\nprovider 加载失败")
     );
-    assert_eq!(cached.problems.len(), 1);
+    let mut terminal = test_terminal(32, 16);
+    app.draw(&mut terminal).expect("draw");
+    let screen = frame_text(terminal.backend().buffer());
+    let glyphs = screen.replace(' ', "");
+    assert!(glyphs.contains("已保存，部分设置未生效"), "{screen}");
+    assert!(glyphs.contains("provider加载失败"), "{screen}");
+    let (info, text) = last_cell_text(&app);
+    assert!(!info);
+    assert!(text.contains("provider：InvalidURL"));
+    assert!(text.contains("wing reload"));
+    assert_eq!(panel(&app).fingerprint(), "fp-2");
 }
 
 // ── 13. 接口签名探针（编译期契约，防止上游漂移） ─────────────

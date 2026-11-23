@@ -32,6 +32,7 @@ from . import loader
 from .catalog import build_catalog
 from .document import (
     SparseDocument,
+    invalid_yaml_message,
     malformed_document_problem,
     problems_of,
 )
@@ -155,7 +156,7 @@ def _read_boot_config(path: Path) -> BootResult:
     try:
         parsed = yaml.safe_load(raw_bytes.decode("utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError) as exc:
-        return _failure(path, BootFailure.PARSE_ERROR, _yaml_message(exc))
+        return _failure(path, BootFailure.PARSE_ERROR, invalid_yaml_message(exc))
 
     if parsed is None:
         parsed = {}
@@ -259,17 +260,6 @@ def _endpoint_from_file(path: Path) -> tuple[str, int] | None:
     except (yaml.YAMLError, UnicodeDecodeError):
         return None
     return _endpoint_of(parsed)
-
-
-def _yaml_message(exc: Exception) -> str:
-    """YAML 读失败的文案 + **行号**（``problem_mark`` 是用户唯一能直接定位的信息）。"""
-    mark = getattr(exc, "problem_mark", None)
-    where = (
-        f"（第 {mark.line + 1} 行，第 {mark.column + 1} 列）"
-        if mark is not None
-        else ""
-    )
-    return f"config.yaml 不是合法 YAML{where}：{exc}"
 
 
 def _problem(message: str) -> ConfigProblem:

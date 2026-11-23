@@ -189,7 +189,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 | 方法 | 路径 | 语义 | 鉴权 | setup mode |
 |---|---|---|---|---|
 | GET | `/api/settings/schema` | 设置目录（catalog 树）+ **业务分组 `groups[]`**（§1.1）+ 版本 + `config.yaml` 绝对路径；纯静态 | 常规 | ✅ |
-| GET | `/api/settings/get` | 稀疏文档（密文叶子 = `null`）+ 密文状态表 + 指纹 + 全部问题 | 常规 | ✅ |
+| GET | `/api/settings/get` | 稀疏文档（密文叶子 = `null`）+ 密文状态表 + 指纹 + 全部问题 + `pending_restart_paths` | 常规 | ✅ |
 | GET | `/api/settings/status` | `{valid, setup_mode, problems, fingerprint}`——启动路径上的最便宜预检 | 常规 | ✅ |
 | POST | `/api/settings/set` | 保存事务（见下） | **admin**（`tool_runtime` 403） | ✅（唯一修复路径） |
 
@@ -205,7 +205,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 ④ 字段级 + 跨字段校验（全有或全无）             ← 有 problem → 200 + ok=false，一个字节都不写
 ⑤ 备份 config.yaml.bak（字节级原子写，覆盖式）
 ⑥ emit_config_yaml(incoming) → 原子写 config.yaml
-⑦ 生效：正常模式 = 热重载六项；setup mode = 就地转入正常模式（§8）
+⑦ 应用刚写入的版本（正常模式走六项热重载，setup mode 就地装配，见 §8）
 ⑧ changed_paths / restart_required（只读**叶子**的 apply，P13）
 ⑨ 广播 SettingsChangedEvent（global）
 ⑩ 回执 SettingsSetResponse
@@ -224,7 +224,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 | `fingerprint` | 落盘后的 sha256（文件不存在时字面量 `"absent"`） |
 | `problems` | 校验问题（path / kind / message / hint） |
 | `changed` / `restart_required` | 相对保存前的变更路径；其中 `apply == restart` 的（只读叶子） |
-| `reload` | 逐项热重载结果（`name` / `ok` / `detail`，与 `/api/system/reload` 同形） |
+| `reload` | 逐项运行期结果（`name` / `ok` / `detail`，与 `/api/system/reload` 同形）。`ok=true` 且 `reload.ok=false` 表示文件已写入，部分运行期步骤失败 |
 | `setup_mode_exited` | 这次保存是否把网关从 setup mode 推进正常模式 |
 | `backup_path` | `.bak` 路径；磁盘上原来没有文件时为 `null` |
 | `warnings` | 非致命告知（与 `problems` 的区别：problems 让保存失败，warnings 只是提醒） |
@@ -233,6 +233,11 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 逐个记成 modified——这是"N 项变更"的展示粒度，不是三方合并）、类型敏感（`True != 1`、`300 != 300.0`）、
 缺席与空容器等价。`restart_required` 只读**非结构节点**的 `apply`（容器节点的 apply 是"子树最粗"，
 不能用来判定；解析不出的路径跳过——宁可漏报也不误报）。
+
+`pending_restart_paths` 是当前已加载配置与实际启动设置的差异。监听地址兼容启动时的显式参数覆盖，
+CORS 按允许来源比较，扫描间隔按后台任务装配值比较。它保留到恢复原值并重新加载，或按新值重启为止。
+外部编辑尚未重载时，GET 的文档仍来自磁盘，待重启状态仍来自网关已加载的配置。设置保存和显式重载串行执行。
+
 
 保存时写一行结构化 INFO 日志：`settings changed: paths=[…] restart_required=[…] fingerprint=<old>→<new>`
 ——**只有路径，没有值**（值一律不落日志，密文自然脱敏）。不新增审计文件：配置变更史就是
@@ -302,7 +307,8 @@ git-tracked 的 `config.yaml` + `.bak`。
 | 路径 | apply | 依据（读取点） |
 |---|---|---|
 | `providers[].name` | `next_session` | 池按 name 懒建实例；改名 = 旧 name 从配置消失、新 name 出现。retire 语义保留已移除 name 的旧实例（钉在它上面的会话不被拆解），旧会话可用到重启，新会话用新 name |
-| `providers[].protocol` / `base_url` / `api_key` / `timeout_first_chunk` / `timeout_total` / `max_connections` / `max_retries` / `max_retry_delay` / `explicit_cache_mode` / `reasoning_effort` / `max_tokens` / `extra_body` / `anthropic_version` / `models[]`（窗口字段除外，见下一行）/ `image_delivery` / `image_max_bytes` | `hot` | 热重载第 4 项 `reset_providers()` 重建共享池（先建后换，旧实例在途计数归零后退场） |
+| `providers[].protocol` / `base_url` / `api_key` / `timeout_first_chunk` / `timeout_total` / `max_connections` / `max_retries` / `max_retry_delay` / `explicit_cache_mode` / `reasoning_effort` / `max_tokens` / `extra_body` / `anthropic_version` / `models[]` 的展示名、描述和能力（目录查询也即时使用新声明）/ `image_delivery` / `image_max_bytes` | `hot` | 热重载第 4 项 `reset_providers()` 重建共享池（先建后换，旧实例在途计数归零后退场） |
+| `providers[].models[].id` / `name` | `next_session` | 模型目录与 ID 查询即时更新，已加载会话保留调用名，显式切换模型或重新水合时再绑定 |
 | `providers[].models[].context_window_tokens` / `keep_recent_tokens` | `next_session` | 模型级是压缩双阈值的唯一来源：会话 / 模板构造时读（`AgentTemplate.from_config` → `Compactor`），换模型时按目标模型重绑定（`WingAgent.set_model`）。已在内存的会话在换模型 / 换模板前保持自己的阈值快照——不做运行期热改窗口 |
 | `agents[].*`（`name` / `model` / `default` / `system_prompt` / `tools` / `skills` / `rules` / `max_turns` / `yolo`） | `next_session` | `SessionManager.reload_templates()` 重建模板；已在内存的会话保持自己的 agent。`skills` / `rules` 另外在 `ContextManager` 构造时快照 patterns，热重载时按**会话自己的** patterns 重新 glob |
 | `safe_command_patterns[]` | `hot` | `tools/internal/shell_safety.py` 每调用 `get_config()` |
@@ -330,6 +336,11 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
 
 `POST /api/system/reload` 与保存事务的第 ⑦ 步走**同一条管道**：config 项失败立即中止（后续项不再尝试），
 其余项失败继续，逐项 `ok` / `detail` 如实上报；失败**不回滚文件**（配置本身合法）。
+Hook 或命令文件局部加载失败时，可用文件仍然继续加载，步骤回执报告受影响的文件数。
+
+`wing reload` 让已运行的网关重新读取手工修改的文件。找不到网关时命令失败，可单独运行 `wing start`。
+修改监听地址后可用 `wing reload --host <旧地址> --port <旧端口>` 联系原有进程。
+磁盘无效时保留最后加载成功的配置和待重启状态。`new_session_defaults_changed` 表示已更新的模板或全局会话默认值。
 
 已知边界：**对象 / 联合形态的元素模板（`[]` 节点）是合成节点**，apply 取子树最粗、**不**继承列表声明
 （`providers[]` 显示 `next_session`）；**标量**元素模板（`list[str]` 等）继承列表声明的 apply

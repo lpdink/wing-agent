@@ -453,9 +453,19 @@ pub enum Command {
     /// with it (the gateway rebuilds the agent); the command reports that.
     Update(control::UpdateArgs),
 
-    /// Hot-reload the gateway configuration (config / hooks / commands /
-    /// providers / skills & rules / log level; per-item results, in order).
-    Reload,
+    /// Re-read config.yaml and reload hooks, prompt commands, providers,
+    /// skills and rules, and logging on a running gateway.
+    ///
+    /// After editing the listening address, pass the old host and port.
+    /// Listener, CORS, and background schedule changes take effect at startup.
+    Reload {
+        /// Running gateway host (default: from config).
+        #[arg(long)]
+        host: Option<String>,
+        /// Running gateway port (default: from config).
+        #[arg(long)]
+        port: Option<u16>,
+    },
 
     /// Create an empty session and print its id.
     ///
@@ -937,7 +947,9 @@ pub async fn dispatch(cli: Cli) -> ExitCode {
                     .await
             }
             Command::Update(args) => crate::cmd::control::run_update(args, cli.json).await,
-            Command::Reload => crate::cmd::reload::run_reload(cli.json).await,
+            Command::Reload { host, port } => {
+                crate::cmd::reload::run_reload(cli.json, host, port).await
+            }
             Command::New(args) => crate::cmd::lifecycle::run_new(args, cli.json).await,
             Command::Resume { session_id } => {
                 crate::cmd::lifecycle::run_resume(&session_id, cli.json).await
@@ -1106,7 +1118,6 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         .as_deref()
         .filter(|k| !k.is_empty())
         .map(|k| k.to_string());
-    let api_key_ref = api_key.as_deref();
 
     // Build URLs from host:port — no string replacement needed.
     let ws_url = format!("ws://{host}:{port}/ws");
@@ -1120,7 +1131,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         .map(|p| p.to_string_lossy().to_string());
 
     // HTTP client（预检与后面的建会话共用同一个；构造位置就在预检之前）。
-    let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
+    let mut http = GatewayApiClient::new(http_base.clone(), api_key.as_deref())
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
     // ── 预检：配置可用吗？（最便宜的一次调用；不要把它与"网关不可达"混为一谈）──
@@ -1163,7 +1174,11 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                     eprintln!("{}", setup::quit_note(config_path.as_deref()));
                     return Ok(());
                 }
-                Ok(setup::SetupOutcome::Ready) => screen?,
+                Ok(setup::SetupOutcome::Ready) => {
+                    screen?;
+                    config = AppConfig::load();
+                    http = GatewayApiClient::new(http_base.clone(), config.api_key.as_deref())?;
+                }
             }
         }
         setup::Preflight::Failed(e) => {
@@ -1172,14 +1187,17 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     }
 
     // 1. WS connect (get client_id).
-    let gateway = GatewayClient::connect(&ws_url, api_key_ref)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to connect to gateway at {ws_url}: {e}\n\
+    let gateway = GatewayClient::connect(
+        &ws_url,
+        config.api_key.as_deref().filter(|key| !key.is_empty()),
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to connect to gateway at {ws_url}: {e}\n\
                  Make sure the gateway is running: wing start"
-            )
-        })?;
+        )
+    })?;
 
     let client_id = gateway.client_id().to_string();
     tracing::info!(client_id = %client_id, "WS connected");
@@ -1782,7 +1800,13 @@ mod tests {
     #[test]
     fn clap_parses_reload_new_and_resume() {
         let cli = Cli::try_parse_from(["wing", "reload"]).expect("reload");
-        assert!(matches!(cli.command, Some(Command::Reload)));
+        assert!(matches!(
+            cli.command,
+            Some(Command::Reload {
+                host: None,
+                port: None
+            })
+        ));
 
         let cli = Cli::try_parse_from([
             "wing",

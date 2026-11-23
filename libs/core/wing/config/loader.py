@@ -71,18 +71,21 @@ def load_config(reload: bool = False) -> Config:
             "Please edit the config file and restart."
         )
 
-    with open(config_path, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+    return load_config_text(config_path.read_text(encoding="utf-8"))
 
+
+def load_config_text(text: str) -> Config:
+    """Validate and install the exact content of a saved configuration."""
+    global _config
+    data = yaml.safe_load(text)
     if not data:
-        raise ValueError(f"Config file is empty: {config_path}")
-
+        raise ValueError("config.yaml is empty")
     try:
         _config = Config(**data)
-        print(f"load config from: {config_path}")
-        return _config
-    except Exception as e:
-        raise ValueError(f"Invalid config: {e}") from e
+    except Exception as exc:
+        raise ValueError(f"Invalid config: {exc}") from exc
+    print(f"load config from: {get_config_path()}")
+    return _config
 
 
 def get_config() -> Config:

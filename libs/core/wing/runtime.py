@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import asyncio
+import hashlib
 
 from wing.agent import SessionBusyError
 from wing.agent.event_sink import emit_best_effort
@@ -35,7 +36,7 @@ from wing.event import (
     SettingsChangedEvent,
     WingEvent,
 )
-from wing.common.fs import atomic_write_bytes, atomic_write_text
+from wing.common.fs import atomic_write_bytes
 from wing.common.logger import log
 from wing.common.utils import validate_request_id
 from wing.context import CacheLedger, empty_report
@@ -203,17 +204,6 @@ class WriteEffectResult:
 
     reload: ReloadResult
     setup_mode_exited: bool = False
-
-
-async def settings_write_effect(sm: SessionManager) -> ReloadResult:
-    """保存写盘后的「生效」步骤（``apply_settings`` 的 ⑦）的正常模式实现体。
-
-    热重载（config.yaml → hooks → prompt commands → provider → skills & rules → log level）。
-    唯一调用点：``WingRuntime.post_write_effect()``（接点住实例方法，见那里的说明）。
-    失败**不回滚文件**——配置本身是合法的，回执按
-    ``ReloadResult`` 的逐项 ok 如实报告（与 ``/api/system/reload`` 同语义）。
-    """
-    return await _reload_system(sm)
 
 
 # ============================================================
@@ -881,23 +871,11 @@ class WingRuntime:
     # Setting API —— 保存事务（唯一写盘路径）
     # ============================================================
 
-    async def post_write_effect(self) -> WriteEffectResult:
-        """保存写盘后的「生效」步骤（``apply_settings`` 的 ⑦）。
-
-        唯一调用点是 :meth:`apply_settings` 的第 ⑦ 步。
-
-        - 正常模式（本类）：热重载（:func:`settings_write_effect` 的六项逐项结果）。
-        - setup mode：``gateway.server._SetupRuntime`` 覆盖本方法——换成
-          「转入正常模式」（``GatewayServer._enter_operational()``），并把
-          ``setup_mode_exited`` 置真。
-
-        把接点从模块级函数（``settings_write_effect``）上移成**实例方法**，
-        是因为「setup mode 下的 runtime」是 ``WingRuntime`` 的替身（见
-        ``gateway/server.py`` 的 ``_SetupRuntime``）——覆盖一个方法是替身唯一的
-        介入点，而事务本体（①–⑥、⑧–⑩）因此只有一份实现。失败**不回滚文件**：
-        配置本身合法，回执按 ``ReloadResult`` 逐项如实报告。
-        """
-        return WriteEffectResult(reload=await settings_write_effect(self.sm))
+    async def post_write_effect(self, saved_text: str) -> WriteEffectResult:
+        """Apply the exact saved version. Setup mode overrides the assembly step."""
+        return WriteEffectResult(
+            reload=await _reload_system(self.sm, saved_text=saved_text)
+        )
 
     async def apply_settings(
         self, document: dict[str, Any], base: str | None = None
@@ -984,11 +962,12 @@ class WingRuntime:
         # ⑥ 规范形 YAML（未知键取自磁盘文档并原样写回；读不出文档时没有未知键可保留）
         #    + 原子写。
         text = emit_config_yaml(incoming.data, catalog, extra=current_doc.extra)
-        atomic_write_text(config_path, text)
-        _, new_fp = read_document()
+        encoded = text.encode("utf-8")
+        new_fp = ConfigFingerprint(value=hashlib.sha256(encoded).hexdigest())
+        atomic_write_bytes(config_path, encoded)
 
         # ⑦ 生效（失败不回滚——配置本身合法，回执逐项报告）。
-        effect = await self.post_write_effect()
+        effect = await self.post_write_effect(text)
 
         # ⑧ 差异 → changed / restart_required（只读叶子路径的 apply）。
         changed = changed_paths(current_doc, incoming, catalog)

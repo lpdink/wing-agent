@@ -138,6 +138,7 @@ async def settings_get(request: Request) -> SettingsGetResponse:
     config_path = str(get_config_path())
     # 一次建树喂三处：读盘切分（read_document）、掩码 / 密文状态、问题清单。
     catalog = build_catalog()
+    pending_restart_paths = server.pending_restart_paths()
     try:
         doc, fingerprint = read_document(catalog=catalog)
     except ConfigDocumentError as exc:
@@ -148,6 +149,7 @@ async def settings_get(request: Request) -> SettingsGetResponse:
             problems=_projected_problems(server, [exc.as_problem()]),
             setup_mode=setup_mode,
             config_path=config_path,
+            pending_restart_paths=pending_restart_paths,
         )
 
     return SettingsGetResponse(
@@ -157,6 +159,7 @@ async def settings_get(request: Request) -> SettingsGetResponse:
         problems=_projected_problems(server, problems_of(doc, catalog=catalog)),
         setup_mode=setup_mode,
         config_path=config_path,
+        pending_restart_paths=pending_restart_paths,
     )
 
 
@@ -212,14 +215,15 @@ async def settings_set(
     - 写盘失败 → **500**（``OSError``：磁盘满 / 权限）。
     """
     server = get_server(request)
-    try:
-        result = await server.runtime.apply_settings(
-            document=body.document, base=body.base
-        )
-    except SettingsConflictError as exc:
-        return error_response(409, str(exc), error="conflict")
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500, detail=f"failed to write config.yaml: {exc}"
-        )
-    return build_settings_apply_response(result)
+    async with server.settings_lock:
+        try:
+            result = await server.runtime.apply_settings(
+                document=body.document, base=body.base
+            )
+        except SettingsConflictError as exc:
+            return error_response(409, str(exc), error="conflict")
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"failed to write config.yaml: {exc.strerror}"
+            ) from exc
+        return build_settings_apply_response(result, server.pending_restart_paths())

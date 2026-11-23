@@ -38,8 +38,7 @@ use crate::ui::toast::Toast;
 
 /// 一次保存里 **Interface 半边**（本地写盘）的结论。
 ///
-/// Gateway 半边异步回来后才合并回执，所以这个结论要先存在
-/// [`App`] 上（见 [`PendingSettingsSave`]）。
+/// Gateway 半边异步回来后才合并回执。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum InterfaceSaveReport {
     /// 本次没有 Interface 改动（没尝试写盘）。
@@ -74,7 +73,13 @@ pub(super) enum GatewaySaveReport {
     /// `POST /api/settings/set` 拿到了响应（`ok` 可能是 `false` + problems）。
     Saved(SettingsSetResponse),
     /// 请求本身失败：`conflict` = 409（指纹冲突）。
-    Failed { message: String, conflict: bool },
+    Failed {
+        message: String,
+        conflict: bool,
+    },
+    Unconfirmed {
+        message: String,
+    },
 }
 
 impl GatewaySaveReport {
@@ -90,14 +95,6 @@ impl GatewaySaveReport {
     fn ok_or_skipped(&self) -> bool {
         !self.attempted() || self.ok()
     }
-}
-
-/// 等待 Gateway 回执的那一次保存：Interface 半边的结论 + 本次发出的文档
-/// （`ok=true` 时写回缓存，让下次打开面板仍能 cache-first）。
-#[derive(Debug, Clone)]
-pub(super) struct PendingSettingsSave {
-    pub(super) interface: InterfaceSaveReport,
-    pub(super) document: Value,
 }
 
 impl App {
@@ -176,6 +173,7 @@ impl App {
         self.interface_catalog = None;
         self.settings_pending = false;
         self.settings_reload_pending = false;
+        self.settings_fetch_id = self.settings_fetch_id.wrapping_add(1);
         if discard {
             self.restore_config_snapshot();
         }
@@ -223,11 +221,27 @@ impl App {
         let open_pending = std::mem::take(&mut self.settings_pending);
         self.settings_cache = Some((schema.clone(), state.clone()));
         if let Some(panel) = self.settings_panel.as_mut() {
-            if reload || panel.dirty_count() == 0 {
+            if reload
+                || (panel.dirty_count() == 0
+                    && panel.edit_state().is_none()
+                    && panel.prompt().is_none()
+                    && panel.search_query().is_none()
+                    && panel.choices().is_none())
+            {
                 panel.apply_snapshot(&schema, state);
+            } else {
+                panel.on_settings_changed(&state.fingerprint);
             }
         } else if open_pending {
             self.present_settings_panel(&schema, state);
+        }
+    }
+
+    pub(super) fn handle_settings_fetch_error(&mut self, message: String) {
+        let opening = std::mem::take(&mut self.settings_pending);
+        let reloading = std::mem::take(&mut self.settings_reload_pending);
+        if opening || reloading {
+            self.show_toast(Toast::warning(message, Duration::from_secs(5)));
         }
     }
 
@@ -375,41 +389,33 @@ impl App {
         }
     }
 
-    /// Gateway 半边的结论落地：面板 `apply_save` + 缓存回写 + 合并回执。
-    ///
-    /// 两半的汇合点。`settings_save` 里存着 Interface 半边的结论（短路路径在调用前
-    /// 也会把它放好），所以合并只看这一份状态。
     pub(super) fn settle_gateway_save(&mut self, gateway: GatewaySaveReport) {
-        let pending = self.settings_save.take();
-        let interface = pending
-            .as_ref()
-            .map(|pending| pending.interface.clone())
+        let interface = self
+            .settings_save
+            .take()
             .unwrap_or(InterfaceSaveReport::Skipped);
-
         match &gateway {
             GatewaySaveReport::Saved(response) => {
                 if let Some(panel) = self.settings_panel.as_mut() {
-                    // `ok=false` 时面板自己会切到问题清单视图（apply_save）。
                     panel.apply_save(SaveOutcome {
                         gateway: Some(response.clone()),
                         interface_ok: None,
                     });
                 }
-                if let Some((_, cached)) = self.settings_cache.as_mut() {
-                    cached.fingerprint = response.fingerprint.clone();
-                    cached.problems = response.problems.clone();
-                    // `ok=false` 时文件没变：缓存里的值照旧，只换问题。
-                    if response.ok
-                        && let Some(pending) = &pending
-                    {
-                        cached.values = pending.document.clone();
+                if response.ok {
+                    self.settings_cache = None;
+                    if self.settings_panel.is_some() {
+                        self.push_intent(AppIntent::FetchSettings);
                     }
                 }
             }
-            GatewaySaveReport::Failed { conflict: true, .. } => self.mark_settings_stale(),
+            GatewaySaveReport::Failed { conflict: true, .. } => {
+                self.settings_cache = None;
+                self.mark_settings_stale();
+            }
+            GatewaySaveReport::Unconfirmed { .. } => self.settings_cache = None,
             GatewaySaveReport::Failed { .. } | GatewaySaveReport::Skipped => {}
         }
-
         self.show_settings_save_notice(&interface, &gateway);
     }
 
@@ -451,16 +457,17 @@ impl App {
     // settings_changed 的消费
     // -----------------------------------------------------------------------
 
-    /// `settings_changed` 事件：面板开着 → 指纹比对（相同 = 自己刚保存的那一次，
-    /// 不警告；不同 = 别人改了，横幅）；关着 → 丢掉缓存。
-    ///
-    /// 丢缓存而不是只改指纹：缓存里的 `values` 与 `fingerprint` 必须同源，
-    /// 只更新指纹会造出"旧文档 + 新指纹"的 base —— 下次保存会把别人的改动覆盖掉。
+    /// Only a masked GET can replace the cached document and its fingerprint.
     pub(super) fn note_settings_changed(&mut self, fingerprint: &str) {
+        if self
+            .settings_cache
+            .as_ref()
+            .is_some_and(|(_, state)| state.fingerprint != fingerprint)
+        {
+            self.settings_cache = None;
+        }
         if let Some(panel) = self.settings_panel.as_mut() {
             panel.on_settings_changed(fingerprint);
-        } else {
-            self.settings_cache = None;
         }
     }
 }
@@ -474,49 +481,77 @@ pub(super) fn save_notice_text(
     interface: &InterfaceSaveReport,
     gateway: &GatewaySaveReport,
 ) -> String {
-    let attempted = usize::from(interface.attempted()) + usize::from(gateway.attempted());
-    let failed = usize::from(interface.attempted() && !interface.ok())
-        + usize::from(gateway.attempted() && !gateway.ok());
-    let mut lines: Vec<String> = vec![notice_header(attempted, failed).to_string()];
+    let mut lines = vec![save_header(interface, gateway).to_string()];
+    lines.extend(interface_line(interface));
+    lines.extend(gateway_line(gateway));
 
-    if let Some(line) = interface_line(interface) {
-        lines.push(line);
-    }
-    if let Some(line) = gateway_line(gateway) {
-        lines.push(line);
-    }
-    // 需重启的提示：文案是 `Ctrl+R`（不是 `r`），只在 Gateway 真的保存成功时出现。
     if let GatewaySaveReport::Saved(response) = gateway
         && response.ok
-        && !response.restart_required.is_empty()
     {
-        lines.push(format!(
-            "  ⚠ {} 需重启网关才生效 — Ctrl+R 立即重启",
-            response.restart_required.join("、")
-        ));
-    }
-    // 后端的非致命说明：当前文件不可解析时，密文无从回填 —— 必须**逐条**
-    // 让用户看见（"其中旧密钥没有保留，请重新填写"）。它不影响成败等级。
-    if let GatewaySaveReport::Saved(response) = gateway {
-        for warning in &response.warnings {
-            lines.push(format!("  ⚠ {warning}"));
+        if let Some(reload) = &response.reload {
+            if !reload.ok {
+                for item in reload.results.iter().filter(|item| !item.ok) {
+                    let detail = item
+                        .detail
+                        .as_deref()
+                        .map(crate::cmd::common::single_line)
+                        .filter(|_| reload.pending_restart_paths.is_some());
+                    lines.push(match detail {
+                        Some(detail) => format!("  ✗ {}：{detail}", item.name),
+                        None => format!("  ✗ {}", item.name),
+                    });
+                }
+                lines.push("  检查失败项后运行 wing reload 重试".into());
+            }
+            if reload.new_session_defaults_changed {
+                lines.push("  新会话默认设置已更新".into());
+            }
+            if let Some(paths) = reload
+                .pending_restart_paths
+                .as_ref()
+                .filter(|paths| !paths.is_empty())
+            {
+                lines.push(format!("  ⚠ {} 待重启 · Ctrl+R 重启网关", paths.join("、")));
+            }
         }
+        lines.extend(
+            response
+                .warnings
+                .iter()
+                .map(|warning| format!("  ⚠ {warning}")),
+        );
     }
     lines.join("\n")
 }
 
-/// 回执的成败口径（决定 notice 的 rail 等级与 toast）。
 pub(super) fn save_notice_ok(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> bool {
-    interface.ok_or_skipped() && gateway.ok_or_skipped()
+    interface.ok_or_skipped() && gateway.ok_or_skipped() && !apply_failed(gateway)
 }
 
-fn notice_header(attempted: usize, failed: usize) -> &'static str {
-    if failed == 0 {
-        "设置已保存"
-    } else if failed == attempted {
-        "设置未保存"
+fn apply_failed(gateway: &GatewaySaveReport) -> bool {
+    matches!(gateway, GatewaySaveReport::Saved(response)
+        if response.ok && response.reload.as_ref().is_some_and(|reload| !reload.ok))
+}
+
+fn save_header(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> &'static str {
+    if matches!(gateway, GatewaySaveReport::Unconfirmed { .. }) {
+        return if interface.ok() {
+            "Interface 已保存，Gateway 保存未确认"
+        } else {
+            "Gateway 保存未确认"
+        };
+    }
+    if !interface.ok_or_skipped() || !gateway.ok_or_skipped() {
+        return if interface.ok() || gateway.ok() {
+            "设置部分保存"
+        } else {
+            "设置未保存"
+        };
+    }
+    if apply_failed(gateway) {
+        "已保存，部分设置未生效"
     } else {
-        "设置部分保存"
+        "设置已保存"
     }
 }
 
@@ -526,9 +561,10 @@ fn interface_line(report: &InterfaceSaveReport) -> Option<String> {
         InterfaceSaveReport::Ok { path, changed } => {
             Some(format!("  ✓ {:<12}{path}（{changed} 项）", "Interface"))
         }
-        InterfaceSaveReport::Err { message } => {
-            Some(format!("  ✗ {:<12}写入失败：{message}", "Interface"))
-        }
+        InterfaceSaveReport::Err { message } => Some(format!(
+            "  ✗ {:<12}写入失败：{message}。修复后按 s 重试",
+            "Interface"
+        )),
     }
 }
 
@@ -536,9 +572,14 @@ fn gateway_line(report: &GatewaySaveReport) -> Option<String> {
     match report {
         GatewaySaveReport::Skipped => None,
         GatewaySaveReport::Saved(response) if response.ok => Some(format!(
-            "  ✓ {:<12}{}",
+            "  ✓ {:<12}{} 项变更{}",
             "Gateway",
-            gateway_success_summary(response)
+            response.changed.len(),
+            if apply_failed(report) {
+                "已写入，部分设置未生效"
+            } else {
+                "已写入"
+            }
         )),
         GatewaySaveReport::Saved(response) => Some(format!(
             "  ✗ {:<12}{} 个问题，未保存（已切到问题清单）",
@@ -546,69 +587,56 @@ fn gateway_line(report: &GatewaySaveReport) -> Option<String> {
             response.problems.len()
         )),
         GatewaySaveReport::Failed { conflict: true, .. } => Some(format!(
-            "  ✗ {:<12}配置已被其它客户端修改，按 R 重新载入",
+            "  ✗ {:<12}设置文件已更改，按 R 重新读取文件",
             "Gateway"
         )),
-        GatewaySaveReport::Failed { message, .. } => {
-            Some(format!("  ✗ {:<12}保存失败：{message}", "Gateway"))
-        }
+        GatewaySaveReport::Failed { message, .. } => Some(format!(
+            "  ✗ {:<12}保存失败：{message}。修复后按 s 重试",
+            "Gateway"
+        )),
+        GatewaySaveReport::Unconfirmed { message } => Some(format!(
+            "  ⚠ Gateway 未收到保存确认：{message}。核对磁盘文件后重试"
+        )),
     }
 }
 
-/// `N 项变更 · <热重载逐项>`（回执的第二列）。
-fn gateway_success_summary(response: &SettingsSetResponse) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !response.changed.is_empty() {
-        parts.push(format!("{} 项变更", response.changed.len()));
-    }
-    if let Some(reload) = &response.reload {
-        let mut reloaded: Vec<String> = Vec::new();
-        let mut failed = 0usize;
-        for item in &reload.results {
-            if item.ok {
-                reloaded.push(match item.detail.as_deref() {
-                    Some(detail) if !detail.is_empty() => format!("{} {detail}", item.name),
-                    _ => item.name.clone(),
-                });
+fn save_notice_toast(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> String {
+    let header = save_header(interface, gateway);
+    let detail = match gateway {
+        GatewaySaveReport::Saved(response) if !response.ok => {
+            Some(format!("Gateway 有 {} 个问题", response.problems.len()))
+        }
+        GatewaySaveReport::Saved(response) => {
+            let reload = response.reload.as_ref();
+            if let Some(reload) = reload.filter(|reload| !reload.ok) {
+                let mut failed = reload.results.iter().filter(|item| !item.ok);
+                Some(match failed.next() {
+                    Some(first) if failed.next().is_some() => format!("{} 等加载失败", first.name),
+                    Some(first) => format!("{} 加载失败", first.name),
+                    None => "网关应用失败".into(),
+                })
+            } else if !interface.ok_or_skipped() {
+                Some("Interface 写入失败，按 s 重试".into())
+            } else if !response.warnings.is_empty() {
+                Some(format!("{} 条说明（见回执）", response.warnings.len()))
+            } else if reload
+                .and_then(|r| r.pending_restart_paths.as_ref())
+                .is_some_and(|p| !p.is_empty())
+            {
+                Some("部分设置待重启 · Ctrl+R".into())
             } else {
-                failed += 1;
+                None
             }
         }
-        if !reloaded.is_empty() {
-            parts.push(reloaded.join(" · "));
+        GatewaySaveReport::Failed { conflict: true, .. } => Some("按 R 重新读取文件".into()),
+        GatewaySaveReport::Failed { .. } => Some("Gateway 写入失败，按 s 重试".into()),
+        GatewaySaveReport::Unconfirmed { .. } => Some("请核对磁盘文件".into()),
+        GatewaySaveReport::Skipped if !interface.ok_or_skipped() => {
+            Some("Interface 写入失败，按 s 重试".into())
         }
-        if failed > 0 {
-            parts.push(format!("{failed} 项重载失败"));
-        }
-    }
-    if parts.is_empty() {
-        "已应用".to_string()
-    } else {
-        parts.join(" · ")
-    }
-}
-
-/// 摘要 toast：面板还没关，回执在它底下看不见 —— "保存到底成没成"要立刻可见。
-fn save_notice_toast(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> String {
-    if save_notice_ok(interface, gateway) {
-        // 有后端 warnings 时不能只说"已保存"：那些话（"旧密钥没有保留"）
-        // 是用户必须知道的，而回执此刻正压在面板下面。
-        if let GatewaySaveReport::Saved(response) = gateway
-            && !response.warnings.is_empty()
-        {
-            return format!("设置已保存 · {} 条说明（见回执）", response.warnings.len());
-        }
-        return "设置已保存".to_string();
-    }
-    match gateway {
-        GatewaySaveReport::Saved(response) if !response.ok => {
-            format!("设置未保存：{} 个问题", response.problems.len())
-        }
-        GatewaySaveReport::Failed { conflict: true, .. } => {
-            "配置已被其它客户端修改，按 R 重新载入".to_string()
-        }
-        _ => "设置未保存（见回执）".to_string(),
-    }
+        GatewaySaveReport::Skipped => None,
+    };
+    detail.map_or_else(|| header.to_owned(), |detail| format!("{header}\n{detail}"))
 }
 
 /// 两份稀疏文档之间**叶子**路径的差异（新增 / 删除 / 改值都算一条）。

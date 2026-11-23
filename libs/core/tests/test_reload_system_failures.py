@@ -36,7 +36,7 @@ async def test_config_failure_aborts_immediately(manager, monkeypatch):
 
     assert result.ok is False
     assert _items(result) == [("config.yaml", False)]
-    assert "config unreadable" in (result.items[0].detail or "")
+    assert result.items[0].detail == "RuntimeError"
 
 
 async def test_hooks_failure_is_isolated(manager, monkeypatch):

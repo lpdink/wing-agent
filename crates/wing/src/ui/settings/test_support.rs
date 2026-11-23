@@ -387,6 +387,7 @@ pub(crate) fn product_schema() -> SettingsSchemaResponse {
 /// 产品口径的 state（真稀疏文档 + 两个 provider 的密文）。
 pub(crate) fn product_state() -> SettingsGetResponse {
     SettingsGetResponse {
+        pending_restart_paths: None,
         values: product_values(),
         secrets: {
             let mut secrets = HashMap::new();
@@ -513,6 +514,7 @@ pub(crate) fn schema(catalog: &SettingNode) -> SettingsSchemaResponse {
 
 pub(crate) fn state(values: Value) -> SettingsGetResponse {
     SettingsGetResponse {
+        pending_restart_paths: None,
         values,
         secrets: sample_secrets(),
         fingerprint: "fp-1".into(),
