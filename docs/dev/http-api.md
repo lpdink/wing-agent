@@ -31,7 +31,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/fork` | 从指定消息 uuid 分叉；新 session 含该消息及之前全部消息，继承源 backend |
 | POST | `/api/session/subscribe` | 将某 client 订阅到 session 事件（触发 SyncSession 重放；不在内存的会话先按需水合） |
 | POST | `/api/session/unsubscribe` | 取消订阅 |
-| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。可选 `request_id` 由发送端生成并确保唯一，缺省由网关生成。响应回显实际 ID。`media` 是消息携带的媒体引用（`MediaRef` 数组，缺省 = 无媒体；新输入的 `width` / `height` 须在 `0..2^32−1`，`bytes` 须在 `0..2^53−1`；id 必须是该会话已存在的对象、mime 必须在支持列表内——幽灵引用 / 非法 id / 非法 mime 回 400，消息不进历史）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask；该通道**只承载文本**，同时带 `media` 时记 WARN 后按文本 resolve）；无该 id / id 已失效则回退普通入队。正文与媒体均为空的普通输入返回 400。会话正在关闭旧 agent 时返回 409 |
+| POST | `/api/session/send` | 发送用户消息，驱动 agent loop（不在内存的会话先按需水合，磁盘上也没有才 404）。可选 `request_id` 由发送端生成，响应回显实际 ID。缺省由网关生成。ID 约束与 WS 相同，非法或重复返回 400。`media` 是消息携带的媒体引用（`MediaRef` 数组，缺省 = 无媒体；新输入的 `width` / `height` 须在 `0..2^32−1`，`bytes` 须在 `0..2^53−1`；id 必须是该会话已存在的对象、mime 必须在支持列表内——幽灵引用 / 非法 id / 非法 mime 回 400，消息不进历史）。`tool_call_id` 非空时定向 resolve 该 id 的 feedback waiter（回答在挂 Ask；该通道**只承载文本**，同时带 `media` 时记 WARN 后按文本 resolve）；无该 id / id 已失效则回退普通入队。正文与媒体均为空的普通输入返回 400。会话正在关闭旧 agent 时返回 409 |
 | POST | `/api/session/media` | 上传媒体（**原始字节体**：`?session_id=<sid>[&name=<n>]`，body = 图片字节，非 JSON / 非 multipart）。收包顺序：会话存在（否则 404，且**不隐式建会话**）→ `Content-Length` 预检（声明值 > `images.max_bytes` 直接 400，**不收包**）→ 收包 → 字节校验：body 非空 → `≤ images.max_bytes`（真实字节兜底）→ magic bytes ∈ {png, jpeg, webp, gif} → 头部尺寸可解析；失败一律 400 且**零存储副作用**（不建目录、不写对象）。id = 字节的 sha256（内容寻址），同字节重复上传返回**同一 id** 且不重写对象（幂等）；响应 `{"ok":true,"media":{id,mime,bytes,width,height,name?}}`，`media` 就是消息 `media` 数组的元素形状（可直接回投 `/api/session/send`）。`name` 是展示素材（缺省 / 空串 = 不记录，建议给 basename；长度上限 255 字符，超限 400；id 才是寻址键）。**不水合**已逐出会话（与 `/api/session/tag` 同款）；写入只落 `<sessions-root>/<sid>/media/<id>`，老共享池只读不写。鉴权 / setup mode 行为与其它 session 端点一致 |
 | GET | `/api/session/media` | 读取媒体字节（**原始字节响应**，非 JSON）：`?session_id=<sid>&media_id=<id>` → `Content-Type`（由 magic bytes 现读；嗅探不出回落 `application/octet-stream`）+ `ETag: "<id>"` + `Cache-Control: private, max-age=31536000, immutable`（内容寻址 = 字节永不变更）+ `X-Content-Type-Options: nosniff`。`media_id` 必须是 64 位小写 hex（防路径穿越的闸门在存储层路径拼接之前）；**非法 id 与对象不存在同价 404**（`media not found`，不给探测反馈）；幽灵会话 404（`session not found`）；归档会话 404 + `error="session_archived"`。**不水合**已逐出会话（与上传 / tag 同款纯解析）——读一张图不把 inactive 会话翻成活跃；老共享池 miss 回退时照既有契约**物化**进会话目录。memory 后端天然可读（字节在进程内桶里）。鉴权开启时 `?api_key=` 可用（见下「鉴权与 RBAC」） |
 | POST | `/api/session/files` | 上传**用户文件**（**原始字节体**：`?session_id=<sid>&name=<n>`，body = 文件字节，非 JSON / 非 multipart；`name` **必填**——agent 与用户都靠名字识别它，缺省 400）。落点 `<sessions-root>/<sid>/files/<实际名>`（**保留原名**，agent 的 Read 看得懂）；响应 `{ok, file:{name, path, bytes}}`——`name` 是**实际落盘名**（同名异字节冲突时带 `-2` / `-3` 后缀；大小写 / Unicode 归一化不敏感的文件系统上，请求名是别名时也以磁盘真名为准），`path` 是网关宿主机**绝对路径**（消费方把它写进消息正文 `[file: 名 · 大小 · 路径]`；memory 后端为 null——没有本地文件，如实降级）。收包顺序：会话存在（404）→ 名字卫生（400，**不读 body**）→ `Content-Length` 预检（声明值超 `files.max_bytes` 直接 400，**不收包**）→ 收包 → 字节闸门（非空 / 真实字节兜底 ≤ `files.max_bytes`）；失败一律**零存储副作用**（不建目录、不写字节）。**同名同字节幂等**（返回既有路径、不重写）；**同名异字节递增后缀、绝不覆盖**（链上的 `[file: …]` 引用指向既有那份）。名字规则：非空 / UTF-8 可编码 / ≤ 128 字节（中文名合法）/ 无路径分隔符 / 无 `..` / 不以 `.` 开头 / 无 ASCII 控制符。**不水合**已逐出会话；归档会话 404 + `error="session_archived"` |
@@ -259,6 +259,8 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 > 投递消息有两条等价路径：WS `ClientRequest`（TUI 实际所用，便于与 Ask 回复复用同一连接）或 HTTP `POST /api/session/send`。
 
+`request_id` 由 1–64 个 ASCII 字母、数字、下划线或连字符组成，发送端应为每次发送生成新 ID。网关拒绝与同一已加载会话中排队、准备提交或最近 1024 条已提交输入重复的 ID。这个窗口随会话运行态保留，覆盖 agent 模板替换。逐出或重启后重新计数。拒绝 WS 输入时只向发送连接发送 `error`。格式不合法的原 ID 不出现在错误帧中。
+
 **远程工具帧**（tool host 专用，按 `call_id` 字段与 `ClientRequest` 区分，向后兼容）：
 
 - **服务端 → tool host**：`tool_call_request { type, call_id, name, arguments }` —— 发起一次远程工具调用。
@@ -298,7 +300,7 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 网关对"不再读取的客户端"有界反制（实测背景：一个读任务死亡的客户端让连接与路由表项永久泄漏，且每个事件都变成一次失败投递 + 一行日志，最高 12,290 行/分钟）：
 
-- 每次写帧等待上界为 **60s**（`WRITE_TIMEOUT_SECONDS`），关闭连接另有 5s 上界。同一连接串行发送事件。新增事件令待发送字节数超过 **128 MiB** 时回收该连接，客户端重连后恢复快照。
+- 每次写帧等待上界为 **60s**（`WRITE_TIMEOUT_SECONDS`），关闭连接另有 5s 上界。同一连接串行发送事件。新增事件令待发送字节数超过 **128 MiB** 时回收该连接。首个事件适用同一上限，客户端可重连恢复快照。
 - 超时或写失败 → **回收该客户端**：从 `clients` / `ws_to_clients` 注销、`event_bus.route_detach_client` 清订阅路由、主动 `close(code=1013)`、attached 的远程工具宿主 `fail_client`（在途调用立即失败）。
 - 回收与 `handle_ws` 的正常断连收尾共用**同一个幂等入口** `GatewayServer.drop_client(ws, reason=…)`；`pop` 语义保证每个客户端最多一次副作用（一行回收日志）。
 - 回收立即生效：投递列表就是路由表，注销后该 client 不再收到任何事件——失败投递与日志洪泛随之停止。

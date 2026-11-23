@@ -450,7 +450,7 @@ class GatewayWS:
                 f"cannot send on a closed connection ({self._close_reason or 'closed'})"
             )
         frame: dict[str, Any] = {
-            "request_id": request_id or uuid.uuid4().hex,
+            "request_id": uuid.uuid4().hex if request_id is None else request_id,
             "session_id": session_id,
             "content": content,
         }

@@ -21,7 +21,8 @@ import pytest_asyncio
 
 from _support import wait_until_async
 from wing.agent import SessionBusyError, WingAgent
-from wing.agent.inbox import Inbox
+from wing.agent.inbox import RECENT_INPUT_ID_LIMIT, Inbox
+from wing.common.utils import InvalidInputError
 from wing.schema import LLMResponse, LLMUsage, Message
 
 pytestmark = pytest.mark.usefixtures("cleanup_event_bus")
@@ -45,6 +46,23 @@ async def test_get_blocks_while_held() -> None:
     item = await asyncio.wait_for(waiting, 1.0)
     assert item.message.content == "hello"
     assert inbox.has_pending is False
+
+
+@pytest.mark.asyncio
+async def test_committed_ids_are_bounded_and_cleared_queue_ids_are_reusable() -> None:
+    inbox = Inbox()
+    outstanding = "first"
+    await inbox.post("queued", request_id=outstanding)
+    inbox.input_request_ids.remember_committed(
+        [str(i) for i in range(RECENT_INPUT_ID_LIMIT + 1)]
+    )
+    inbox.input_request_ids.require_available("0")
+    with pytest.raises(InvalidInputError):
+        inbox.input_request_ids.require_available("1")
+    with pytest.raises(InvalidInputError):
+        await inbox.post("same ID", request_id=outstanding)
+    assert [item.request_id for item in inbox.clear()] == [outstanding]
+    await inbox.post("reused after clear", request_id=outstanding)
 
 
 @pytest.mark.asyncio

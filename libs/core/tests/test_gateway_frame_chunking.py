@@ -388,6 +388,16 @@ class TestChunkedDelivery:
 
         assert "slow-client" not in event_bus.routing_table
 
+    async def test_first_event_is_subject_to_backlog_limit(self, monkeypatch):
+        monkeypatch.setattr("wing.gateway.server.MAX_PENDING_EVENT_BYTES", 600)
+        server = _make_server()
+        ws = _RecordingWs()
+        _register(server, _as_ws(ws))
+        server._on_event(_notice("x" * 800))
+        await wait_until_async(lambda: bool(ws.close_calls))
+        assert ws.sent == []
+        assert ws.close_calls == [(1013, "slow consumer")]
+
     async def test_event_backlog_recycles_only_the_slow_connection(self, monkeypatch):
         monkeypatch.setattr("wing.gateway.server.MAX_PENDING_EVENT_BYTES", 1200)
         server = _make_server()

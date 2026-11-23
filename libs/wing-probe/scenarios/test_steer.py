@@ -593,3 +593,99 @@ async def test_rewind_to_steer_preserves_tool_media(probe: Probe) -> None:
         if part.get("type") == "image_url"
     ]
     assert [base64.b64decode(url.split(",", 1)[1]) for url in images] == [PNG]
+
+
+@pytest.mark.probe_env(models=[MODEL], hooks=["hooks/*.py"])
+async def test_request_ids_are_bounded_and_unique_per_loaded_session(
+    probe: Probe,
+) -> None:
+    await _install_hook(probe)
+    probe.register(
+        MODEL,
+        Turn.of(text="first"),
+        Turn.of(text="second"),
+        Turn.of(text="other session"),
+    )
+    session = await probe.session(model=MODEL)
+    sid = session.session_id
+    http = session.driver.http
+
+    async def send_http(request_id: str, content: str) -> dict:
+        return await http.request(
+            "POST",
+            "/api/session/send",
+            body={
+                "session_id": sid,
+                "request_id": request_id,
+                "content": content,
+            },
+        )
+
+    async with _subscribe(probe, session) as sender:
+        await sender.watch.expect("sync_session")
+        for bad_id in ("", "non/ascii", "带空格", "with space", "too_long_" * 8):
+            with pytest.raises(DriverHttpError) as failure:
+                await send_http(bad_id, "rejected")
+            assert failure.value.call.status == 400
+            await sender.driver.websocket.send_request(
+                sid, "rejected", request_id=bad_id
+            )
+            error = await sender.driver.timeline.wait_for(
+                lambda event: event.type == "error", within=5
+            )
+            assert error is not None
+            assert "request_id must be" in error.data["message"]
+            assert error.data["request_id"] != bad_id
+            sender.driver.timeline.set_cursor(error.index + 1)
+
+        async def reject_duplicate(request_id: str) -> None:
+            with pytest.raises(DriverHttpError) as failure:
+                await send_http(request_id, "duplicate HTTP input")
+            assert failure.value.call.status == 400
+            await sender.driver.websocket.send_request(
+                sid, "duplicate WS input", request_id=request_id
+            )
+            event = await sender.watch.expect("error", where={"request_id": request_id})
+            assert event.data["message"] == "request_id already used in this session"
+
+        preparing_id = "prepare_" + "A" * 56
+        assert (await send_http(preparing_id, "hold"))["request_id"] == preparing_id
+        await _wait_for_file(probe.env.root / "hook-entered")
+        await reject_duplicate(preparing_id)
+        queued_id = await session.driver.websocket.send_request(
+            sid, "next", request_id="queued-01"
+        )
+        await session.watch.expect(
+            "user_message_queued", where={"origin_request_id": queued_id}
+        )
+        await reject_duplicate(queued_id)
+        (probe.env.root / "hook-release").touch()
+        await session.watch.expect("turn_result", where={"result": "second"})
+        # Recent IDs survive a replacement of the session's running agent.
+        await http.request(
+            "POST",
+            "/api/session/update",
+            body={
+                "session_id": sid,
+                "agent": "default",
+                "model_id": MODEL,
+            },
+        )
+        await reject_duplicate(preparing_id)
+        await reject_duplicate(queued_id)
+        session.watch.assert_never("error")
+        assert [e.data["request_id"] for e in session.watch.events("delivered")] == [
+            preparing_id,
+            queued_id,
+        ]
+        assert [
+            e.data["origin_request_id"]
+            for e in session.watch.events("user_message_queued")
+        ] == [preparing_id, queued_id]
+        assert probe.context(MODEL, 1).texts("user") == ["hooked: hold", "next"]
+
+    other = await probe.session(model=MODEL)
+    await other.driver.websocket.send_request(
+        other.session_id, "different session", request_id=preparing_id
+    )
+    assert (await other.watch.expect("turn_result")).data["result"] == "other session"

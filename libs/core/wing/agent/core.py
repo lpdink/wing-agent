@@ -33,7 +33,7 @@ from wing.schema import CacheProbe, MediaRef, Message, Tool
 
 from .diagnostics import _worker_frames
 from .event_sink import AgentEventSink
-from .inbox import Inbox
+from .inbox import Inbox, InputRequestIds
 from .react_loop import ReActLoop
 from .tool_executor import ToolExecutor, _current_tool_call_id
 
@@ -99,6 +99,7 @@ class WingAgent:
         max_turns: int | None = None,
         yolo: bool | None = None,
         media: MediaAccess | None = None,
+        input_request_ids: InputRequestIds | None = None,
     ) -> None:
         self.model = model
         self._provider_name = provider_name
@@ -116,7 +117,7 @@ class WingAgent:
         self._reasoning_effort: str | None = None
 
         # ── 内部部件组装 ──
-        self._inbox = Inbox()
+        self._inbox = Inbox(input_request_ids)
         self._sink = AgentEventSink(
             session_id=self.session_id,
             append_event=context_manager.append_event,
@@ -253,6 +254,13 @@ class WingAgent:
         self._interrupt_hooks.pop(hook_id, None)
 
     # ── 对外接口 ──
+
+    @property
+    def input_request_ids(self) -> InputRequestIds:
+        return self._inbox.input_request_ids
+
+    def require_input_id_available(self, request_id: str | None) -> None:
+        self.input_request_ids.require_available(request_id)
 
     @property
     def has_pending_input(self) -> bool:

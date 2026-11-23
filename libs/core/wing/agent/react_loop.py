@@ -182,6 +182,7 @@ class ReActLoop:
         content = "\n".join(msg.content for msg in users if msg.content)
         media = [ref for msg in users for ref in (msg.media or [])]
         if not content and not media:
+            self._inbox.input_request_ids.release(batch)
             return None
 
         pending = self._pending_items(batch)
@@ -189,6 +190,7 @@ class ReActLoop:
         # The drained batch remains visible until the hook and append settle.
         self._preparing_input = batch
         suppress_drop = False
+        requeued = False
         try:
             modified = await hooks.invoke_async("before_user_message", content)
             task = asyncio.current_task()
@@ -201,6 +203,7 @@ class ReActLoop:
             can_call = self._can_call_llm(next_turn_index)
             if steer and not can_call:
                 self._inbox.prepend(batch)
+                requeued = True
                 suppress_drop = True
                 return None
             if can_call:
@@ -215,6 +218,7 @@ class ReActLoop:
                 except Exception:
                     if steer:
                         self._inbox.prepend(batch)
+                        requeued = True
                         suppress_drop = True
                     raise
             if not ctx.compaction_applied:
@@ -224,9 +228,12 @@ class ReActLoop:
             suppress_drop = True
             raise
         else:
+            self._inbox.input_request_ids.remember_committed(origin_ids)
             suppress_drop = True
         finally:
             self._preparing_input = []
+            if not requeued:
+                self._inbox.input_request_ids.release(batch)
             if not suppress_drop:
                 with self._sink.best_effort():
                     self._sink.user_messages_dropped(origin_ids)

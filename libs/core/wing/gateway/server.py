@@ -549,10 +549,7 @@ class GatewayServer:
         if sender.recycling:
             return
         size = sum(frame.size for frame in frames)
-        if (
-            sender.pending_bytes
-            and sender.pending_bytes + size > MAX_PENDING_EVENT_BYTES
-        ):
+        if sender.pending_bytes + size > MAX_PENDING_EVENT_BYTES:
             sender.recycling = True
             loop.create_task(
                 self._recycle_client(ws, "event backlog exceeds byte limit")

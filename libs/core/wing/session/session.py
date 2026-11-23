@@ -56,6 +56,7 @@ from .usage import UsageTracker
 
 if TYPE_CHECKING:
     from wing.agent import WingAgent
+    from wing.agent.inbox import InputRequestIds
     from wing.event.base import AgentInfo, SessionStatus, WingEvent
 
     from .override import AgentOverride
@@ -160,6 +161,8 @@ def _build_runtime(
     messages: TrackedList[ChainNode],
     store: SessionStore,
     workspace: str | None,
+    *,
+    input_request_ids: InputRequestIds | None = None,
 ) -> tuple[ContextManager, "WingAgent"]:
     """按模板装配一对 (ContextManager, WingAgent)。
 
@@ -191,6 +194,7 @@ def _build_runtime(
         max_turns=template.max_turns,
         yolo=template.yolo,
         media=media,
+        input_request_ids=input_request_ids,
     )
     return context_manager, agent
 
@@ -377,6 +381,7 @@ class Session:
             self._messages,
             self._store,
             self._metadata.workspace,
+            input_request_ids=old_agent.input_request_ids,
         )
         self._context_manager.on_history_refresh = self._publish_history_refresh
         # 追加系统提示词是会话级内容（hook 注入的环境信息 + 追加指令），

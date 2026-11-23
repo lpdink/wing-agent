@@ -37,6 +37,7 @@ from wing.event import (
 )
 from wing.common.fs import atomic_write_bytes, atomic_write_text
 from wing.common.logger import log
+from wing.common.utils import validate_request_id
 from wing.context import CacheLedger, empty_report
 from wing.metrics import usage_report as build_usage_report
 from wing.event_bus import event_bus
@@ -315,6 +316,8 @@ class WingRuntime:
         media: list[MediaRef] | None = None,
     ) -> None:
         """唯一入站入口。设置 RequestContext，try/finally 确保恢复。"""
+        if request_id is not None:
+            validate_request_id(request_id)
         token = set_request_context(
             request_id=request_id,
             session_id=session_id,

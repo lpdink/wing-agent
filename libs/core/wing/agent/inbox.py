@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 
 from wing.common.logger import log, log_excerpt
@@ -45,10 +45,45 @@ class Inbound:
         )
 
 
+RECENT_INPUT_ID_LIMIT = 1024
+
+
+class InputRequestIds:
+    """Collision guard shared by the agents of a loaded session."""
+
+    def __init__(self) -> None:
+        self._active: set[str] = set()
+        self._recent: OrderedDict[str, None] = OrderedDict()
+
+    def require_available(self, request_id: str | None) -> None:
+        if request_id is not None and (
+            request_id in self._active or request_id in self._recent
+        ):
+            raise InvalidInputError("request_id already used in this session")
+
+    def reserve(self, request_id: str | None) -> None:
+        if request_id is not None:
+            self._active.add(request_id)
+
+    def release(self, items: list[Inbound]) -> None:
+        for item in items:
+            if item.request_id is not None:
+                self._active.discard(item.request_id)
+
+    def remember_committed(self, request_ids: list[str]) -> None:
+        for request_id in request_ids:
+            self._recent[request_id] = None
+            if len(self._recent) > RECENT_INPUT_ID_LIMIT:
+                self._recent.popitem(last=False)
+
+
 class Inbox:
     """Agent 入站消息管理：队列 + feedback waiters + 取出口闸门。"""
 
-    def __init__(self) -> None:
+    def __init__(self, input_request_ids: InputRequestIds | None = None) -> None:
+        self.input_request_ids = (
+            input_request_ids if input_request_ids is not None else InputRequestIds()
+        )
         self._queue: deque[Inbound] = deque()
         # tool_call_id → Future，严格寻址。
         self._feedback_waiters: dict[str, asyncio.Future[str]] = {}
@@ -89,6 +124,7 @@ class Inbox:
         return first
 
     def _enqueue(self, item: Inbound) -> None:
+        self.input_request_ids.reserve(item.request_id)
         self._queue.append(item)
         if not self._held:
             self._ready.set()
@@ -99,7 +135,7 @@ class Inbox:
             self._ready.set()
 
     def drain(self) -> list[Inbound]:
-        """Non-blocking drain：取出队列中所有待处理消息。"""
+        """Take queued input, leaving its IDs reserved until the batch settles."""
         items = self.snapshot()
         self._queue.clear()
         self._ready.clear()
@@ -115,7 +151,9 @@ class Inbox:
         告知前端（`InterruptedEvent.dropped_request_ids`）——前端只把这些
         消息标为 discarded，不误伤锁等待期间新到的消息。
         """
-        return self.drain()
+        dropped = self.drain()
+        self.input_request_ids.release(dropped)
+        return dropped
 
     @property
     def has_pending(self) -> bool:
@@ -195,6 +233,7 @@ class Inbox:
         答复只承载文本**：命中 waiter 时 media 无处安放（Ask 答复通道是纯文本），
         记 WARN 后按文本 resolve——不发明新语义，也不静默吞掉调用方的意图。
         """
+        self.input_request_ids.require_available(request_id)
         if tool_call_id is not None:
             if self.resolve(tool_call_id, content):
                 if media:

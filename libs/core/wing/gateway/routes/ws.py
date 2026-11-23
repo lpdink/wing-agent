@@ -27,6 +27,7 @@ import uuid
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from wing.common.logger import log
+from wing.common.utils import validate_request_id
 from wing.event import ErrorEvent, wire_dump
 from wing.request_context import (
     get_request_context,
@@ -134,6 +135,7 @@ async def handle_ws(ws: WebSocket) -> None:
                         )
                         continue
                     req = ClientRequest(**payload)
+                    validate_request_id(req.request_id)
                     # 帧级关联上下文：本帧处理期的日志（含下面的失败日志）带上
                     # session / request 归属。turn 内部另有更细的绑定
                     # （react_loop.run_turn），这里补的是通道层。
@@ -156,7 +158,7 @@ async def handle_ws(ws: WebSocket) -> None:
                 # set_request_context 里设过 session / request 归属，这里原样带上
                 # ——客户端据此把"服务端拒绝"关联回刚发出的那条消息（request_id
                 # 是它自己生成、随帧带来的那个）。非 ClientRequest 帧（工具结果等）
-                # 没设过上下文 → 两字段为 None / 新 uuid，wire_dump 剥除 null 后
+                # 以及非法 request_id 都不绑上下文 → 两字段为 None / 新 uuid，剥除 null 后
                 # 与历史形状一致。
                 ctx = get_request_context()
                 await ws.send_text(

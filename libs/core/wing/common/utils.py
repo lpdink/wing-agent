@@ -1,3 +1,4 @@
+import re
 import uuid
 from datetime import datetime
 
@@ -26,6 +27,16 @@ class InvalidInputError(ValueError):
     不需要改动；需要把 400 的口径钉死的地方（如 send 路由只该为"输入问题"回
     400，不该吞掉链上未来出现的其它 ``ValueError``）可以精确捕获本类型。
     """
+
+
+_REQUEST_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def validate_request_id(value: str) -> None:
+    if _REQUEST_ID.fullmatch(value) is None:
+        raise InvalidInputError(
+            "request_id must be 1–64 ASCII letters, digits, underscores or hyphens"
+        )
 
 
 def is_utf8_encodable(value: str) -> bool:
