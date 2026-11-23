@@ -67,7 +67,7 @@ use crate::shared::panels::settings::SaveOutcome;
 use crate::shared::panels::settings::SettingsAction;
 use crate::shared::panels::settings::SettingsPanel;
 use crate::shared::panels::settings::View;
-use crate::tui::TermEvent;
+use crate::tui::{TermEvent, is_paste_clipboard_key};
 use crate::ui::settings::SettingsCatalogs;
 use crate::ui::settings::SettingsOverlay;
 use crate::ui::settings::anchors_viewport_rows;
@@ -78,6 +78,7 @@ use crate::ui::welcome::art;
 use crate::ui::welcome::sprite;
 use crate::ui::welcome::wordmark;
 use crate::ui::welcome::{ART_GAP, ART_TERM_ROWS, PERCHED_TOP_PAD};
+use crate::util::clipboard_paste::{PasteFailure, PasteMode, PasteOutcome};
 
 /// `sysexits.h` 的 `EX_CONFIG`：让编排器判别"这是配置问题不是网络问题"。
 pub(crate) const EX_CONFIG: u8 = 78;
@@ -238,7 +239,14 @@ pub async fn run_setup_tui<B: Backend>(
     config: &mut AppConfig,
     endpoint: &GatewayEndpoint,
 ) -> Result<SetupOutcome> {
-    run_setup_tui_with(terminal, http, config, endpoint, &mut TerminalEvents).await
+    run_setup_tui_with(
+        terminal,
+        http,
+        config,
+        endpoint,
+        &mut TerminalEvents::default(),
+    )
+    .await
 }
 
 /// 循环本体：三个依赖都可注入（**单测的全部入口**；生产入口只多接了一个事件源）。
@@ -280,6 +288,7 @@ where
 
     let mut note = baseline_note(panel.problems());
     let mut ctrl_c_at: Option<Instant> = None;
+    let mut clipboard_read = None;
 
     loop {
         draw_setup_frame(
@@ -292,8 +301,37 @@ where
             true,
         )?;
 
-        let key = match next_setup_input(terminal, events).await? {
+        let input = tokio::select! {
+            input = next_setup_input(terminal, events) => input?,
+            result = async {
+                match clipboard_read.as_mut() {
+                    Some((_, read)) => read.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let (target, _) = clipboard_read.take().expect("clipboard read completed");
+                if panel.paste_target() == Some(target) {
+                    note = baseline_note(panel.problems());
+                    let outcome = crate::util::clipboard_paste::settings_text(&result)
+                        .and_then(|text| panel.insert_paste(target, text).map_err(str::to_owned));
+                    if let Err(message) = outcome {
+                        note = Note::error(message);
+                    }
+                }
+                continue;
+            }
+        };
+        let key = match input {
             SetupInput::Key(key) => key,
+            SetupInput::Paste(text) => {
+                if let Some(target) = panel.paste_target() {
+                    note = baseline_note(panel.problems());
+                    if let Err(message) = panel.insert_paste(target, &text) {
+                        note = Note::error(message);
+                    }
+                }
+                continue;
+            }
             SetupInput::StreamClosed => return Ok(SetupOutcome::Quit),
             SetupInput::Handled => continue,
         };
@@ -316,6 +354,15 @@ where
 
         // 任何其它按键把瞬态提示换回基线（保存回执 / Ctrl+C 提示都只挂到下一次按键）。
         note = baseline_note(panel.problems());
+
+        if is_paste_clipboard_key(&key) {
+            if clipboard_read.is_none()
+                && let Some(target) = panel.paste_target()
+            {
+                clipboard_read = Some((target, Box::pin(http.read_clipboard())));
+            }
+            continue;
+        }
 
         match panel.handle_key(key) {
             SettingsAction::None => {}
@@ -342,6 +389,9 @@ where
                 .await;
                 note = save_note;
                 if ready {
+                    if let Some(saved) = panel.saved_interface() {
+                        *config = crate::config::store::appconfig_from_doc(saved);
+                    }
                     // 关闭 overlay（背板 + 就绪行），短暂停留让用户看见，然后交还启动链。
                     draw_setup_frame(
                         terminal,
@@ -383,10 +433,11 @@ where
     }
 }
 
-/// 循环关心的三种输入（[`next_setup_input`] 的产物）。
+/// Input consumed by the setup loop.
 enum SetupInput {
     /// 该转给面板的按键。
     Key(KeyEvent),
+    Paste(String),
     /// 事件源断了（真实环境只在 fatal 时）——循环当退出，不空转。
     StreamClosed,
     /// 已经在归一里处理掉了（Resize 已重画；鼠标 / tick 不消费）——继续循环。
@@ -406,7 +457,8 @@ async fn next_setup_input<B: Backend, E: SetupEvents>(
 ) -> Result<SetupInput> {
     match events.next_event().await {
         Some(TermEvent::Key(key)) if key.kind == KeyEventKind::Press => Ok(SetupInput::Key(key)),
-        // 其余的 `Key`（Release / Repeat）、鼠标、粘贴、focus、tick：setup 不消费。
+        Some(TermEvent::Paste(text)) => Ok(SetupInput::Paste(text)),
+        // 其余的 `Key`（Release / Repeat）、鼠标、focus、tick：setup 不消费。
         Some(TermEvent::Resize(_, _)) => {
             if let Err(e) = terminal.clear() {
                 tracing::warn!("terminal clear after resize failed: {e}");
@@ -546,6 +598,7 @@ trait SetupBackend: SettingsApi {
     fn read_interface(&self) -> Option<InterfaceSource>;
     /// Interface 根的本地写盘（原子写 + `.bak`）。
     fn write_interface(&self, doc: &Value) -> Result<WriteOutcome, StoreError>;
+    async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure>;
 }
 
 impl SetupBackend for GatewayApiClient {
@@ -562,6 +615,10 @@ impl SetupBackend for GatewayApiClient {
     fn write_interface(&self, doc: &Value) -> Result<WriteOutcome, StoreError> {
         crate::config::store::write_interface_doc(doc)
     }
+
+    async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure> {
+        crate::util::clipboard_paste::read_clipboard(PasteMode::TextOnly).await
+    }
 }
 
 /// 事件源（生产 = crossterm 直读；测试 = 脚本序列）。
@@ -569,43 +626,44 @@ trait SetupEvents {
     async fn next_event(&mut self) -> Option<TermEvent>;
 }
 
-/// 生产事件源：`spawn_blocking` 里 poll(100ms) + read，**没有常驻读者**——
-/// 退出即静默，不会像长驻任务那样在 `run_app` 的读者起来之前偷走一个按键。
-struct TerminalEvents;
+/// Retain the in-flight poll if a clipboard result wins the setup select.
+#[derive(Default)]
+struct TerminalEvents {
+    poll: Option<tokio::task::JoinHandle<std::io::Result<Option<TermEvent>>>>,
+}
 
 impl SetupEvents for TerminalEvents {
     async fn next_event(&mut self) -> Option<TermEvent> {
-        tokio::task::spawn_blocking(|| {
-            loop {
-                match crossterm::event::poll(Duration::from_millis(100)) {
-                    Ok(true) => match crossterm::event::read() {
-                        Ok(crossterm::event::Event::Key(key))
-                            if key.kind == KeyEventKind::Press =>
-                        {
-                            return Some(TermEvent::Key(key));
-                        }
-                        Ok(crossterm::event::Event::Resize(width, height)) => {
-                            return Some(TermEvent::Resize(width, height));
-                        }
-                        // 鼠标 / 粘贴 / focus：setup 不消费，继续等（不做鼠标）。
-                        Ok(_) => continue,
-                        Err(e) => {
-                            tracing::error!("crossterm read error: {e}");
-                            return None;
-                        }
-                    },
-                    Ok(false) => continue,
-                    Err(e) => {
-                        tracing::error!("crossterm poll error: {e}");
-                        return None;
-                    }
-                }
+        loop {
+            let poll = self
+                .poll
+                .get_or_insert_with(|| tokio::task::spawn_blocking(poll_terminal));
+            let result = poll.await;
+            self.poll = None;
+            match result {
+                Ok(Ok(Some(event))) => return Some(event),
+                Ok(Ok(None)) => continue,
+                Ok(Err(error)) => tracing::error!(%error, "setup terminal input failed"),
+                Err(error) => tracing::error!(%error, "setup terminal poll task failed"),
             }
-        })
-        .await
-        .ok()
-        .flatten()
+            return None;
+        }
     }
+}
+
+fn poll_terminal() -> std::io::Result<Option<TermEvent>> {
+    use crossterm::event::{Event, poll, read};
+
+    if !poll(Duration::from_millis(100))? {
+        return Ok(None);
+    }
+    let event = match read()? {
+        Event::Key(key) if key.kind == KeyEventKind::Press => TermEvent::Key(key),
+        Event::Resize(width, height) => TermEvent::Resize(width, height),
+        Event::Paste(text) => TermEvent::Paste(text),
+        _ => return Ok(None),
+    };
+    Ok(Some(event))
 }
 
 // ===========================================================================
@@ -1063,6 +1121,7 @@ mod tests {
         interface: Option<InterfaceSource>,
         /// 让 Interface 半边的原子写失败（两半独立性测试）。
         interface_write_fails: bool,
+        clipboard: PasteOutcome,
         sets: RefCell<Vec<SettingsSetRequest>>,
         written_interface: RefCell<Vec<Value>>,
     }
@@ -1081,6 +1140,7 @@ mod tests {
                 set: FakeSet::Saved(saved_response(true, "fp-2", true, vec![])),
                 interface: None,
                 interface_write_fails: false,
+                clipboard: PasteOutcome::Empty,
                 sets: RefCell::new(Vec::new()),
                 written_interface: RefCell::new(Vec::new()),
             }
@@ -1143,6 +1203,10 @@ mod tests {
                 backup_path: None,
             })
         }
+
+        async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure> {
+            Ok(self.clipboard.clone())
+        }
     }
 
     fn saved_response(
@@ -1177,6 +1241,9 @@ mod tests {
 
     impl SetupEvents for ScriptedEvents {
         async fn next_event(&mut self) -> Option<TermEvent> {
+            if matches!(self.queue.front(), Some(TermEvent::Tick)) {
+                tokio::task::yield_now().await;
+            }
             let event = self.queue.pop_front();
             if let (Some(size), Some(TermEvent::Resize(width, height))) = (&self.size, &event) {
                 size.set((*width, *height));
@@ -1434,6 +1501,38 @@ mod tests {
         let mut config = AppConfig::default();
         let (outcome, _) = run(&backend, &mut config, edit_and_save("enabled")).await;
         assert!(matches!(outcome, SetupOutcome::Ready), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn setup_paste_preserves_the_saved_interface_key_for_startup() {
+        let token = "sk-interface-fixture-42";
+        let mut backend = FakeBackend::first_run();
+        backend.clipboard = PasteOutcome::Text(format!("{token}\r\n"));
+        backend.interface = Some(InterfaceSource {
+            groups: crate::config::catalog::interface_groups(),
+            catalog: crate::config::catalog::interface_catalog(),
+            doc: json!({"api_key": "old-fixture-key"}),
+        });
+        let mut config = AppConfig {
+            api_key: Some("old-fixture-key".into()),
+            ..AppConfig::default()
+        };
+        let mut events = vec![
+            key(KeyCode::Char('/')),
+            TermEvent::Paste("api_key\n".into()),
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            TermEvent::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            TermEvent::Tick,
+            key(KeyCode::Enter),
+        ];
+        events.extend(edit_and_save("enabled"));
+        let (outcome, terminal) = run(&backend, &mut config, events).await;
+        assert_eq!(outcome, SetupOutcome::Ready);
+        assert_eq!(backend.written_interface(), [json!({"api_key": token})]);
+        assert_eq!(config.api_key.as_deref(), Some(token));
+        assert!(!format!("{config:?}").contains(token));
+        assert!(!screen(&terminal).contains(token));
     }
 
     // ── ④ 保存后仍 invalid → 留在循环 ───────────────────────────

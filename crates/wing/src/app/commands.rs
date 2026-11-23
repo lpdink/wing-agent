@@ -609,8 +609,8 @@ impl App {
 
         // 本地剪贴板读取（L1）的回执同样是 composer 的：换过会话草稿还在，粘贴照落
         // （文本进草稿、图片进流水线）。
-        if let FetchPayload::ClipboardPaste(result) = payload {
-            self.on_clipboard_paste(result);
+        if let FetchPayload::ClipboardPaste { target, result } = payload {
+            self.on_clipboard_paste(target, result);
             return;
         }
 
@@ -859,7 +859,7 @@ impl App {
             // 上面已经分派过（这些回执不属于会话：composer 的压缩 / 本地读取 / pending 的
             // 发送失败 / 内容寻址的媒体字节 / 压缩收口）。
             FetchPayload::ClipboardImage { .. }
-            | FetchPayload::ClipboardPaste(_)
+            | FetchPayload::ClipboardPaste { .. }
             | FetchPayload::SendFinished { .. }
             | FetchPayload::CompactDone { .. }
             | FetchPayload::CompactFailed { .. }

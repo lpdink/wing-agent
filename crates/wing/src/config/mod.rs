@@ -328,7 +328,7 @@ impl Default for LayoutConfig {
 /// Gateway host:port is NOT stored here — it is read from the backend
 /// config (`$WING_HOME/core/config.yaml`) via `backend_config::read_backend_gateway_config()`.
 /// This struct only contains TUI-specific settings (colors, layout, rendering, paste).
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
     pub colors: ColorsConfig,
@@ -339,6 +339,17 @@ pub struct AppConfig {
     /// API key for gateway authentication.
     /// Empty or None → no auth header sent.
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("colors", &self.colors)
+            .field("layout", &self.layout)
+            .field("rendering", &self.rendering)
+            .field("paste", &self.paste)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AppConfig {

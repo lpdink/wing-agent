@@ -1669,7 +1669,7 @@ pub struct SettingsStatusResponse {
 }
 
 /// POST /api/settings/set 请求——全文档替换 + 乐观并发指纹。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingsSetRequest {
     /// 保存基线指纹。`None` ⇒ **不做并发检查**（CLI `--force` 的路径）。
     ///
@@ -1678,6 +1678,14 @@ pub struct SettingsSetRequest {
     pub base: Option<String>,
     /// 稀疏文档（密文三态：`null` = 保留现值 / 字符串 = 设为该值 / 缺键 = 不被覆盖）。
     pub document: serde_json::Value,
+}
+
+impl std::fmt::Debug for SettingsSetRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsSetRequest")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
+    }
 }
 
 /// POST /api/settings/set 响应——保存回执。

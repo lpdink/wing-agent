@@ -141,6 +141,7 @@ pub use doc::SettingsDoc;
 pub use edit::Constraints;
 pub use edit::EditState;
 pub use edit::ScalarKind;
+pub use edit::SettingsPasteTarget;
 pub use groups::AnchorView;
 pub use groups::GroupAnchor;
 pub use problems::Problem;
@@ -185,7 +186,7 @@ pub enum View {
 /// 三者都来自 09/10（`config/catalog.rs` 的 `interface_catalog()` / `interface_groups()`
 /// 与 `config/store.rs` 的 `read_interface_doc()`）。`groups` 是这个根在左栏的锚点
 /// （声明在 Rust 侧——TUI 自己的配置后端不知道）；空表 = 按 catalog 的 `section` 推导。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InterfaceSource {
     pub catalog: SettingNode,
     pub groups: Vec<SettingGroup>,
@@ -223,7 +224,7 @@ pub struct PromptView {
 }
 
 /// 面板对外产出的动作（10 执行）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum SettingsAction {
     /// 键被消费，无事发生（浏览 / 展开折叠 / 进搜索……）。
     None,
@@ -244,6 +245,27 @@ pub enum SettingsAction {
     Close { discard: bool },
     /// `R`：丢弃本地改动并重拉 `get`（App 拉完调用 [`SettingsPanel::apply_snapshot`]）。
     Reload,
+}
+
+impl std::fmt::Debug for SettingsAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::PreviewInterface(_) => f.write_str("PreviewInterface(<redacted>)"),
+            Self::Save {
+                gateway_dirty,
+                interface_dirty,
+                ..
+            } => f
+                .debug_struct("Save")
+                .field("gateway_dirty", gateway_dirty)
+                .field("interface_dirty", interface_dirty)
+                .finish_non_exhaustive(),
+            Self::RestartGateway => f.write_str("RestartGateway"),
+            Self::Close { discard } => f.debug_struct("Close").field("discard", discard).finish(),
+            Self::Reload => f.write_str("Reload"),
+        }
+    }
 }
 
 /// 展开中的 enum 选择项（内联子行）。
@@ -598,6 +620,9 @@ impl SettingsPanel {
         self.stale = false;
         self.restart_required.clear();
         self.edit = None;
+        if let Some(search) = &mut self.search {
+            search.target = SettingsPasteTarget::new();
+        }
         self.pending = None;
         self.choices = None;
         self.rebuild_anchors();
@@ -775,6 +800,11 @@ impl SettingsPanel {
     /// 上次保存回执里的 `restart_required`（08 画「按 Ctrl+R 立即重启」）。
     pub fn restart_required(&self) -> &[String] {
         &self.restart_required
+    }
+
+    pub(crate) fn saved_interface(&self) -> Option<&Value> {
+        self.interface_catalog.as_ref()?;
+        Some(self.doc.baseline(Root::Interface))
     }
 
     pub fn has_interface(&self) -> bool {

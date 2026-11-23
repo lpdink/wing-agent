@@ -228,6 +228,7 @@ pub struct App {
     /// 读它的只有 [`App::sync_welcome`]：它曾是 transcript 顶部一条 system
     /// 消息，现在归名牌（见 [`crate::ui::welcome::SessionFacts`]）。
     session_facts: Option<SessionFacts>,
+    clipboard_read_in_flight: bool,
     /// OSC 5522 通道读回的图片（[`clipboard`] 边界）：压缩流水线的队列——
     /// 队首出队即交给后台压缩，所以这里只留还没轮到的那些。
     pending_clipboard_images: Vec<clipboard::PendingClipboardImage>,
@@ -354,6 +355,7 @@ impl App {
             geometry: FrameGeometry::default(),
             scrollbar: scrollbar::ScrollbarState::default(),
             images,
+            clipboard_read_in_flight: false,
             pending_clipboard_images: Vec::new(),
             clipboard_compress_in_flight: false,
             image_reads: std::collections::VecDeque::new(),
@@ -1326,7 +1328,8 @@ pub async fn run_app(
     // Initial program-status record: the session starts at rest (a mid-turn
     // resume replaces this with `working` when its SyncSession lands).
     app.set_program_status(State::Idle, None);
-    let mut term_events = crate::tui::spawn_event_stream();
+    let (clipboard_target, clipboard_routes) = tokio::sync::watch::channel(app.clipboard_target());
+    let mut term_events = crate::tui::spawn_event_stream_with_clipboard(Some(clipboard_routes));
     let mut transport = Some(transport);
     // Session recovery pending: the transport (WS) is up but the session
     // event subscription isn't re-established yet. Cleared once
@@ -1355,6 +1358,13 @@ pub async fn run_app(
     }
 
     loop {
+        clipboard_target.send_if_modified(|target| {
+            let next = app.clipboard_target();
+            let changed = *target != next;
+            *target = next;
+            changed
+        });
+
         // Draw — frame-gated: streaming deltas coalesce, input draws
         // immediately, idle iterations skip the draw entirely.
         if app.should_draw_now() {

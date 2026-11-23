@@ -1101,12 +1101,11 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Load user configuration (needed early for api_key). `mut`: setup 阶段会预览
     // Interface 根（颜色等改动当场生效），随后原样交给 run_app。
     let mut config = AppConfig::load();
-    let api_key = config
+    let mut api_key = config
         .api_key
         .as_deref()
         .filter(|k| !k.is_empty())
         .map(|k| k.to_string());
-    let api_key_ref = api_key.as_deref();
 
     // Build URLs from host:port — no string replacement needed.
     let ws_url = format!("ws://{host}:{port}/ws");
@@ -1119,8 +1118,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    // HTTP client（预检与后面的建会话共用同一个；构造位置就在预检之前）。
-    let http = GatewayApiClient::new(http_base.clone(), api_key_ref)
+    let mut http = GatewayApiClient::new(http_base.clone(), api_key.as_deref())
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
     // ── 预检：配置可用吗？（最便宜的一次调用；不要把它与"网关不可达"混为一谈）──
@@ -1163,7 +1161,18 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                     eprintln!("{}", setup::quit_note(config_path.as_deref()));
                     return Ok(());
                 }
-                Ok(setup::SetupOutcome::Ready) => screen?,
+                Ok(setup::SetupOutcome::Ready) => {
+                    screen?;
+                    let saved_key = config.api_key.as_ref().filter(|key| !key.is_empty());
+                    if saved_key != api_key.as_ref() {
+                        http =
+                            GatewayApiClient::new(http_base.clone(), saved_key.map(String::as_str))
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to create HTTP client: {e}")
+                                })?;
+                        api_key = saved_key.cloned();
+                    }
+                }
             }
         }
         setup::Preflight::Failed(e) => {
@@ -1172,7 +1181,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     }
 
     // 1. WS connect (get client_id).
-    let gateway = GatewayClient::connect(&ws_url, api_key_ref)
+    let gateway = GatewayClient::connect(&ws_url, api_key.as_deref())
         .await
         .map_err(|e| {
             anyhow::anyhow!(

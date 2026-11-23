@@ -397,9 +397,10 @@ fn settings_owns_the_app_reserved_keys_and_ctrl_o() {
     }
     // Ctrl+C 永远归应用（双击退出）。
     assert_eq!(app.route_key(&ctrl(KeyCode::Char('c'))), KeyRoute::Quit);
-    // Ctrl+V（粘贴手势，同样是应用保留键）也不例外：面板开着时它不出声 ——
-    // 文本粘贴本就不进面板（`handle_paste` 的第一道挡板），与 bracketed paste 同款。
-    assert_eq!(app.route_key(&ctrl(KeyCode::Char('v'))), KeyRoute::Settings);
+    assert_eq!(
+        app.route_key(&ctrl(KeyCode::Char('v'))),
+        KeyRoute::PasteClipboard
+    );
 }
 
 #[test]
@@ -460,6 +461,132 @@ fn paste_while_the_panel_is_open_does_not_reach_the_draft() {
     assert_eq!(app.input.text(), "hello");
 }
 
+#[test]
+fn settings_paste_inserts_long_unicode_text_at_the_editor_cursor() {
+    let mut app = app_with_settings_panel();
+    app.input.set_text("chat draft");
+    press(&mut app, KeyCode::Char('/'));
+    app.handle_paste("accent\r\n");
+    assert_eq!(panel(&app).search_query(), Some("accent"));
+    assert!(panel(&app).search_hits() > 0);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    press_event(&mut app, ctrl(KeyCode::Char('u')));
+    type_text(&mut app, "前後");
+    press(&mut app, KeyCode::Left);
+
+    let pasted = "値🙂".repeat(200);
+    app.handle_paste(&pasted);
+    app.handle_settings_fetch(gateway_schema(), gateway_state(sample_values(), "fp-2"));
+    let editor = panel(&app).edit_state().unwrap();
+    assert_eq!(editor.visible_buffer(), format!("前{pasted}後"));
+    assert_eq!(editor.cursor(), 401);
+    assert_eq!(panel(&app).dirty_count(), 0);
+    assert_eq!(app.input.text(), "chat draft");
+    assert!(app.drain_intents().is_empty());
+
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(panel(&app).dirty_count(), 0);
+}
+
+fn take_clipboard_target(app: &mut App, modifiers: KeyModifiers) -> crate::tui::ClipboardTarget {
+    app.handle_key(KeyEvent::new(KeyCode::Char('v'), modifiers));
+    let target = app
+        .drain_intents()
+        .into_iter()
+        .find_map(|intent| match intent {
+            AppIntent::ReadClipboard(target) => Some(target),
+            _ => None,
+        });
+    target.expect("clipboard request")
+}
+
+#[test]
+fn settings_clipboard_paste_masks_secrets_and_ignores_reopened_targets() {
+    use crate::app::intent::{FetchPayload, FetchResult};
+    use crate::util::clipboard_paste::PasteOutcome;
+
+    let mut app = app_with_settings_panel();
+    goto(&mut app, "api_key");
+    press(&mut app, KeyCode::Enter);
+    let target = take_clipboard_target(&mut app, KeyModifiers::SUPER);
+    let secret = "sk-fixture-ordinary-key-42";
+    let delivered = |target, value: &str| FetchResult {
+        session_id: "prior-session".into(),
+        payload: FetchPayload::ClipboardPaste {
+            target,
+            result: Ok(PasteOutcome::Text(value.into())),
+        },
+    };
+    app.handle_fetch_result(delivered(target, &format!("{secret}\r\n")));
+    let edit = panel(&app).edit_state().unwrap();
+    assert_eq!(edit.visible_buffer(), "•".repeat(secret.len()));
+    assert!(!format!("{edit:?}").contains(secret));
+    let mut terminal = test_terminal(120, 40);
+    draw(&mut app, &mut terminal);
+    let screen = frame_text(terminal.backend().buffer());
+    assert!(!screen.contains(secret));
+    assert!(screen.contains(&"•".repeat(secret.len())));
+
+    let target = take_clipboard_target(&mut app, KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Enter);
+    app.handle_fetch_result(delivered(target, "late"));
+    assert_eq!(panel(&app).edit_state().unwrap().buffer_len(), 0);
+
+    let target = take_clipboard_target(&mut app, KeyModifiers::CONTROL);
+    app.close_settings_panel(true);
+    app.input.set_text("draft stays");
+    app.handle_fetch_result(delivered(target, "late"));
+    assert_eq!(app.input.text(), "draft stays");
+}
+
+#[test]
+fn settings_clipboard_paste_allows_an_existing_image_target_to_settle() {
+    use crate::tui::{ClipboardEvent, ClipboardPayload, ClipboardTarget};
+    use crate::util::clipboard_paste::PasteOutcome;
+
+    let mut app = test_app();
+    app.handle_clipboard(ClipboardEvent::ImageReadStarted {
+        mime: "image/png".into(),
+    });
+    let original = *app.image_reads.front().unwrap();
+    app.inject_settings_panel(
+        &gateway_schema(),
+        gateway_state(sample_values(), "fp-1"),
+        None,
+    );
+    app.handle_key(ctrl(KeyCode::Char('v')));
+    assert!(app.drain_intents().is_empty());
+    app.handle_clipboard(ClipboardEvent::Delivered(ClipboardPayload::Image {
+        bytes: vec![1, 2, 3],
+        mime: "image/png".into(),
+        name: None,
+    }));
+    assert!(app.drain_intents().iter().any(|intent| matches!(
+        intent, AppIntent::CompressClipboardImage { target, .. } if *target == original
+    )));
+    let draft = app.input.text().to_owned();
+    app.handle_clipboard(ClipboardEvent::ImageReadStarted {
+        mime: "image/png".into(),
+    });
+    app.on_clipboard_paste(
+        ClipboardTarget::Default,
+        Ok(PasteOutcome::Image {
+            bytes: vec![1],
+            mime: "image/png".into(),
+        }),
+    );
+    app.close_settings_panel(false);
+    app.handle_clipboard(ClipboardEvent::Delivered(ClipboardPayload::Image {
+        bytes: vec![9],
+        mime: "image/png".into(),
+        name: None,
+    }));
+    assert_eq!(app.input.text(), draft);
+    assert!(app.drain_intents().is_empty());
+}
+
 /// 设置面板开着时，粘贴**先**被面板丢掉 —— 哪怕队列里正躺着一条
 /// ask（面板开着时到达的 ask 入队但不弹）。顺序反过来的话，`Ctrl+V` 会写进
 /// 那条**看不见**的 ask 内联编辑器里。
@@ -500,8 +627,17 @@ fn paste_is_dropped_before_it_can_reach_a_queued_ask() {
     );
     assert_eq!(app.input.text(), "", "也不落到 composer");
 
-    // 关面板后同一条 ask 照旧吃粘贴（挡板只属于面板）。
+    press(&mut app, KeyCode::Char('/'));
+    let target = take_clipboard_target(&mut app, KeyModifiers::CONTROL);
     app.close_settings_panel(false);
+    app.on_clipboard_paste(
+        target,
+        Ok(crate::util::clipboard_paste::PasteOutcome::Text(
+            "late".into(),
+        )),
+    );
+    assert_eq!(app.ask_panels.front().unwrap().states[0].draft, "");
+
     app.handle_paste("ok");
     assert_eq!(
         app.ask_panels.front().expect("队列前端").states[0].draft,

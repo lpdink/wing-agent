@@ -52,7 +52,13 @@ fn init_logging_in(dir: PathBuf) -> Option<WorkerGuard> {
     let (non_blocking, guard) = tracing_appender::non_blocking(writer);
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("wing=warn,tokio_tungstenite=warn"));
+        .unwrap_or_else(|_| EnvFilter::new("wing=warn,tokio_tungstenite=warn"))
+        // Tungstenite's handshake trace logs serialized headers, including Authorization.
+        .add_directive(
+            "tungstenite::handshake::client=debug"
+                .parse()
+                .expect("valid log filter"),
+        );
 
     let subscriber = tracing_subscriber::registry().with(filter).with(
         fmt::layer()

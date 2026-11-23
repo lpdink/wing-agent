@@ -12,11 +12,20 @@ use wing_api_client::GatewayClient as GatewayApiClient;
 use wing_api_client::models::CreateSessionRequest;
 
 /// Gateway connection parameters for reconnection.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GatewayEndpoint {
     pub ws_url: String,
     pub http_base: String,
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for GatewayEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GatewayEndpoint")
+            .field("ws_url", &self.ws_url)
+            .field("http_base", &self.http_base)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Encapsulates the full transport layer for gateway communication.

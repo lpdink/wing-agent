@@ -48,7 +48,7 @@ impl Root {
 /// 值的寻址一律走规范路径（具体下标，`providers[0].api_key`）。
 /// [`Self::value`] 只读；写入口 = [`Self::set_value`] / [`Self::remove_value`]（单条路径）
 /// 与 [`Self::root_doc_mut`] + `shared::doc_edit` 的列表增删移（整项操作，`list.rs` 用）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SettingsDoc {
     gateway: Value,
     interface: Value,

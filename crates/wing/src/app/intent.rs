@@ -13,6 +13,7 @@ use wing_api_client::models::{
     SessionListResponse, SettingsGetResponse, SettingsSchemaResponse, SettingsSetResponse,
 };
 
+use crate::tui::ClipboardTarget;
 use crate::util::image_compress::CompressOptions;
 use crate::util::image_compress::CompressedImage;
 
@@ -80,16 +81,14 @@ pub enum FetchPayload {
         result: Result<std::sync::Arc<Vec<u8>>, String>,
     },
 
-    /// 一条本地剪贴板读取回执（[`AppIntent::ReadClipboard`]）。
-    ///
-    /// 与 `ClipboardImage` 同一条契约：结果属于 composer 而不是会话，
-    /// `handle_fetch_result` 在会话守卫**之前**分派它（换过会话草稿还在，粘贴照落）。
-    ClipboardPaste(
-        Result<
+    /// Local clipboard read, scoped to its original settings input when applicable.
+    ClipboardPaste {
+        target: ClipboardTarget,
+        result: Result<
             crate::util::clipboard_paste::PasteOutcome,
             crate::util::clipboard_paste::PasteFailure,
         >,
-    ),
+    },
     /// Socket write result for a local user submission.
     SendFinished {
         request_id: String,
@@ -108,6 +107,29 @@ pub struct FetchResult {
     pub session_id: String,
     /// The actual payload.
     pub payload: FetchPayload,
+}
+
+/// A settings save may carry replacement credentials.
+pub struct SettingsSaveDocument(Box<serde_json::Value>);
+
+impl From<serde_json::Value> for SettingsSaveDocument {
+    fn from(value: serde_json::Value) -> Self {
+        Self(Box::new(value))
+    }
+}
+
+impl std::ops::Deref for SettingsSaveDocument {
+    type Target = serde_json::Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SettingsSaveDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// A side-effect intent produced by the App state machine.
@@ -142,7 +164,7 @@ pub enum AppIntent {
     /// runner 把读取放进后台任务（子进程 + 每条命令的超时在 `util::clipboard_paste`），
     /// 结果经 [`FetchPayload::ClipboardPaste`] 回到 App —— 事件循环一步不等
     /// （图片读取本来就要秒级，内联 await 会冻 UI）。
-    ReadClipboard,
+    ReadClipboard(ClipboardTarget),
 
     /// 压缩一张刚粘贴进来的图片（通道给的是原始字节）。
     ///
@@ -254,11 +276,11 @@ pub enum AppIntent {
     /// `s`：一键保存两边。Interface 半边在 intent 执行时同步写盘；Gateway 半边异步 POST。
     SaveSettings {
         /// 本次要提交给网关的稀疏文档。
-        gateway: Box<serde_json::Value>,
+        gateway: SettingsSaveDocument,
         /// 乐观并发的基准指纹（面板持有的那一个）。
         base: String,
         /// 要写进 `~/.wing/tui/config.yaml` 的稀疏文档。
-        interface: Box<serde_json::Value>,
+        interface: SettingsSaveDocument,
         /// 哪边真的改了：跳过没有改动的一边（不发空 POST / 不重写文件）。
         gateway_dirty: bool,
         interface_dirty: bool,

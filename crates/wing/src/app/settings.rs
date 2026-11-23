@@ -94,7 +94,7 @@ impl GatewaySaveReport {
 
 /// 等待 Gateway 回执的那一次保存：Interface 半边的结论 + 本次发出的文档
 /// （`ok=true` 时写回缓存，让下次打开面板仍能 cache-first）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(super) struct PendingSettingsSave {
     pub(super) interface: InterfaceSaveReport,
     pub(super) document: Value,
@@ -212,7 +212,7 @@ impl App {
     ///
     /// 三条口径写死在这里：
     /// * 面板开着 + `R` 重载 → **无条件** `apply_snapshot`（丢弃本地改动是它的语义）；
-    /// * 面板开着 + 后台刷新 → 只在面板还干净时应用（否则会抹掉用户刚敲的值）；
+    /// * 面板开着 + 后台刷新 → 只在面板干净且无活动编辑时应用；
     /// * 面板关着 + 有在飞的首次拉取（`settings_pending`）→ 现在打开。
     pub(super) fn handle_settings_fetch(
         &mut self,
@@ -223,7 +223,7 @@ impl App {
         let open_pending = std::mem::take(&mut self.settings_pending);
         self.settings_cache = Some((schema.clone(), state.clone()));
         if let Some(panel) = self.settings_panel.as_mut() {
-            if reload || panel.dirty_count() == 0 {
+            if reload || (panel.dirty_count() == 0 && panel.paste_target().is_none()) {
                 panel.apply_snapshot(&schema, state);
             }
         } else if open_pending {
@@ -282,9 +282,9 @@ impl App {
                 interface_dirty,
             } => {
                 self.push_intent(AppIntent::SaveSettings {
-                    gateway: Box::new(gateway),
+                    gateway: gateway.into(),
                     base,
-                    interface: Box::new(interface),
+                    interface: interface.into(),
                     gateway_dirty,
                     interface_dirty,
                 });

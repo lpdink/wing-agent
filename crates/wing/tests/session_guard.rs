@@ -21,9 +21,9 @@
 //!    在 `cmd/mod.rs` 至少被调用一次（收尾路径存在：guard / panic hook / 主路径 / 向导分支）。
 //! 3. `restore_terminal`（段级屏恢复）**不含**这两个名字 —— 段边界永远不碰会话。
 //! 4. `stdin_proxy::settle_paste_channel(` **恰好两处**：`app/mod.rs::run_app` 中位于
-//!    `spawn_event_stream()`（主 TUI 第一次 poll 的创建点）之前，`cmd/mod.rs::run_tui` 中
+//!    `spawn_event_stream_with_clipboard`（主 TUI 第一次 poll 的创建点）之前，`cmd/mod.rs::run_tui` 中
 //!    位于 `run_setup_tui(`（向导第一次 poll）之前。
-//! 5. `spawn_event_stream` 里 mode 5522 与协议机都门控在探针 verdict 上（`paste_channel()`
+//! 5. `spawn_event_stream_with_clipboard` 里 mode 5522 与协议机都门控在探针 verdict 上（`paste_channel()`
 //!    在前，`?5522h` 与 `clipboard_protocol::spawn(` 在后）；`\x1b[?5522h` 全生产只有这一处。
 //! 6. `appearance::probe_once(` **恰好一处**，位于 `begin_tui_session` 内、`enable_raw_mode()`
 //!    之后、`stdin_proxy::install(` 之前：读应答要非规范模式（raw 之后），而接驳之后 fd 0
@@ -50,7 +50,7 @@ const RAW_MODE_CALL: &str = "enable_raw_mode()";
 const END_CALL: &str = "end_tui_session()";
 const SETTLE_CALL: &str = "stdin_proxy::settle_paste_channel(";
 const VERDICT_READ: &str = "stdin_proxy::paste_channel()";
-const SPAWN_CALL: &str = "spawn_event_stream()";
+const SPAWN_CALL: &str = "spawn_event_stream_with_clipboard(";
 const MACHINE_CALL: &str = "clipboard_protocol::spawn(";
 const ENABLE_CALL: &str = "enable_paste_events(&mut";
 /// 源码里的字面量（含转义字节），不是渲染后的 `?5522h`。
@@ -322,7 +322,7 @@ fn production_of(path: &str) -> String {
 
 /// 规则 4：探针判定只在两处，且都赶在各自段的第一次 crossterm `poll` 之前。
 ///
-/// - `app/mod.rs::run_app`：`spawn_event_stream()`（主 TUI 第一次 poll 的创建点）之前；
+/// - `app/mod.rs::run_app`：`spawn_event_stream_with_clipboard`（主 TUI 第一次 poll 的创建点）之前；
 /// - `cmd/mod.rs::run_tui`：`run_setup_tui(`（向导自己的第一次 poll）之前。
 ///
 /// 阴性拆接驳（`restore` 的 `dup2`）只有这一次机会：事件源单例一注册，fd 0 就不能再换。
@@ -341,7 +341,7 @@ fn the_probe_settles_before_the_first_poll_of_each_segment() {
         describe(&settles)
     );
 
-    // 主 TUI：位于 `run_app`，且在 `spawn_event_stream()` 之前。
+    // 主 TUI：位于 `run_app`，且在 `spawn_event_stream_with_clipboard` 之前。
     let app = production_of(APP_FILE);
     let (path, hit) = settles
         .iter()
@@ -390,13 +390,13 @@ fn the_probe_settles_before_the_first_poll_of_each_segment() {
 #[test]
 fn the_paste_channel_starts_only_after_a_positive_probe() {
     let source = production_of(SESSION_FILE);
-    let body = function_body(&source, "spawn_event_stream");
+    let body = function_body(&source, "spawn_event_stream_with_clipboard");
 
     let verdict = live_hits(&body, VERDICT_READ);
     assert_eq!(
         verdict.len(),
         1,
-        "`spawn_event_stream` 必须恰好读一次判定：{verdict:?}"
+        "`spawn_event_stream_with_clipboard` 必须恰好读一次判定：{verdict:?}"
     );
     assert!(
         live_hits(&body, "PasteChannel::Supported").len() == 1,

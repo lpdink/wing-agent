@@ -898,7 +898,8 @@ fn build_auth_headers(api_key: Option<&str>) -> Result<HeaderMap, ApiClientError
     if let Some(key) = api_key
         && !key.is_empty()
     {
-        let value = format!("Bearer {key}").parse()?;
+        let mut value: reqwest::header::HeaderValue = format!("Bearer {key}").parse()?;
+        value.set_sensitive(true);
         headers.insert(AUTHORIZATION, value);
     }
     Ok(headers)

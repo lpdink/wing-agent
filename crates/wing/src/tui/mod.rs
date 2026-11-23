@@ -43,6 +43,7 @@ pub use appearance::detected_appearance;
 pub use clipboard_protocol::ClipboardEvent;
 pub use clipboard_protocol::ClipboardFailure;
 pub use clipboard_protocol::ClipboardPayload;
+pub use clipboard_protocol::ClipboardTarget;
 pub use cursor::CursorGate;
 
 /// 唯一的终端类型：`CursorGate` 是出帧口的 backend 装饰，让**稳态**的一帧只以一次 write
@@ -50,7 +51,6 @@ pub use cursor::CursorGate;
 pub type WingTerminal = Terminal<CursorGate<CrosstermBackend<Stdout>>>;
 
 /// Events from the terminal (keyboard, mouse, resize, paste, focus).
-#[derive(Debug)]
 pub enum TermEvent {
     Key(KeyEvent),
     Mouse(crossterm::event::MouseEvent),
@@ -61,6 +61,20 @@ pub enum TermEvent {
     Resize(u16, u16),
     Focus(bool),
     Tick,
+}
+
+impl std::fmt::Debug for TermEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(key) => f.debug_tuple("Key").field(key).finish(),
+            Self::Mouse(mouse) => f.debug_tuple("Mouse").field(mouse).finish(),
+            Self::Paste(_) => f.write_str("Paste(<redacted>)"),
+            Self::Clipboard(event) => f.debug_tuple("Clipboard").field(event).finish(),
+            Self::Resize(w, h) => f.debug_tuple("Resize").field(w).field(h).finish(),
+            Self::Focus(focused) => f.debug_tuple("Focus").field(focused).finish(),
+            Self::Tick => f.write_str("Tick"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +470,12 @@ fn enable_paste_events(w: &mut impl io::Write) -> io::Result<()> {
 ///
 /// 必须在 crossterm 事件源首次创建之前调用（fd 0 在此时已经确定：阳性时是 pty slave）。
 pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
+    spawn_event_stream_with_clipboard(None)
+}
+
+pub(crate) fn spawn_event_stream_with_clipboard(
+    target: Option<tokio::sync::watch::Receiver<ClipboardTarget>>,
+) -> mpsc::Receiver<TermEvent> {
     let mut slot = event_task_slot();
     // 全进程只调一次（真实调用点只有 `app::run_app`）：第二次 spawn 要么覆盖旧 handle
     // （旧任务永远停不下来），要么（收尾过之后再 spawn）踩上不复位的 `EVENT_STOP`——新流
@@ -474,7 +494,7 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
         let mut out = io::stdout();
         let _ = enable_paste_events(&mut out);
         let _ = out.flush();
-        clipboard_protocol::spawn(sequences, tx.clone());
+        clipboard_protocol::spawn(sequences, tx.clone(), target);
     }
     let handle = tokio::spawn(async move {
         loop {
@@ -533,6 +553,36 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
     });
     *slot = Some(handle);
     rx
+}
+
+/// `Ctrl+V` / `super+v` — 读系统剪贴板（L1）。
+///
+/// 两种解码形态都要接住：没开 kitty 键盘协议的终端把 Ctrl+V 发成控制字节 `0x16`
+/// （crossterm → `Char('v') + CONTROL`）；开了协议的终端把 Cmd+V 回传成
+/// `CSI 118;9u`（crossterm → `Char('v') + SUPER`，见 `tests/clipboard_paste_keys.rs`）。
+///
+/// 口径（两分支不对称是刻意的）：
+///
+/// - `super+v` 与 `super+shift+v`（macOS 的 Paste and Match Style）都触发粘贴 ——
+///   SHIFT 只改变粘贴的“样式”，语义仍是粘贴；`super+alt/ctrl+v` 是与粘贴无关的
+///   系统/终端组合，不接。
+/// - `Ctrl+V` 触发；`Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧）与
+///   `Ctrl+Alt+V`（kitty 把 AltGr 报成 ctrl+alt）不接 —— 绑上只会吃掉字符输入或
+///   得到「有时被终端吃掉、有时没有」的不一致。
+pub(crate) fn is_paste_clipboard_key(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
+
+    matches!(key.code, KeyCode::Char('v' | 'V'))
+        && if key.modifiers.contains(KeyModifiers::SUPER) {
+            !key.modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
+        } else {
+            key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+        }
 }
 
 /// Check if a key event is the quit shortcut (Ctrl+C).
