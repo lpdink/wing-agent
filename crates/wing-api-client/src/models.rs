@@ -1673,6 +1673,12 @@ pub struct SettingsGetResponse {
     pub pending_restart_paths: Option<Vec<String>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestartListener {
+    pub host: String,
+    pub port: u16,
+}
+
 /// GET /api/settings/status 响应——启动路径上的最便宜预检。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingsStatusResponse {
@@ -1683,6 +1689,8 @@ pub struct SettingsStatusResponse {
     pub problems: Vec<SettingProblem>,
     #[serde(default)]
     pub fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_listener: Option<RestartListener>,
 }
 
 /// POST /api/settings/set 请求——全文档替换 + 乐观并发指纹。

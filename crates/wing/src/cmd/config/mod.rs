@@ -432,6 +432,7 @@ mod tests {
         // invalid → 1（setup mode 时文案带修复模式）。
         let mut invalid = FakeBackend::healthy(catalog(), document());
         invalid.status = Ok(SettingsStatusResponse {
+            restart_listener: None,
             valid: false,
             setup_mode: true,
             problems: vec![problem(

@@ -328,6 +328,7 @@ class TestSettingsStatus:
             "setup_mode": False,
             "problems": [],
             "fingerprint": _sha256(config_path),
+            "restart_listener": {"host": "127.0.0.1", "port": 32523},
         }
 
     def test_invalid_after_external_edit(self, gateway):

@@ -216,6 +216,11 @@ class SettingsGetResponse(BaseModel):
     )
 
 
+class RestartListener(BaseModel):
+    host: str
+    port: int
+
+
 class SettingsStatusResponse(BaseModel):
     """GET /api/settings/status 响应——启动路径上的最便宜预检。"""
 
@@ -225,6 +230,9 @@ class SettingsStatusResponse(BaseModel):
         default_factory=list, description="当前全部问题"
     )
     fingerprint: str | None = Field(default=None, description="磁盘文件的 sha256 指纹")
+    restart_listener: RestartListener | None = Field(
+        default=None, description="此指纹对应的重启监听地址，未通过启动校验时为空"
+    )
 
 
 # ============================================================
