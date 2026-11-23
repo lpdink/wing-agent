@@ -200,7 +200,7 @@ impl App {
     ///
     /// 三条口径写死在这里：
     /// * 面板开着 + `R` 重载 → **无条件** `apply_snapshot`（丢弃本地改动是它的语义）；
-    /// * 面板开着 + 后台刷新 → 只在面板还干净时应用（否则会抹掉用户刚敲的值）；
+    /// * 面板开着 + 后台刷新 → 只在面板干净且无活动编辑时应用；
     /// * 面板关着 + 有在飞的首次拉取（`settings_pending`）→ 现在打开。
     pub(super) fn handle_settings_fetch(
         &mut self,
@@ -286,9 +286,9 @@ impl App {
                 interface_dirty,
             } => {
                 self.push_intent(AppIntent::SaveSettings {
-                    gateway: Box::new(gateway),
+                    gateway: gateway.into(),
                     base,
-                    interface: Box::new(interface),
+                    interface: interface.into(),
                     gateway_dirty,
                     interface_dirty,
                 });

@@ -1113,7 +1113,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Load user configuration (needed early for api_key). `mut`: setup 阶段会预览
     // Interface 根（颜色等改动当场生效），随后原样交给 run_app。
     let mut config = AppConfig::load();
-    let api_key = config
+    let mut api_key = config
         .api_key
         .as_deref()
         .filter(|k| !k.is_empty())
@@ -1130,7 +1130,6 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    // HTTP client（预检与后面的建会话共用同一个；构造位置就在预检之前）。
     let mut http = GatewayApiClient::new(http_base.clone(), api_key.as_deref())
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
@@ -1176,8 +1175,15 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                 }
                 Ok(setup::SetupOutcome::Ready) => {
                     screen?;
-                    config = AppConfig::load();
-                    http = GatewayApiClient::new(http_base.clone(), config.api_key.as_deref())?;
+                    let saved_key = config.api_key.as_ref().filter(|key| !key.is_empty());
+                    if saved_key != api_key.as_ref() {
+                        http =
+                            GatewayApiClient::new(http_base.clone(), saved_key.map(String::as_str))
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to create HTTP client: {e}")
+                                })?;
+                        api_key = saved_key.cloned();
+                    }
                 }
             }
         }
@@ -1187,17 +1193,14 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     }
 
     // 1. WS connect (get client_id).
-    let gateway = GatewayClient::connect(
-        &ws_url,
-        config.api_key.as_deref().filter(|key| !key.is_empty()),
-    )
-    .await
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to connect to gateway at {ws_url}: {e}\n\
+    let gateway = GatewayClient::connect(&ws_url, api_key.as_deref())
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to connect to gateway at {ws_url}: {e}\n\
                  Make sure the gateway is running: wing start"
-        )
-    })?;
+            )
+        })?;
 
     let client_id = gateway.client_id().to_string();
     tracing::info!(client_id = %client_id, "WS connected");

@@ -14,6 +14,7 @@ use std::ops::Range;
 use wing_api_client::models::SettingNode;
 
 use super::doc::Root;
+use super::edit::SettingsPasteTarget;
 use crate::shared::doc_edit::ancestors;
 use crate::shared::doc_edit::path_is_within;
 
@@ -148,6 +149,7 @@ fn find_spans(haystack: &str, needle: &str) -> Vec<Range<usize>> {
 /// 面板侧的搜索会话：query + 进入搜索时的展开 / 光标 / 分组快照（Esc 恢复用）。
 #[derive(Debug, Clone)]
 pub(crate) struct SearchState {
+    pub(super) target: SettingsPasteTarget,
     query: String,
     snapshot: HashSet<(Root, String)>,
     cursor_snapshot: Option<(Root, String)>,
@@ -161,6 +163,7 @@ impl SearchState {
         group: usize,
     ) -> Self {
         Self {
+            target: SettingsPasteTarget::new(),
             query: String::new(),
             snapshot: expanded.clone(),
             cursor_snapshot: cursor,
@@ -179,6 +182,10 @@ impl SearchState {
 
     pub(crate) fn push(&mut self, c: char) {
         self.query.push(c);
+    }
+
+    pub(super) fn insert_paste(&mut self, text: &str) {
+        self.query.push_str(text);
     }
 
     pub(crate) fn backspace(&mut self) {

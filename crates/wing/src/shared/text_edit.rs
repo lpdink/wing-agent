@@ -18,6 +18,13 @@ pub(crate) fn char_to_byte(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
+/// Insert a batch at a character offset, shifting the suffix only once.
+pub(crate) fn insert_str(buffer: &mut String, cursor: &mut usize, text: &str) {
+    let byte = char_to_byte(buffer, *cursor);
+    buffer.insert_str(byte, text);
+    *cursor += text.chars().count();
+}
+
 /// 单行编辑的一条操作（相对光标；没有选中区，也没有撤销栈）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EditOp {

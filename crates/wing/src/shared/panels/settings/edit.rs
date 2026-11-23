@@ -12,6 +12,9 @@
 //! pattern 只做尽力而为的子集匹配（仓库没有 regex 依赖，不为这一步加依赖），
 //! 不支持的构造**跳过**而不是误报。
 
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
@@ -20,6 +23,7 @@ use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 
 use super::doc::Root;
+use super::{SettingsPanel, View};
 use crate::shared::text_edit;
 use crate::shared::text_edit::EditOp;
 
@@ -72,9 +76,21 @@ pub(crate) enum EditEvent {
     Submit,
 }
 
+/// Identity of a single open settings editor or search input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsPasteTarget(u64);
+
+impl SettingsPasteTarget {
+    pub(crate) fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// 内联编辑器状态。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EditState {
+    target: SettingsPasteTarget,
     root: Root,
     path: String,
     kind: ScalarKind,
@@ -86,6 +102,18 @@ pub struct EditState {
     constraints: Constraints,
     /// 打开编辑器时缓冲所代表的值（校验通过才有）——「无操作」判据。
     initial_value: Option<Value>,
+}
+
+impl fmt::Debug for EditState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("EditState")
+            .field("root", &self.root)
+            .field("path", &self.path)
+            .field("kind", &self.kind)
+            .field("cursor", &self.cursor)
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
 }
 
 impl EditState {
@@ -108,6 +136,7 @@ impl EditState {
         // 于是「打开 → 不改 → Enter」不会把声明默认值物化成显式覆盖。
         let initial_value = validate_buffer(kind, &buffer, required, &constraints).ok();
         Self {
+            target: SettingsPasteTarget::new(),
             root,
             path,
             kind,
@@ -220,6 +249,19 @@ impl EditState {
         self.error = Some(message);
     }
 
+    fn insert_paste(&mut self, text: &str) -> Result<(), &'static str> {
+        if self.kind == ScalarKind::Json {
+            let prefix = &self.buffer[..text_edit::char_to_byte(&self.buffer, self.cursor)];
+            let text = json_paste(prefix, text)?;
+            text_edit::insert_str(&mut self.buffer, &mut self.cursor, &text);
+        } else {
+            let text = single_line_paste(text)?;
+            text_edit::insert_str(&mut self.buffer, &mut self.cursor, text);
+        }
+        self.error = None;
+        Ok(())
+    }
+
     fn insert(&mut self, c: char) {
         text_edit::apply(&mut self.buffer, &mut self.cursor, EditOp::Insert(c));
     }
@@ -242,6 +284,93 @@ impl EditState {
     pub(crate) fn validate(&self) -> Result<Value, String> {
         validate_buffer(self.kind, &self.buffer, self.required, &self.constraints)
     }
+}
+
+impl SettingsPanel {
+    pub(crate) fn paste_target(&self) -> Option<SettingsPasteTarget> {
+        if let Some(edit) = &self.edit {
+            return Some(edit.target);
+        }
+        if self.pending.is_some() || self.view == View::Help || self.choices.is_some() {
+            return None;
+        }
+        self.search.as_ref().map(|search| search.target)
+    }
+
+    /// Apply text only to the input instance that owned the paste gesture.
+    pub(crate) fn insert_paste(
+        &mut self,
+        target: SettingsPasteTarget,
+        text: &str,
+    ) -> Result<(), &'static str> {
+        if self.paste_target() != Some(target) {
+            return Ok(());
+        }
+        if let Some(edit) = &mut self.edit {
+            return edit.insert_paste(text);
+        }
+        if let Some(search) = &mut self.search {
+            search.insert_paste(single_line_paste(text)?);
+            self.rebuild_search();
+        }
+        Ok(())
+    }
+}
+
+fn is_line_control(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+fn single_line_paste(text: &str) -> Result<&str, &'static str> {
+    let text = text
+        .strip_suffix("\r\n")
+        .or_else(|| text.strip_suffix(['\r', '\n']))
+        .unwrap_or(text);
+    if text.chars().any(is_line_control) {
+        return Err("Paste a single line without tabs or control characters");
+    }
+    Ok(text)
+}
+
+#[derive(Default)]
+struct JsonString {
+    quoted: bool,
+    escaped: bool,
+}
+
+impl JsonString {
+    fn advance(&mut self, c: char) {
+        if self.escaped {
+            self.escaped = false;
+        } else if c == '"' {
+            self.quoted = !self.quoted;
+        } else if c == '\\' && self.quoted {
+            self.escaped = true;
+        }
+    }
+}
+
+fn json_paste(prefix: &str, text: &str) -> Result<String, &'static str> {
+    let mut state = JsonString::default();
+    for c in prefix.chars() {
+        state.advance(c);
+    }
+    let mut normalized = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !state.quoted && matches!(c, '\r' | '\n' | '\t') {
+            if c == '\r' && chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            normalized.push(' ');
+        } else if is_line_control(c) {
+            return Err("Paste JSON with control characters escaped inside strings");
+        } else {
+            normalized.push(c);
+            state.advance(c);
+        }
+    }
+    Ok(normalized)
 }
 
 /// 本地校验的实体（`EditState::open` 的初始值判定与 `EditState::validate` 共用同一份）。
@@ -682,6 +811,52 @@ mod tests {
             constraints(),
             initial.into(),
         )
+    }
+
+    #[test]
+    fn settings_paste_strips_one_line_ending_and_keeps_the_rest_exact() {
+        for ending in ["", "\n", "\r\n", "\r"] {
+            let mut edit = editor(ScalarKind::Secret, "ignored");
+            edit.insert_paste(&format!("pré-clé{ending}")).unwrap();
+            assert_eq!(edit.validate().unwrap(), "pré-clé");
+            assert_eq!(edit.cursor(), 7);
+            for bad in [
+                "new\nline",
+                "tab\tinside",
+                "end\r\n\n",
+                "escape\x1b",
+                "line\u{2028}break",
+            ] {
+                assert!(edit.insert_paste(bad).is_err());
+                assert_eq!(edit.validate().unwrap(), "pré-clé");
+            }
+        }
+    }
+
+    #[test]
+    fn settings_paste_of_pretty_json_changes_only_whitespace_outside_strings() {
+        let mut edit = editor(ScalarKind::Json, "");
+        let pretty = "{\r\n\t\"message\": \"a \\n b\",\n\t\"data\": [1, 2]\n}\r\n";
+        edit.insert_paste(pretty).unwrap();
+        assert_eq!(
+            edit.validate().unwrap(),
+            serde_json::from_str::<Value>(pretty).unwrap()
+        );
+        assert!(!edit.visible_buffer().chars().any(is_line_control));
+        let mut edit = editor(ScalarKind::Json, r#"{"key":"到"}"#);
+        edit.cursor = 9;
+        assert!(edit.insert_paste("\n").is_err());
+        edit.insert_paste(r#"\t"#).unwrap();
+        assert_eq!(edit.validate().unwrap(), serde_json::json!({"key": "到\t"}));
+    }
+
+    #[test]
+    fn settings_paste_keeps_numeric_validation_on_submit() {
+        let mut edit = editor(ScalarKind::Int, "4");
+        edit.insert_paste("2\r\n").unwrap();
+        assert_eq!(edit.validate().unwrap(), 42);
+        edit.insert_paste("q").unwrap();
+        assert!(edit.validate().is_err());
     }
 
     fn node(kind: SettingKind) -> SettingNode {

@@ -12,6 +12,7 @@ use crate::app::clipboard::MAX_PENDING_IMAGES;
 use crate::tui::ClipboardEvent;
 use crate::tui::ClipboardFailure;
 use crate::tui::ClipboardPayload;
+use crate::tui::ClipboardTarget;
 use crate::ui::input_area::ImageChipTarget;
 use crate::ui::toast::ToastKind;
 use crate::util::clipboard_paste::PasteFailure;
@@ -97,10 +98,13 @@ fn deliver_image(app: &mut App, bytes: Vec<u8>, name: Option<&str>) {
 
 /// 入队一张图（本地通道的形态：读回字节才知道是图片，占位符此刻插）。
 fn paste_image(app: &mut App, bytes: Vec<u8>) {
-    app.on_clipboard_paste(Ok(PasteOutcome::Image {
-        bytes,
-        mime: "image/png".into(),
-    }));
+    app.on_clipboard_paste(
+        ClipboardTarget::Default,
+        Ok(PasteOutcome::Image {
+            bytes,
+            mime: "image/png".into(),
+        }),
+    );
 }
 
 #[test]
@@ -341,10 +345,13 @@ fn a_local_paste_never_claims_the_read_in_flight() {
     assert_eq!(remote.number, 1);
 
     // 本地通道交付一张图（读回字节才知道是图片）：新占位符 #2。
-    app.on_clipboard_paste(Ok(PasteOutcome::Image {
-        bytes: png(8, 8, [1, 1, 1]),
-        mime: "image/png".into(),
-    }));
+    app.on_clipboard_paste(
+        ClipboardTarget::Default,
+        Ok(PasteOutcome::Image {
+            bytes: png(8, 8, [1, 1, 1]),
+            mime: "image/png".into(),
+        }),
+    );
     assert_eq!(app.input.text(), "a [Image #1 ⠋][Image #2 ⠋ 处理中…]");
     assert_eq!(app.image_reads.front(), Some(&remote), "在途读纹丝不动");
 
@@ -731,7 +738,10 @@ async fn the_runner_compresses_on_the_blocking_pool() {
 #[test]
 fn local_paste_text_lands_in_the_composer() {
     let mut app = test_app();
-    app.on_clipboard_paste(Ok(PasteOutcome::Text("local 文本".into())));
+    app.on_clipboard_paste(
+        ClipboardTarget::Default,
+        Ok(PasteOutcome::Text("local 文本".into())),
+    );
     assert_eq!(app.input.text(), "local 文本");
 }
 
@@ -742,7 +752,10 @@ fn local_paste_text_respects_the_composer_gate() {
         Vec::new(),
         None,
     ));
-    app.on_clipboard_paste(Ok(PasteOutcome::Text("hidden".into())));
+    app.on_clipboard_paste(
+        ClipboardTarget::Default,
+        Ok(PasteOutcome::Text("hidden".into())),
+    );
     assert_eq!(app.input.text(), "", "面板开着时本地读取的文本也不进草稿");
 }
 
@@ -753,10 +766,13 @@ fn local_paste_text_respects_the_composer_gate() {
 #[test]
 fn local_paste_image_joins_the_pipeline() {
     let mut app = test_app();
-    app.on_clipboard_paste(Ok(PasteOutcome::Image {
-        bytes: vec![1, 2, 3],
-        mime: "image/png".into(),
-    }));
+    app.on_clipboard_paste(
+        ClipboardTarget::Default,
+        Ok(PasteOutcome::Image {
+            bytes: vec![1, 2, 3],
+            mime: "image/png".into(),
+        }),
+    );
     assert_eq!(app.input.text(), "[Image #1 ⠋ 处理中…]");
     assert!(
         app.drain_intents()
@@ -772,7 +788,7 @@ fn local_paste_image_joins_the_pipeline() {
 fn local_paste_empty_and_failure_speak_up() {
     let mut app = test_app();
     app.input.set_text("draft stays");
-    app.on_clipboard_paste(Ok(PasteOutcome::Empty));
+    app.on_clipboard_paste(ClipboardTarget::Default, Ok(PasteOutcome::Empty));
     let toast = app.toast.as_ref().expect("空剪贴板要看得见");
     assert_eq!(toast.kind, ToastKind::Warning);
     assert_eq!(toast.message, "Clipboard has no text or image");
@@ -784,7 +800,7 @@ fn local_paste_empty_and_failure_speak_up() {
         PasteFailure::Timeout,
     ] {
         let mut app = test_app();
-        app.on_clipboard_paste(Err(failure.clone()));
+        app.on_clipboard_paste(ClipboardTarget::Default, Err(failure.clone()));
         let toast = app.toast.as_ref().expect("失败要看得见");
         assert_eq!(toast.kind, ToastKind::Warning);
         assert_eq!(toast.message, failure.message(), "定向文案：{failure:?}");
@@ -800,9 +816,10 @@ fn local_paste_result_survives_a_session_switch() {
     app.session_id = "another-session".into();
     app.handle_fetch_result(crate::app::intent::FetchResult {
         session_id: "test-session".into(),
-        payload: crate::app::intent::FetchPayload::ClipboardPaste(Ok(PasteOutcome::Text(
-            "kept".into(),
-        ))),
+        payload: crate::app::intent::FetchPayload::ClipboardPaste {
+            target: ClipboardTarget::Default,
+            result: Ok(PasteOutcome::Text("kept".into())),
+        },
     });
     assert_eq!(app.input.text(), "kept");
 }

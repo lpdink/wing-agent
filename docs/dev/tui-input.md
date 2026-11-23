@@ -168,7 +168,7 @@
 
 ## 粘贴（文本 / 图片）：OSC 5522 协议 + 本地读取（L1）
 
-除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），图片还有两条通道：**kitty clipboard protocol（DECSET 5522，终端实现该协议时）**与**本地读取（L1，不依赖终端协议，见本节「本地读取」）**。5522 通道的行为：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。通道只负责「把字节读进来」：文本进 composer（与 bracketed paste 同一个入口 `App::handle_paste`），**照旧被模态挡板拦**（面板开着时丢给面板或丢弃，与 bracketed paste 语义自动一致）；图片走「占位符 → 字节 → 压缩 → 原地落定」的流水线（见下），**不做门控**——图片的落点是草稿上一个可见可删的 chip，静默丢字节才是最坏的结果。协议机投给 App 的是一条读的**生命周期**（`ClipboardEvent`：`ImageReadStarted` / `ReadProgress` / `Delivered` / `ReadFailed` / `PasteRejected`），占位符与进度就挂在前两支上。
+除了 bracketed paste（`?2004`，只能承载文本、由终端直接写进 pty），图片还有两条通道：**kitty clipboard protocol（DECSET 5522，终端实现该协议时）**与**本地读取（L1，不依赖终端协议，见本节「本地读取」）**。5522 通道的行为：用户 Cmd+V 时终端**不写数据**，只发一条 `OSC 5522` 的 unsolicited paste event（列出剪贴板可用的 MIME + 一次性密码），应用拿 OTP 发 follow-up read、收 DATA 分片、自己重组字节。文本与图片走同一条通道，**SSH 下同样有效**（协议走 pty 字节流，剪贴板动作发生在本地终端）。普通 TUI 会在接收粘贴事件时记录输入归属。设置打开时只请求纯文本，并将回执绑定到当时的搜索或编辑实例。浏览态消费粘贴，离开原输入后丢弃迟到的回执。设置以外的文本沿用 `App::handle_paste` 的模态路由。图片仍沿用「占位符 → 字节 → 压缩 → 原地落定」流水线，设置打开后只允许已有的占位符完成。
 
 **通道先探测再启用**：不实现 5522 的终端从这套机制里拿不到任何东西，却要背下 fd 0 接驳的全部事故面（见下），所以启动时先问一句 DECRQM「你支持 mode 5522 吗」，按诚实答案决定装不装——阴性终端**在第一次 crossterm poll 之前**就把接驳拆掉、一个 `?5522h` 都不发，回到 #221 之前的纯输入路径。
 
@@ -206,7 +206,7 @@ App 侧边沿（图片读，文本读不发前两支）:
 1. **接驳必须早于本进程任何一次 `poll`**。向导正是最早的机会（它自己也用 crossterm 的全局事件源），所以第一段就把接驳装上；反过来（先 `poll` 再装）泵线程会把真实 tty 的就绪吃掉，事件源从此再不被唤醒 —— 键盘永久哑掉（反面证据：`tests/stdin_proxy_stale_event_source.rs`）。
 2. **段与段之间绝不拆接驳**（`restore_terminal` 只写离开序列，raw mode 与 fd 0 归会话）——拆了就必须重装，而复用的单例仍指着旧的文件描述。
 
-两条都有测试，但分工要说清：`tests/stdin_proxy_two_segments.rs` / `stdin_proxy_stale_event_source.rs` 钉的是**机制**（同一单例跨段工作、注册先于接驳才有效），生产接线则由源码门禁 `tests/session_guard.rs` 钉住——它扫真实 `src/**`，断言 `stdin_proxy::install(` 恰好一处且位于 `begin_tui_session`、`stdin_proxy::restore(` 恰好一处且位于 `end_tui_session`、`restore_terminal` 不引用这两者，再加探针化的两条：`stdin_proxy::settle_paste_channel(` 恰好两处且各自早于本段第一次 poll（`run_app` 里早于 `spawn_event_stream`、`run_tui` 里早于 `run_setup_tui`）、`spawn_event_stream` 里 mode 5522 与协议机都门控在阳性判定之后（`\x1b[?5522h` 全生产唯一发送点）——零豁免；把安装挪走、把拆解加回段边界、或让协议机绕开判定，都会变红。
+两条都有测试，但分工要说清：`tests/stdin_proxy_two_segments.rs` / `stdin_proxy_stale_event_source.rs` 钉的是**机制**（同一单例跨段工作、注册先于接驳才有效），生产接线则由源码门禁 `tests/session_guard.rs` 钉住——它扫真实 `src/**`，断言 `stdin_proxy::install(` 恰好一处且位于 `begin_tui_session`、`stdin_proxy::restore(` 恰好一处且位于 `end_tui_session`、`restore_terminal` 不引用这两者，再加探针化的两条：`stdin_proxy::settle_paste_channel(` 恰好两处且各自早于本段第一次 poll（`run_app` 里早于 `spawn_event_stream_with_clipboard`、`run_tui` 里早于 `run_setup_tui`）、`spawn_event_stream_with_clipboard` 里 mode 5522 与协议机都门控在阳性判定之后（`\x1b[?5522h` 全生产唯一发送点）——零豁免；把安装挪走、把拆解加回段边界、或让协议机绕开判定，都会变红。
 
 向导与主 TUI 的进入序列现在**逐字相同**（`?5522h` 移出 `enter_sequence`，见上「四态判定与时机」）：mode 只在协议机启动处（主 TUI 的 `spawn_event_stream`）才开，而向导自己的事件循环不驱动协议机——「向导把用户 Cmd+V 吞成没人读的协议事件」在构造上不再可能。向导同样在自己的第一次 poll 前收束探针判定（阴性共享拆解收益）。
 
@@ -304,7 +304,7 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（�
   落点再做挡板；**设置浮层除外** —— 它连应用保留键也接管，与 `Ctrl+O` 同档）。
   **不接** `Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧，接上只会「有时被
   终端吃掉、有时没有」）。两种字节形态的 crossterm 解码钉在 `tests/clipboard_paste_keys.rs`。
-- **顺序**：图片 → 文本。macOS：`osascript` 让 AppKit 把剪贴板的 PNG 表示写进 `$TMPDIR`
+- **顺序**：设置的搜索和编辑只读取文本。其他状态依次尝试图片和文本。macOS：`osascript` 让 AppKit 把剪贴板的 PNG 表示写进 `$TMPDIR`
   临时文件（TIFF-only 的剪贴板——截图的规范表示——在这里被转换；纯文本剪贴板非零退出并
   留下 0 字节文件，即「没有图片」的信号），然后 `pbpaste` 读文本，图片失败不阻断文本。
   Linux：`wl-paste`（Wayland）→ `xclip` / `xsel`（X11）；图片先列类型（`--list-types` /
@@ -316,10 +316,8 @@ Ghostty stable / iTerm2 / Terminal.app / VS Code 这些探针阴性的终端（�
   超过 64 MiB 拒绝（读取在上限处截断；与 5522 通道同一个上限）。
   **读取期间没有「进行中」提示**（正常路径毫秒级；最坏时长在 `util/clipboard_paste.rs`
   量化），`Ctrl+V` / `super+v` **连击已合并为一次读取**（一次只跑一条读取链，落地后恢复）。
-- **落点**：文本 → `App::handle_paste`（模态挡板自动继承）；图片 → 同一条「占位符 → 压缩 →
-  原地落定」的流水线（本通道没有「读开始」信号，占位符在字节到手那一刻以「处理中」出现）；
-  空 → `Clipboard has no text or image` toast；失败（远程 / 缺命令 / 超时 / 超限）各有定向
-  toast，**不静默**。
+- **落点**：设置以外的文本走 `App::handle_paste`。图片读回后在草稿中插入「处理中」占位符并交给压缩流水线。设置中的回执只交给发起读取的搜索或编辑器。首次设置同样支持纯文本快捷键与 bracketed paste。本地读取失败带定向提示。
+- **设置文本**：在字符光标处整批插入。单行字段去掉一个末尾行结束符，拒绝内部换行、Tab 和控制字符。JSON 允许字符串外的格式化换行与 Tab，字符串中的转义保留原样。粘贴后仍需 Enter 提交当前字段。
 - **composer 修饰键**：带 `SUPER` / `META` / `HYPER` 的 `Char` 一律不插入（`ui/input_area`
   的 `dispatch_key`）—— 否则终端回传的 `Cmd+V` 会先在草稿里留下一个字面 `v`（用户实测的
   「只粘贴了一个 v」）。`SHIFT` 不受影响（CSI-u 下大写字母带 SHIFT），`Ctrl+J/M` 的换行
