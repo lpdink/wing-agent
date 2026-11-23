@@ -1191,6 +1191,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rebinding_settings_credentials_preserves_the_endpoint_without_mutating_the_original() {
+        let gateway = MockGateway::start(vec![(
+            "/api/settings/status",
+            200,
+            r#"{
+            "valid":true,"setup_mode":false,"fingerprint":"validated-fp",
+            "restart_listener":{"host":"127.0.0.1","port":43721}}
+        "#,
+        )])
+        .await;
+        let original = GatewayClient::new(&gateway.url, Some("fixture-old")).unwrap();
+        let rotated = original.with_api_key(Some("fixture-new")).unwrap();
+        let unauthenticated = rotated.with_api_key(None).unwrap();
+        assert!(matches!(
+            rotated.with_api_key(Some("invalid\nfixture")),
+            Err(ApiClientError::InvalidApiKey(_))
+        ));
+        for client in [&original, &rotated, &unauthenticated] {
+            let status = client.settings_status().await.unwrap();
+            assert!(status.valid);
+            assert_eq!(status.fingerprint.as_deref(), Some("validated-fp"));
+            let listener = status.restart_listener.unwrap();
+            assert_eq!(
+                (listener.host.as_str(), listener.port),
+                ("127.0.0.1", 43721)
+            );
+        }
+        let requests = gateway.recorded();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/api/settings/status"; 3]
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.authorization.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("Bearer fixture-old"), Some("Bearer fixture-new"), None]
+        );
+    }
+
+    #[tokio::test]
     async fn settings_set_serializes_base_null_explicitly() {
         let server = MockGateway::start(vec![("/api/settings/set", 200, SET_OK_BODY)]).await;
         let client = GatewayClient::new(server.url.clone(), None).unwrap();

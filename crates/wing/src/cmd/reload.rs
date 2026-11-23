@@ -222,6 +222,67 @@ mod tests {
     }
 
     #[test]
+    fn restart_advice_depends_on_whether_the_config_loaded() {
+        for config_ok in [true, false] {
+            let response = ReloadResponse {
+                diagnostics_redacted: true,
+                pending_restart_paths: Some(vec![
+                    "gateway.port".into(),
+                    "gateway.cors.origins".into(),
+                ]),
+                new_session_defaults_changed: config_ok,
+                ok: config_ok,
+                results: vec![item("config.yaml", config_ok, None)],
+            };
+            let text = format_reload(&response);
+            assert!(text.contains("Restart required for gateway.port, gateway.cors.origins."));
+            assert_eq!(text.contains("press Ctrl+R"), config_ok);
+            assert_eq!(text.contains("New session defaults updated."), config_ok);
+            assert_eq!(
+                text.contains("Fix config.yaml before restarting."),
+                !config_ok
+            );
+            assert_eq!(text.contains("run `wing reload` again"), !config_ok);
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_a_different_http_service_after_a_bare_health_check() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            let mut request = String::new();
+            while !request.ends_with("\r\n\r\n") {
+                assert_ne!(stream.read_line(&mut request).await.unwrap(), 0);
+            }
+            assert!(request.starts_with("GET /api/health HTTP/1.1"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            let body = r#"{"service":"another-service","status":"ok","version":"test","uptime":0}"#;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.get_mut().write_all(reply.as_bytes()).await.unwrap();
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            reload_inner(Some("127.0.0.1".into()), Some(port)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains(&format!(
+            "no running Wing gateway found at 127.0.0.1:{port}"
+        )));
+        assert!(error.contains("--host <old-host> --port <old-port>"));
+        server.await.unwrap();
+    }
+
+    #[test]
     fn reload_report_with_no_items_is_still_readable() {
         let resp = ReloadResponse {
             diagnostics_redacted: true,

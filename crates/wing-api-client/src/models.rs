@@ -3003,6 +3003,21 @@ mod settings_tests {
     }
 
     #[test]
+    fn settings_save_debug_exposes_the_fingerprint_without_the_document() {
+        let request = SettingsSetRequest {
+            base: Some("validated-fingerprint".into()),
+            document: json!({"providers":[{"api_key":"private-fixture-value"}]}),
+        };
+        let text = format!("{request:?}");
+        assert!(text.contains("SettingsSetRequest") && text.contains("validated-fingerprint"));
+        assert!(!text.contains("api_key") && !text.contains("private-fixture-value"));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["document"],
+            request.document
+        );
+    }
+
+    #[test]
     fn settings_set_request_serializes_base_explicitly() {
         let req = SettingsSetRequest {
             base: Some("sha256:abc".into()),

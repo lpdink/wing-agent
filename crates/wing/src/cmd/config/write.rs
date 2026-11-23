@@ -1287,6 +1287,51 @@ mod tests {
         assert!(text.contains("✓ 网关已转入正常模式"), "{text}");
         assert!(text.contains("备份：/tmp/config.yaml.bak"), "{text}");
     }
+    #[tokio::test]
+    async fn rejected_removal_reports_the_requested_change_with_secrets_masked() {
+        let mut doc = document();
+        doc["providers"][0]["api_key"] = json!("private-fixture-value");
+        let mut backend = FakeBackend::healthy(catalog(), doc);
+        backend.set = Err(FakeError::NotFound);
+        let outcome = execute_write(
+            WriteOp::Remove {
+                path: "providers[0]".into(),
+            },
+            false,
+            &backend,
+            "http://127.0.0.1:1",
+            false,
+        )
+        .await;
+        assert_eq!(outcome.code, 1);
+        assert!(outcome.stdout.is_none());
+        let text = outcome.stderr.unwrap();
+        assert!(text.contains("设置未保存"), "{text}");
+        assert!(
+            text.contains("本次请求：") && text.contains("providers[0]"),
+            "{text}"
+        );
+        assert!(!text.contains("private-fixture-value"));
+        assert_eq!(backend.requests().len(), 1);
+        assert_eq!(backend.requests()[0].base.as_deref(), Some("fp-1"));
+    }
+
+    #[test]
+    fn legacy_setup_receipt_reports_disk_scope_without_claiming_an_actual_restart() {
+        let mut response: SettingsSetResponse = serde_json::from_value(json!({
+            "ok":true,"fingerprint":"fp-2","restart_required":["gateway.port"],
+            "reload":{"ok":false,"results":[{"name":"runtime","ok":false,"detail":"raw fixture diagnostic"}]}
+        })).unwrap();
+        let text = render_write_text(&response, None, true);
+        assert!(text.contains("网关初始化中有步骤失败。检查失败项后再次保存"));
+        assert!(text.contains("✗ runtime"));
+        assert!(text.contains("启动时读取的设置已更改 · gateway.port"));
+        assert!(!text.contains("Ctrl+R") && !text.contains("raw fixture diagnostic"));
+        response.reload.as_mut().unwrap().pending_restart_paths = Some(vec![]);
+        let text = render_write_text(&response, None, true);
+        assert!(!text.contains("gateway.port"));
+    }
+
     #[test]
     fn render_write_text_refused_lists_problems_and_never_writes() {
         let response = SettingsSetResponse {

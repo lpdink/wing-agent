@@ -1253,6 +1253,9 @@ mod tests {
         schema: SettingsSchemaResponse,
         state: SettingsGetResponse,
         status: SettingsStatusResponse,
+        status_failures: Cell<usize>,
+        status_checks: Cell<usize>,
+        set_error: u16,
         set: Option<SettingsSetResponse>,
         retry_set: Option<SettingsSetResponse>,
         interface: Option<InterfaceSource>,
@@ -1275,6 +1278,9 @@ mod tests {
                     problems: first_run_state().problems,
                     fingerprint: Some("fp-1".into()),
                 },
+                status_failures: Cell::new(0),
+                status_checks: Cell::new(0),
+                set_error: 504,
                 set: Some(saved_response(true, "fp-2", true, vec![])),
                 retry_set: None,
                 interface: None,
@@ -1304,6 +1310,15 @@ mod tests {
         }
 
         async fn status(&self) -> Result<SettingsStatusResponse, ApiClientError> {
+            let check = self.status_checks.get();
+            self.status_checks.set(check + 1);
+            if check < self.status_failures.get() {
+                return Err(ApiClientError::Api {
+                    status: 503,
+                    detail: "temporary status failure".into(),
+                    body: None,
+                });
+            }
             Ok(self.status.clone())
         }
 
@@ -1321,8 +1336,8 @@ mod tests {
             match response {
                 Some(response) => Ok(response.clone()),
                 None => Err(ApiClientError::Api {
-                    status: 504,
-                    detail: "upstream timeout".into(),
+                    status: self.set_error,
+                    detail: "fixture save failure".into(),
                     body: None,
                 }),
             }
@@ -1349,7 +1364,9 @@ mod tests {
             })
         }
 
-        fn rebind(&self, _interface: &Value) -> Result<Option<Self>> {
+        fn rebind(&self, interface: &Value) -> Result<Option<Self>> {
+            let client = GatewayApiClient::new(endpoint().http_base, None)?;
+            SetupBackend::rebind(&client, interface)?;
             Ok(None)
         }
 
@@ -1651,6 +1668,91 @@ mod tests {
         let mut config = AppConfig::default();
         let (outcome, _) = run(&backend, &mut config, edit_and_save("enabled")).await;
         assert!(matches!(outcome, SetupOutcome::Ready), "{outcome:?}");
+    }
+
+    #[tokio::test]
+    async fn operational_repair_retries_confirmed_save_readiness_without_reposting() {
+        for retry in [None, Some('s'), Some('R')] {
+            let mut backend = FakeBackend::first_run();
+            backend.interface = Some(interface_source("light"));
+            backend.set = Some(saved_response(true, "fp-2", false, vec![]));
+            backend.status.valid = true;
+            backend.status_failures.set(1);
+            let mut config = AppConfig::default();
+            let mut events = edit_and_save("enabled");
+            if let Some(retry) = retry {
+                events.push(key(KeyCode::Char(retry)));
+            }
+            let (outcome, terminal) = run(&backend, &mut config, events).await;
+            assert_eq!(backend.sets().len(), 1);
+            assert_eq!(
+                backend.status_checks.get(),
+                if retry.is_some() { 2 } else { 1 }
+            );
+            if retry.is_some() {
+                assert_eq!(outcome, SetupOutcome::Ready);
+                assert!(screen(&terminal).contains("配置就绪"));
+                assert_eq!(config.colors.preset, crate::config::ColorPreset::Light);
+            } else {
+                assert_eq!(outcome, SetupOutcome::Quit);
+                assert!(screen(&terminal).contains("已保存，就绪状态未确认 · 按 s 重查"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rebind_error_keeps_the_confirmed_save_receipt_and_reports_the_failed_step() {
+        let mut backend = FakeBackend::first_run();
+        let mut interface = interface_source("light");
+        let invalid_key = "fixture-key\ninvalid-header";
+        interface.doc["api_key"] = json!(invalid_key);
+        backend.interface = Some(interface);
+        let mut response = saved_response(true, "fp-2", false, vec![]);
+        response.reload = Some(
+            serde_json::from_value(json!({
+                "ok":false,"diagnostics_redacted":true,"results":[{"name":"provider","ok":false}]
+            }))
+            .unwrap(),
+        );
+        backend.set = Some(response);
+        let (outcome, terminal) = run(
+            &backend,
+            &mut AppConfig::default(),
+            edit_and_save("enabled"),
+        )
+        .await;
+        assert_eq!(outcome, SetupOutcome::Quit);
+        assert_eq!(backend.sets().len(), 1);
+        assert_eq!(backend.status_checks.get(), 0);
+        let screen = screen(&terminal);
+        assert!(
+            screen.contains("已保存，部分设置未生效 · provider"),
+            "{screen}"
+        );
+        assert!(screen.contains("就绪状态未确认 · 按 s 重查"), "{screen}");
+        assert!(!screen.contains("fixture-key"));
+    }
+
+    #[tokio::test]
+    async fn mixed_save_reports_the_confirmed_local_write_when_gateway_refuses() {
+        for (status, explanation) in [(409, "按 R 重新读取文件"), (403, "Gateway 未保存")]
+        {
+            let mut backend = FakeBackend::first_run();
+            backend.interface = Some(interface_source("auto"));
+            backend.set = None;
+            backend.set_error = status;
+            let mut events = vec![key(KeyCode::Char('/'))];
+            events.extend(text("preset"));
+            events.extend([key(KeyCode::Enter), key(KeyCode::Right)]);
+            events.extend(edit_and_save("enabled"));
+            let (outcome, terminal) = run(&backend, &mut AppConfig::default(), events).await;
+            assert_eq!(outcome, SetupOutcome::Quit);
+            assert_eq!(backend.sets().len(), 1);
+            assert_eq!(backend.written_interface().len(), 1);
+            let screen = screen(&terminal);
+            assert!(screen.contains("Interface 已保存"), "{screen}");
+            assert!(screen.contains(explanation), "{screen}");
+        }
     }
 
     #[tokio::test]

@@ -1411,6 +1411,201 @@ fn system_reload_reports_restart_and_hides_legacy_failure_details() {
     assert_eq!(toast.kind, ToastKind::Warning);
     assert!(toast.message.contains("provider 加载失败"));
     assert!(!toast.message.contains("fixture-secret"));
+
+    let clean = serde_json::from_value(json!({"ok":true,"pending_restart_paths":[]})).unwrap();
+    app.note_system_reload(&clean);
+    let toast = app.toast.as_ref().unwrap();
+    assert_eq!(toast.kind, ToastKind::Info);
+    assert_eq!(toast.message, "已重新读取网关配置");
+
+    let diagnosed = serde_json::from_value(json!({"ok":false,"diagnostics_redacted":true,
+        "results":[{"name":"provider","ok":false,"detail":"provider unavailable\nretry later"}]
+    }))
+    .unwrap();
+    app.note_system_reload(&diagnosed);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("provider 加载失败 · provider unavailable retry later")
+    );
+}
+
+fn deliver_settings_reply(app: &mut App, payload: crate::app::intent::FetchPayload) {
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "previous-chat".into(),
+        payload,
+    });
+}
+
+#[test]
+fn settings_read_errors_release_only_the_current_foreground_request() {
+    use crate::app::intent::FetchPayload;
+
+    let mut app = app_with_settings_panel();
+    app.settings_reload_pending = true;
+    app.refresh_settings_snapshot();
+    let current = app.settings_fetch_id;
+    let error = |id, message: &str| FetchPayload::SettingsFetchError {
+        id,
+        message: message.into(),
+    };
+
+    deliver_settings_reply(&mut app, error(current - 1, "superseded read"));
+    assert!(app.settings_reload_pending);
+    assert!(app.toast.is_none());
+    deliver_settings_reply(&mut app, error(current, "explicit reread failed"));
+    assert!(!app.settings_reload_pending);
+    assert_eq!(
+        app.toast.as_ref().unwrap().message,
+        "explicit reread failed"
+    );
+    assert_eq!(app.toast.as_ref().unwrap().kind, ToastKind::Warning);
+    assert_eq!(panel(&app).fingerprint(), "fp-1");
+
+    deliver_settings_reply(&mut app, error(current, "background refresh failed"));
+    assert_eq!(
+        app.toast.as_ref().unwrap().message,
+        "explicit reread failed"
+    );
+
+    app.close_settings_panel(false);
+    app.open_settings_panel();
+    assert!(app.settings_pending);
+    let opening = app.settings_fetch_id;
+    deliver_settings_reply(&mut app, error(opening, "initial settings read failed"));
+    assert!(!app.settings_pending);
+    assert!(app.settings_panel.is_none());
+    assert_eq!(
+        app.toast.as_ref().unwrap().message,
+        "initial settings read failed"
+    );
+}
+
+#[test]
+fn confirmed_rejections_and_lost_save_replies_keep_the_gateway_draft() {
+    use crate::app::intent::FetchPayload;
+    use crate::cmd::settings_api::SettingsSaveFailure;
+
+    for (failure, local_saved, heading, detail, invalidates_cache, stale) in [
+        (
+            SettingsSaveFailure::Conflict,
+            false,
+            "设置未保存",
+            "按 R 重新读取文件",
+            true,
+            true,
+        ),
+        (
+            SettingsSaveFailure::Rejected("write refused".into()),
+            false,
+            "设置未保存",
+            "write refused",
+            false,
+            false,
+        ),
+        (
+            SettingsSaveFailure::Unconfirmed("HTTP 504".into()),
+            false,
+            "Gateway 保存未确认",
+            "核对磁盘文件",
+            true,
+            false,
+        ),
+        (
+            SettingsSaveFailure::Unconfirmed("HTTP 504".into()),
+            true,
+            "Interface 已保存，Gateway 保存未确认",
+            "核对磁盘文件",
+            true,
+            false,
+        ),
+    ] {
+        let mut app = app_with_settings_panel();
+        goto(&mut app, "enabled");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(panel(&app).dirty_count(), 1);
+        record_pending_interface(
+            &mut app,
+            if local_saved {
+                InterfaceSaveReport::Ok {
+                    path: "fixture-tui.yaml".into(),
+                    changed: 1,
+                }
+            } else {
+                InterfaceSaveReport::Skipped
+            },
+        );
+        deliver_settings_reply(&mut app, FetchPayload::SettingsSaveError(failure));
+        assert!(app.settings_save.is_none());
+        assert_eq!(app.settings_cache.is_none(), invalidates_cache);
+        assert_eq!(panel(&app).dirty_count(), 1);
+        assert_eq!(panel(&app).fingerprint(), "fp-1");
+        assert_eq!(panel(&app).is_stale(), stale);
+        let (info, report) = last_cell_text(&app);
+        assert!(!info);
+        assert_eq!(report.lines().next(), Some(heading));
+        assert!(report.contains(detail), "{report}");
+        let toast = app.toast.unwrap();
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert!(toast.message.starts_with(heading));
+        if heading.contains("未确认") {
+            assert!(toast.message.contains("请核对磁盘文件"));
+        }
+    }
+}
+
+#[test]
+fn save_receipts_respect_legacy_disk_changes_and_setup_retry_semantics() {
+    use crate::app::intent::FetchPayload;
+
+    let mut app = app_with_settings_panel();
+    let response: SettingsSetResponse = serde_json::from_value(json!({
+        "ok": true, "fingerprint": "fp-2", "restart_required": ["gateway.port"],
+        "reload": {"ok": false, "results": [{"name":"runtime", "ok":false, "detail":"private fixture detail"}]}
+    })).unwrap();
+    let setup = save_notice_text(
+        &InterfaceSaveReport::Skipped,
+        &GatewaySaveReport::Saved(response.clone()),
+        true,
+    );
+    assert!(setup.contains("启动时读取的设置已更改 · gateway.port"));
+    assert!(setup.contains("runtime"));
+    assert!(setup.contains("检查初始化失败项后按 s 重试"));
+    assert!(!setup.contains("Ctrl+R"));
+    assert!(!setup.contains("private fixture detail"));
+
+    let mut response = response;
+    let reload = response.reload.as_mut().unwrap();
+    reload.pending_restart_paths = Some(vec![]);
+    reload.results.clear();
+    deliver_settings_reply(&mut app, FetchPayload::SettingsSaved(Box::new(response)));
+    assert_eq!(panel(&app).fingerprint(), "fp-2");
+    assert!(app.settings_cache.is_none());
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+    let (_, report) = last_cell_text(&app);
+    assert!(report.contains("已保存，部分设置未生效"));
+    assert!(!report.contains("gateway.port"));
+    assert!(app.toast.as_ref().unwrap().message.contains("网关应用失败"));
+
+    record_pending_interface(
+        &mut app,
+        InterfaceSaveReport::Err {
+            message: "read-only file".into(),
+        },
+    );
+    app.settle_gateway_save(GatewaySaveReport::Skipped);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("Interface 写入失败，按 s 重试")
+    );
 }
 
 #[test]
@@ -1778,6 +1973,281 @@ async fn restart_without_a_transport_warns_and_keeps_the_endpoint() {
     assert_eq!(endpoint.http_base, "http://127.0.0.1:32523", "早退不碰端点");
     assert!(!app.status.connected, "早退不改连接态");
     assert!(app.drain_intents().is_empty(), "早退不产出任何副作用");
+}
+
+async fn connect_settings_fixture(
+    routes: Vec<(&'static str, u16, Value)>,
+) -> (
+    crate::app::GatewayEndpoint,
+    crate::app::Transport,
+    tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let ws = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = crate::app::GatewayEndpoint {
+        ws_url: format!("ws://{}/ws", ws.local_addr().unwrap()),
+        http_base: format!("http://{}", http.local_addr().unwrap()),
+        api_key: Some("private-fixture-credential".into()),
+    };
+    let (seen, requests) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let (stream, _) = ws.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"type":"connected","client_id":"settings-fixture"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        while socket.next().await.is_some() {}
+    });
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = http.accept().await {
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let Some(target) = line.split_whitespace().nth(1).map(str::to_owned) else {
+                continue;
+            };
+            let mut size = 0;
+            loop {
+                line.clear();
+                if stream.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    size = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; size];
+            stream.read_exact(&mut body).await.unwrap();
+            let (status, payload) = routes
+                .iter()
+                .find(|(path, _, _)| *path == target.split('?').next().unwrap())
+                .map_or((404, Value::Null), |(_, status, payload)| {
+                    (*status, payload.clone())
+                });
+            let _ = seen.send((target, serde_json::from_slice(&body).unwrap_or_default()));
+            let payload = payload.to_string();
+            let reply = format!(
+                "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{payload}",
+                payload.len()
+            );
+            stream.get_mut().write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    let transport = crate::app::transport::connect_transport(&endpoint)
+        .await
+        .unwrap();
+    (endpoint, transport, requests)
+}
+
+#[tokio::test]
+async fn restart_is_blocked_by_unverifiable_status_or_a_conflicting_fingerprint() {
+    let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    drop(target);
+    for (status, data, post, message) in [
+        (
+            200,
+            json!({"valid":true,"setup_mode":false}),
+            false,
+            "网关未提供可验证的重启地址",
+        ),
+        (
+            503,
+            json!({"error":"fixture-failure"}),
+            false,
+            "无法确认磁盘配置",
+        ),
+        (
+            200,
+            json!({"valid":true,"setup_mode":false,"fingerprint":"validated-fp", "restart_listener":{"host":"127.0.0.1", "port":target_port}}),
+            true,
+            "设置文件已更改",
+        ),
+    ] {
+        let (mut endpoint, transport, mut requests) = connect_settings_fixture(vec![
+            ("/api/settings/status", status, data),
+            ("/api/shutdown", 409, json!({"error":"conflict"})),
+        ])
+        .await;
+        let original = endpoint.http_base.clone();
+        let mut transport = Some(transport);
+        let mut app = app_with_settings_panel();
+        crate::app::settings::restart_gateway(&mut app, &mut transport, &mut endpoint).await;
+        assert_eq!(requests.try_recv().unwrap().0, "/api/settings/status");
+        if post {
+            assert_eq!(
+                requests.try_recv().unwrap().0,
+                "/api/shutdown?settings_fingerprint=validated-fp"
+            );
+            assert!(matches!(
+                app.drain_intents().as_slice(),
+                [AppIntent::FetchSettings]
+            ));
+        }
+        assert!(requests.try_recv().is_err());
+        assert!(transport.is_some());
+        assert_eq!(endpoint.http_base, original);
+        let toast = app.toast.unwrap();
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert!(toast.message.contains(message), "{}", toast.message);
+    }
+}
+
+#[tokio::test]
+async fn settings_intents_drive_http_and_keep_an_unconfirmed_save_draft() {
+    use crate::app::runner::execute_intent;
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::layout::Rect;
+    use ratatui::{TerminalOptions, Viewport};
+
+    let (mut endpoint, transport, mut requests) = connect_settings_fixture(vec![
+        (
+            "/api/settings/schema",
+            200,
+            serde_json::to_value(gateway_schema()).unwrap(),
+        ),
+        (
+            "/api/settings/get",
+            503,
+            json!({"error":"fixture-read-failure"}),
+        ),
+        (
+            "/api/settings/set",
+            504,
+            json!({"error":"fixture-save-timeout"}),
+        ),
+        (
+            "/api/system/reload",
+            200,
+            json!({"ok":true,"pending_restart_paths":[]}),
+        ),
+    ])
+    .await;
+    let mut terminal = crate::tui::WingTerminal::with_options(
+        crate::tui::CursorGate::new(CrosstermBackend::new(std::io::stdout())),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 32, 12)),
+        },
+    )
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut transport = Some(transport);
+    let mut send_chain = None;
+    let mut app = app_with_settings_panel();
+    app.settings_reload_pending = true;
+    execute_intent(
+        &mut app,
+        &mut transport,
+        &mut endpoint,
+        &mut terminal,
+        AppIntent::ReloadSettings,
+        &tx,
+        &mut send_chain,
+    )
+    .await;
+    app.handle_fetch_result(
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    assert!(!app.settings_reload_pending);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("读取设置文件失败")
+    );
+    let mut paths = [
+        requests.try_recv().unwrap().0,
+        requests.try_recv().unwrap().0,
+    ];
+    paths.sort();
+    assert_eq!(paths, ["/api/settings/get", "/api/settings/schema"]);
+
+    goto(&mut app, "enabled");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('s'));
+    let mut intents = app.drain_intents();
+    assert_eq!(intents.len(), 1);
+    let intent = intents.pop().unwrap();
+    let diagnostic = format!("{intent:?}");
+    assert!(diagnostic.contains("<redacted>") && !diagnostic.contains("providers"));
+    let endpoint_debug = format!("{endpoint:?}");
+    assert!(
+        endpoint_debug.contains(&endpoint.http_base) && endpoint_debug.contains(&endpoint.ws_url)
+    );
+    assert!(!endpoint_debug.contains("private-fixture-credential"));
+    execute_intent(
+        &mut app,
+        &mut transport,
+        &mut endpoint,
+        &mut terminal,
+        intent,
+        &tx,
+        &mut send_chain,
+    )
+    .await;
+    app.handle_fetch_result(
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    let (path, request) = requests.try_recv().unwrap();
+    assert_eq!(path, "/api/settings/set");
+    assert_eq!(request["base"], "fp-1");
+    assert_eq!(request["document"]["gateway"]["auth"]["enabled"], false);
+    assert!(app.settings_save.is_none());
+    assert_eq!(panel(&app).dirty_count(), 1);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("Gateway 保存未确认")
+    );
+
+    execute_intent(
+        &mut app,
+        &mut transport,
+        &mut endpoint,
+        &mut terminal,
+        AppIntent::ReloadSystem,
+        &tx,
+        &mut send_chain,
+    )
+    .await;
+    assert_eq!(requests.try_recv().unwrap().0, "/api/system/reload");
+    assert_eq!(app.toast.as_ref().unwrap().message, "已重新读取网关配置");
+    assert_eq!(panel(&app).dirty_count(), 1);
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+
+    app.settings_reload_pending = true;
+    execute_intent(
+        &mut app,
+        &mut None,
+        &mut endpoint,
+        &mut terminal,
+        AppIntent::ReloadSettings,
+        &tx,
+        &mut send_chain,
+    )
+    .await;
+    assert!(!app.settings_reload_pending);
+    assert!(app.toast.as_ref().unwrap().message.contains("网关未连接"));
 }
 
 // ── Visible chat retains its frame geometry while settings owns clicks ──
