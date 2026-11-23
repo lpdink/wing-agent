@@ -1910,15 +1910,10 @@ fn cold_open_and_settings_notifications_cannot_cover_short_frame_editing() {
 #[test]
 fn pending_restart_is_visible_in_the_compact_settings_footer() {
     let mut app = app_with_settings_panel();
-    let mut response = settings_response(true, "fp-2", vec![]);
-    response.restart_required = vec!["gateway.port".into()];
     app.settings_panel
         .as_mut()
         .unwrap()
-        .apply_save(SaveOutcome {
-            gateway: Some(response),
-            interface_ok: None,
-        });
+        .set_pending_restart_paths(vec!["gateway.port".into()]);
     goto(&mut app, "gateway.port");
     press(&mut app, KeyCode::Enter);
     press_event(&mut app, ctrl(KeyCode::Char('u')));

@@ -797,7 +797,6 @@ impl App {
             let full_card_w = crate::ui::input_area::chrome::card_area(area).width;
             let settings_open = self.settings_panel.is_some();
             let saving_settings = self.settings_save.is_some();
-            let toast_visible = self.toast.as_ref().is_some_and(|toast| !toast.is_expired());
             let splash_plan = if settings_open {
                 None
             } else {
@@ -809,11 +808,15 @@ impl App {
             };
             let composer_w = splash_plan.map_or(full_card_w, |(_, width)| width);
             let bands = if settings_open {
-                settings_layout(
-                    area,
-                    self.chat.cells.is_empty(),
-                    toast_visible || saving_settings,
-                )
+                let notice_rows = if saving_settings {
+                    1
+                } else {
+                    self.toast
+                        .as_ref()
+                        .filter(|toast| !toast.is_expired())
+                        .map_or(0, |toast| toast.message.lines().take(2).count() as u16)
+                };
+                settings_layout(area, self.chat.cells.is_empty(), notice_rows)
             } else {
                 frame_layout(
                     area,
@@ -970,7 +973,7 @@ impl App {
 
             let toast = self.toast.as_ref().filter(|toast| !toast.is_expired());
             let toast_area = if settings_open {
-                // The receipt has a dedicated row, including on frames too short for a toast box.
+                // Reserve space for feedback without obscuring the active settings row.
                 let notification = if saving_settings {
                     Some(("正在保存…", palette.accent))
                 } else {
@@ -986,12 +989,20 @@ impl App {
                 if let Some(notice) = bands.notice
                     && let Some((message, color)) = notification
                 {
-                    let message = crate::render::markdown::elide_to_display_width(
-                        &message.split_whitespace().collect::<Vec<_>>().join(" "),
-                        notice.width as usize,
-                    );
+                    let lines: Vec<_> = message
+                        .lines()
+                        .take(notice.height as usize)
+                        .map(|line| {
+                            ratatui::text::Line::from(
+                                crate::render::markdown::elide_to_display_width(
+                                    line.trim(),
+                                    notice.width as usize,
+                                ),
+                            )
+                        })
+                        .collect();
                     frame.render_widget(
-                        ratatui::widgets::Paragraph::new(message)
+                        ratatui::widgets::Paragraph::new(lines)
                             .style(ratatui::style::Style::default().fg(color)),
                         notice,
                     );
@@ -1128,7 +1139,7 @@ struct FrameLayout {
     notice: Option<Rect>,
 }
 
-fn settings_layout(area: Rect, chat_empty: bool, toast_visible: bool) -> FrameLayout {
+fn settings_layout(area: Rect, chat_empty: bool, notice_rows: u16) -> FrameLayout {
     let status_height = u16::from(area.height > 1);
     let available = area.height - status_height;
     let chat_reserve = if !chat_empty && available >= 5 {
@@ -1137,7 +1148,7 @@ fn settings_layout(area: Rect, chat_empty: bool, toast_visible: bool) -> FrameLa
         0
     };
     let lower_budget = available - chat_reserve;
-    let notice_height = u16::from(toast_visible && lower_budget >= 4);
+    let notice_height = notice_rows.min(lower_budget.saturating_sub(3));
     let settings_height = (lower_budget - notice_height).min(20);
     let chat_height = available - settings_height - notice_height;
     FrameLayout {
