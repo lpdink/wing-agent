@@ -129,6 +129,12 @@ pub struct FetchResult {
 /// A settings save may carry replacement credentials.
 pub struct SettingsSaveDocument(Box<serde_json::Value>);
 
+impl SettingsSaveDocument {
+    pub(super) fn into_value(self) -> serde_json::Value {
+        *self.0
+    }
+}
+
 impl From<serde_json::Value> for SettingsSaveDocument {
     fn from(value: serde_json::Value) -> Self {
         Self(Box::new(value))

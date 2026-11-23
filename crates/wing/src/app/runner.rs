@@ -577,7 +577,7 @@ pub async fn execute_intent(
                     let tx = fetch_tx.clone();
                     let request = wing_api_client::models::SettingsSetRequest {
                         base: Some(base),
-                        document: *gateway,
+                        document: gateway.into_value(),
                     };
                     tokio::spawn(async move {
                         let payload = match http.settings_set(&request).await {
