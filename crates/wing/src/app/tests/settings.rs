@@ -1835,6 +1835,33 @@ fn a_picture_inside_the_chat_band_is_painted_and_invalidated_on_close() {
 }
 
 #[test]
+fn settings_can_close_while_saving_without_applying_a_receipt_to_a_new_panel() {
+    let mut app = app_with_settings_panel();
+    goto(&mut app, "enabled");
+    press(&mut app, KeyCode::Tab);
+    assert!(panel(&app).dirty_count() > 0);
+    record_pending_interface(&mut app, InterfaceSaveReport::Skipped);
+
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    assert!(panel(&app).is_confirming_close());
+    press(&mut app, KeyCode::Enter);
+    assert!(app.settings_panel.is_none());
+    assert!(app.settings_save.is_some());
+
+    app.open_settings_panel();
+    assert!(app.settings_panel.is_none());
+    assert!(app.drain_intents().is_empty());
+    app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
+        true,
+        "saved",
+        vec![],
+    )));
+    assert!(app.settings_save.is_none());
+    assert!(last_cell_text(&app).1.contains("设置已保存"));
+}
+
+#[test]
 fn a_gateway_save_holds_the_model_draft_until_the_receipt_and_retries_failure() {
     use crate::shared::panels::settings::ValueText;
     use crate::shared::panels::settings::test_support as model_fixture;
@@ -1868,7 +1895,7 @@ fn a_gateway_save_holds_the_model_draft_until_the_receipt_and_retries_failure() 
         true
     );
     record_pending_interface(&mut app, InterfaceSaveReport::Skipped);
-    for key in [KeyCode::Tab, KeyCode::Char('s'), KeyCode::Esc] {
+    for key in [KeyCode::Tab, KeyCode::Char('s')] {
         press(&mut app, key);
     }
     assert!(app.drain_intents().is_empty());

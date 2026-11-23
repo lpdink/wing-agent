@@ -796,7 +796,13 @@ impl App {
             let now = std::time::Instant::now();
             let full_card_w = crate::ui::input_area::chrome::card_area(area).width;
             let settings_open = self.settings_panel.is_some();
-            let saving_settings = self.settings_save.is_some();
+            let settings_progress = if self.settings_save.is_some() {
+                Some("正在保存…")
+            } else if self.settings_reload_pending {
+                Some("正在读取设置…")
+            } else {
+                None
+            };
             let splash_plan = if settings_open {
                 None
             } else {
@@ -808,7 +814,7 @@ impl App {
             };
             let composer_w = splash_plan.map_or(full_card_w, |(_, width)| width);
             let bands = if settings_open {
-                let notice_rows = if saving_settings {
+                let notice_rows = if settings_progress.is_some() {
                     1
                 } else {
                     self.toast
@@ -974,8 +980,8 @@ impl App {
             let toast = self.toast.as_ref().filter(|toast| !toast.is_expired());
             let toast_area = if settings_open {
                 // Reserve space for feedback without obscuring the active settings row.
-                let notification = if saving_settings {
-                    Some(("正在保存…", palette.accent))
+                let notification = if let Some(message) = settings_progress {
+                    Some((message, palette.accent))
                 } else {
                     toast.map(|toast| {
                         let color = match toast.kind {

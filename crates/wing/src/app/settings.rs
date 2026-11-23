@@ -131,6 +131,10 @@ impl App {
         if self.settings_panel.is_some() {
             return;
         }
+        if self.settings_save.is_some() {
+            self.show_toast(Toast::info("设置正在保存…", Duration::from_secs(3)));
+            return;
+        }
         if self.settings_cache.is_none() {
             self.show_toast(Toast::info(SETTINGS_LOADING, Duration::from_secs(3)));
         }

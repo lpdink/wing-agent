@@ -418,13 +418,6 @@ mod tui_paste {
                 .unwrap()
                 .contains(INTERFACE_KEY)
         );
-        for key in [INTERFACE_KEY, PROVIDER_KEY] {
-            assert!(
-                !output
-                    .windows(key.len())
-                    .any(|bytes| bytes == key.as_bytes())
-            );
-        }
         let logs = || -> String {
             fs::read_dir(home.join("tui/logs"))
                 .unwrap()
@@ -439,14 +432,40 @@ mod tui_paste {
         })
         .await
         .expect("startup log");
+        // The main TUI can request the cursor position before handling quit keys.
+        let cursor_query = b"\x1b[6n";
+        let mut replies = 0;
+        write_all(fd, b"\x03\x03");
+        let exit = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                output.extend(read_written(fd, Duration::from_millis(50), |_| false));
+                let queries = output
+                    .windows(cursor_query.len())
+                    .filter(|bytes| *bytes == cursor_query)
+                    .count();
+                while replies < queries {
+                    write_all(fd, b"\x1b[1;1R");
+                    replies += 1;
+                }
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("TUI exits normally after setup");
+        assert!(exit.success(), "TUI exit status: {exit}");
+        for key in [INTERFACE_KEY, PROVIDER_KEY] {
+            assert!(
+                !output
+                    .windows(key.len())
+                    .any(|bytes| bytes == key.as_bytes())
+            );
+        }
         let logs = logs();
         assert!(!logs.contains(INTERFACE_KEY) && !logs.contains(PROVIDER_KEY));
-        // Close the controller first so the child can leave the PTY on macOS.
         drop(master);
-        tokio::time::timeout(Duration::from_secs(4), child.kill())
-            .await
-            .expect("TUI child exit")
-            .unwrap();
         drop(requests);
         fs::remove_dir_all(home).unwrap();
     }

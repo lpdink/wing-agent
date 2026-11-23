@@ -628,6 +628,15 @@ impl SettingsPanel {
         self.filter.as_ref().map_or(0, SearchFilter::hits)
     }
 
+    pub(crate) fn is_confirming_close(&self) -> bool {
+        matches!(
+            self.pending,
+            Some(Pending::Discard {
+                intent: DiscardIntent::Close
+            })
+        )
+    }
+
     pub fn prompt(&self) -> Option<PromptView> {
         self.prompt_view()
     }

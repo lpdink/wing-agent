@@ -583,7 +583,16 @@ impl App {
     /// —— 全部分派逻辑（预览 / 保存 / 重启 / 重载 / 关闭）在 `app::settings`。
     /// `Ctrl+C` 永远到不了这里（[`App::route_key`] 先放行给应用）。
     fn handle_settings_key(&mut self, key: crossterm::event::KeyEvent) {
-        if self.settings_save.is_some() || self.settings_reload_pending {
+        use crossterm::event::KeyCode;
+
+        if (self.settings_save.is_some() || self.settings_reload_pending)
+            && key.code != KeyCode::Esc
+            && !(key.code == KeyCode::Enter
+                && self
+                    .settings_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.is_confirming_close()))
+        {
             return;
         }
         let action = self
