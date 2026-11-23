@@ -278,7 +278,12 @@ async def hold_delta(content):
     assert (await probe.driver_required.http.request("POST", "/api/system/reload"))[
         "ok"
     ]
-    probe.register(EARLY_MODEL, *_script(), Turn.of(text="reply to queued input"))
+    probe.register(
+        EARLY_MODEL,
+        *_script()[:-1],
+        Turn.of(text="post compact reply", usage=_usage(0)),
+        Turn.of(text="reply to queued input"),
+    )
     session = await probe.session(model=EARLY_MODEL)
     await session.chat("alpha")
     await session.chat("beta")
