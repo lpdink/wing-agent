@@ -119,7 +119,7 @@ async def test_unaddressed_message_goes_to_inbox_not_waiter(runtime: WingRuntime
     assert "tc_1" in agent._inbox._feedback_waiters
     assert not task.done()
     # 通知进了 inbox
-    inbound = agent._inbox._queue.get_nowait()
+    inbound = agent._inbox.drain()[0]
     assert (inbound.message.content or "").startswith("[internal]")
 
     # 定向回复依然正常 resolve waiter
@@ -137,7 +137,7 @@ async def test_stale_tool_call_id_falls_through_to_inbox(runtime: WingRuntime):
     agent._worker.cancel()
 
     await agent.post("late reply", tool_call_id="tc_gone")
-    inbound = agent._inbox._queue.get_nowait()
+    inbound = agent._inbox.drain()[0]
     assert inbound.message.content == "late reply"
 
 
@@ -158,7 +158,7 @@ async def test_feedback_timeout_unregisters_waiter(runtime: WingRuntime):
 
     # 超时后该 id 的迟到回复落 inbox
     await agent.post("better late than never", tool_call_id="tc_1")
-    inbound = agent._inbox._queue.get_nowait()
+    inbound = agent._inbox.drain()[0]
     assert inbound.message.content == "better late than never"
 
 

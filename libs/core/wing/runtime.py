@@ -1071,8 +1071,7 @@ class WingRuntime:
     ) -> SyncSessionEvent:
         """``SyncSessionEvent`` 的唯一装配点（中途订阅与 rewind 共用）。
 
-        四组重放素材（messages → uncommitted → uncommitted_tools → events）的顺序
-        是对外契约：只在这里拼，加第五组素材时订阅快照与 rewind 后的重放不会分叉。
+        历史、未完成模型输出、待处理输入与事实事件在这里取同一时刻的快照。
 
         ``include_agent``：订阅路径额外带 ``agent`` / ``name``——新订阅者拿不到会话
         元信息，必须随快照下发；rewind 是既有订阅者的增量广播，不带这两项。
@@ -1086,6 +1085,7 @@ class WingRuntime:
             messages=session.serialize_messages(),
             uncommitted=agent.uncommitted_message(),
             uncommitted_tools=agent.uncommitted_tools(),
+            pending_user_messages=agent.pending_user_messages(),
             events=[
                 wire_dump(e)
                 for e in cm.get_active_events(pending_ask_ids=agent.pending_ask_ids())

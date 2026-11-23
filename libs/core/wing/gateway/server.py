@@ -160,6 +160,7 @@ class GatewayServer:
         self._in_setup_mode = True
         self._client_to_ws: dict[str, WebSocket] = {}
         self._ws_to_client: dict[WebSocket, str] = {}
+        self._event_send_locks: dict[WebSocket, asyncio.Lock] = {}
         self._remote_tools = RemoteToolManager()
         # 后台周期任务宿主（job：空闲会话逐出 + 过期会话自动归档）。interval 在
         # **进入正常模式**时读取一次——config 热重载不改变已注册 job 的间隔；
@@ -558,6 +559,7 @@ class GatewayServer:
         if client_id is None:
             return None
         self._client_to_ws.pop(client_id, None)
+        self._event_send_locks.pop(ws, None)
         event_bus.route_detach_client(client_id)
         if self._remote_tools.is_attached(client_id):
             # 在途调用立即失败 + 注销远程工具（敏锐检测断连）
@@ -592,16 +594,25 @@ class GatewayServer:
         客户端被回收后（写超时 / 写失败）立即停止剩余帧——不产生二次回收、
         不产生重复失败日志。
         """
-        client_id = self._ws_to_client.get(ws, "unknown")
-        for frame in frames:
-            if frame.size > HARD_LIMIT_BYTES:
-                log.warning(
-                    f"Dropping oversized frame for client {client_id}: "
-                    f"type={of_type} size={frame.size} > {HARD_LIMIT_BYTES}"
-                )
-                continue
-            if not await self._send_text(ws, frame.text):
+        if ws not in self._ws_to_client:
+            return
+        lock = self._event_send_locks.get(ws)
+        if lock is None:
+            lock = self._event_send_locks[ws] = asyncio.Lock()
+        # Keep adjacent chunked events contiguous for clients reassembling one event at a time.
+        async with lock:
+            client_id = self._ws_to_client.get(ws)
+            if client_id is None:
                 return
+            for frame in frames:
+                if frame.size > HARD_LIMIT_BYTES:
+                    log.warning(
+                        f"Dropping oversized frame for client {client_id}: "
+                        f"type={of_type} size={frame.size} > {HARD_LIMIT_BYTES}"
+                    )
+                    continue
+                if not await self._send_text(ws, frame.text):
+                    return
 
     async def _send_text(self, ws: WebSocket, data: str) -> bool:
         """异步发送文本到 ws——有界等待，超时/失败即回收该客户端。

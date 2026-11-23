@@ -46,13 +46,13 @@ class TestDrainAndMerge:
         from wing.agent.inbox import Inbound
         from wing.schema import Message
 
-        agent._inbox._queue.put_nowait(
+        agent._inbox._enqueue(
             Inbound(message=Message(role="user", content="msg-A"), request_id="req-1")
         )
-        agent._inbox._queue.put_nowait(
+        agent._inbox._enqueue(
             Inbound(message=Message(role="user", content="msg-B"), request_id="req-2")
         )
-        agent._inbox._queue.put_nowait(
+        agent._inbox._enqueue(
             Inbound(message=Message(role="user", content="msg-C"), request_id="req-3")
         )
 
@@ -81,10 +81,10 @@ class TestDrainAndMerge:
         from wing.agent.inbox import Inbound
         from wing.schema import Message
 
-        agent._inbox._queue.put_nowait(
+        agent._inbox._enqueue(
             Inbound(message=Message(role="user", content="first"), request_id="req-A")
         )
-        agent._inbox._queue.put_nowait(
+        agent._inbox._enqueue(
             Inbound(message=Message(role="user", content="second"), request_id="req-B")
         )
 
@@ -120,7 +120,7 @@ class TestDrainAndMerge:
         from wing.agent.inbox import Inbound
         from wing.schema import Message
 
-        agent._inbox._queue.put_nowait(
+        agent._inbox._enqueue(
             Inbound(message=Message(role="user", content="solo"), request_id="req-1")
         )
 

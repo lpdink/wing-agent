@@ -1,9 +1,10 @@
 """假 Provider —— 进程内 aiohttp 应用（设计与 io 都不依赖 wing）。
 
-实现 OpenAI 兼容公开协议子集：
+实现 OpenAI 兼容和 Anthropic 流式协议子集：
 
 - ``POST /v1/chat/completions``：``stream=true`` 走 SSE（见 ``sse.py``），
   ``stream=false`` 返回完整 message JSON（**压缩调用走非流式**，必须支持）；
+- ``POST /v1/messages``：Anthropic 流式文本与工具调用。
 - ``POST /<prefix>/v1/chat/completions``（``path_prefixes`` 给定的每个前缀）：
   同一条处理链的第二入口——**附加 provider**（跨 provider 场景）的 base_url 指
   到这里，「这次调用打到哪个 provider」由请求留档的 ``path`` 判定。
@@ -40,11 +41,13 @@ from wing_probe.provider.script import (
 from wing_probe.provider.sse import (
     SSE_CONTENT_TYPE,
     SSEFrame,
+    anthropic_stream_frames,
     completion_response,
     stream_frames,
 )
 
 CHAT_PATH = "/v1/chat/completions"
+MESSAGES_PATH = "/v1/messages"
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +86,7 @@ def _error_response(status: int, message: str, *, code: str) -> web.Response:
 
 
 class FakeProvider:
-    """按剧本吐确定分片的 OpenAI 兼容假 Provider（同进程 aiohttp）。"""
+    """按剧本吐确定分片的假 Provider（同进程 aiohttp）。"""
 
     def __init__(
         self,
@@ -137,9 +140,10 @@ class FakeProvider:
         if self._runner is not None:
             return self
         app = web.Application()
-        app.router.add_post(CHAT_PATH, self._handle_chat_completions)
+        app.router.add_post(CHAT_PATH, self._handle_completion)
+        app.router.add_post(MESSAGES_PATH, self._handle_completion)
         for prefix in self.path_prefixes:
-            app.router.add_post(f"/{prefix}{CHAT_PATH}", self._handle_chat_completions)
+            app.router.add_post(f"/{prefix}{CHAT_PATH}", self._handle_completion)
         self._runner = web.AppRunner(app, access_log=None)
         await self._runner.setup()
 
@@ -231,9 +235,7 @@ class FakeProvider:
 
     # ── HTTP ───────────────────────────────────────────────
 
-    async def _handle_chat_completions(
-        self, request: web.Request
-    ) -> web.StreamResponse:
+    async def _handle_completion(self, request: web.Request) -> web.StreamResponse:
         try:
             body = await request.json()
         except (ValueError, UnicodeDecodeError) as exc:
@@ -253,6 +255,11 @@ class FakeProvider:
         if self._emits_generation is None:
             self._emits_generation = self.requests.generation
         headers = {"x-request-id": f"probe-{logged.index}"}
+
+        if request.path.endswith(MESSAGES_PATH) and not logged.stream:
+            return _error_response(
+                501, "Anthropic probe requires streaming", code="unsupported"
+            )
 
         try:
             turn, turn_index = self.scripts.consume(model)
@@ -311,13 +318,21 @@ class FakeProvider:
             },
         )
         await response.prepare(request)
-        frames = stream_frames(
-            turn,
-            turn_index=turn_index,
-            model=model,
-            completion_id=completion_id,
-            created=created,
-        )
+        if request.path.endswith(MESSAGES_PATH):
+            frames = anthropic_stream_frames(
+                turn,
+                turn_index=turn_index,
+                model=model,
+                message_id=f"msg-probe-{request_index}",
+            )
+        else:
+            frames = stream_frames(
+                turn,
+                turn_index=turn_index,
+                model=model,
+                completion_id=completion_id,
+                created=created,
+            )
         try:
             await self._write_frames(response, frames, request_index=request_index)
             await response.write_eof()

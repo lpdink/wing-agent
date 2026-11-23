@@ -16,7 +16,7 @@ from pydantic import Field
 from wing.store import SessionUsage
 
 from .base import AgentInfo, SessionStatus, WingEvent
-
+from .react import PendingUserMessage
 
 # ============================================================
 # Session 生命周期事件
@@ -53,6 +53,7 @@ class SyncSessionEvent(WingEvent):
       （`[{tool_call_id, tool_name, args_fragment}]`），前端经既有 live
       ToolCallStream 分支局部解析渲染活工具卡
     events：活跃链上的**事实类**事件节点（按链序，过滤规则见 get_active_events）
+    pending_user_messages：尚未提交的输入，准备中的批次在队首
     agent：该 session 的 AgentInfo
     name：session 名称
     draft：用户还没发出去的草稿（rewind/fork 时可能有）
@@ -65,6 +66,7 @@ class SyncSessionEvent(WingEvent):
     uncommitted: dict[str, Any] | None = None
     uncommitted_tools: list[dict[str, Any]] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
+    pending_user_messages: list[PendingUserMessage] = Field(default_factory=list)
     # 无默认值：每个构造点都必须显式给出快照时刻的状态——同步载荷自描述，
     # 前端不做推断（漏给值应当是构造期的错误，而非静默退化成"不在跑"）。
     status: SessionStatus

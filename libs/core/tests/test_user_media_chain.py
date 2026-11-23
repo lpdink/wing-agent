@@ -8,8 +8,7 @@
   拒绝（`InvalidInputError`，且**没有**送达 ack、不进队列）；
 - `run_turn` 合并：media 按「消息序 × 消息内序」concat；纯图消息合法；
   `user_message_accepted` 条件放宽（content 或 media）；
-- steer 部分 drain（D7）：队首连续无 media 纯文本才可 steer，首条带图消息起
-  全部留队列（保序、不丢）；
+- steer：带图与文本保序合并为同轮下一次请求的 user 消息；
 - 首条纯图消息不写入空标题。
 
 图片字节用最小 PNG 头即可（本文件不真解码，只对账引用与顺序）。
@@ -74,7 +73,7 @@ def _put(agent: Any, content: str, request_id: str | None = None, media=None) ->
     from wing.agent.inbox import Inbound
     from wing.schema import Message
 
-    agent._inbox._queue.put_nowait(
+    agent._inbox._enqueue(
         Inbound(
             message=Message(role="user", content=content, media=media),
             request_id=request_id,
@@ -275,74 +274,9 @@ class TestTurnMerge:
         assert not any(isinstance(e, UserMessageAcceptedEvent) for e in events)
 
 
-class TestSteerPartialDrain:
-    """D7：steer 只取队首连续的无 media 纯文本，其余原序留队列。"""
-
-    def _inbox(self):
-        from wing.agent.inbox import Inbox
-        from wing.schema import Message
-
-        inbox = Inbox()
-        return inbox, Message
-
-    def _enqueue(self, inbox: Any, items: list[tuple[str, list[MediaRef] | None]]):
-        from wing.agent.inbox import Inbound
-        from wing.schema import Message
-
-        for content, media in items:
-            inbox._queue.put_nowait(
-                Inbound(
-                    message=Message(role="user", content=content, media=media),
-                    request_id=f"req-{content}",
-                )
-            )
-
-    def test_text_prefix_steers_tail_stays(self):
-        inbox, _ = self._inbox()
-        ref = make_ref(png_bytes(payload=b"steer"))
-        self._enqueue(inbox, [("A", None), ("B", [ref]), ("C", None)])
-
-        steered = inbox.drain_for_steer()
-
-        assert [b.message.content for b in steered] == ["A"]
-        rest = inbox.drain()
-        assert [b.message.content for b in rest] == ["B", "C"], "保序且不丢"
-        assert rest[0].message.media is not None, "带图消息的引用原样留在队列"
-
-    def test_all_text_is_steerable(self):
-        inbox, _ = self._inbox()
-        self._enqueue(inbox, [("A", None), ("B", None)])
-
-        steered = inbox.drain_for_steer()
-
-        assert [b.message.content for b in steered] == ["A", "B"]
-        assert inbox.has_pending is False
-
-    def test_image_at_head_blocks_everything(self):
-        inbox, _ = self._inbox()
-        ref = make_ref(png_bytes(payload=b"head"))
-        self._enqueue(inbox, [("B", [ref]), ("C", None)])
-
-        assert inbox.drain_for_steer() == []
-        assert [b.message.content for b in inbox.drain()] == ["B", "C"]
-
-    def test_empty_content_entry_blocks_the_rest(self):
-        """空 content（内部投递）同样阻断——队列语义是"按序取前缀"，不跳条。"""
-        inbox, _ = self._inbox()
-        self._enqueue(inbox, [("A", None), ("", None), ("C", None)])
-
-        steered = inbox.drain_for_steer()
-
-        assert [b.message.content for b in steered] == ["A"]
-        assert [b.message.content for b in inbox.drain()] == ["", "C"]
-
-    def test_empty_queue_is_noop(self):
-        inbox, _ = self._inbox()
-        assert inbox.drain_for_steer() == []
-
+class TestSteerMedia:
     @pytest.mark.asyncio
-    async def test_steer_blocked_by_media_defers_to_next_turn(self, runtime: Any):
-        """工具执行期间到达的带图消息：本轮不注入 note，下一轮完整进入。"""
+    async def test_steer_merges_media_and_text_in_current_turn(self, runtime: Any):
         from wing.schema import Tool, ToolCall, ToolParam, ToolUseBlock
 
         session = runtime.create_session()
@@ -380,11 +314,6 @@ class TestSteerPartialDrain:
                     content_blocks=[TextBlock(text="done")],
                     usage=LLMUsage(prompt_tokens=1, completion_tokens=1),
                 ),
-                LLMResponse(
-                    content="second",
-                    content_blocks=[TextBlock(text="second")],
-                    usage=LLMUsage(prompt_tokens=1, completion_tokens=1),
-                ),
             ]
         )
 
@@ -395,24 +324,19 @@ class TestSteerPartialDrain:
         with patch.object(agent.model_provider, "generate", _generate):
             await agent._loop.run_turn()
 
-            # 本轮：只有纯文本消息进了 steer note；带图消息与其后的文本留队列。
-            tool_msgs = [
-                m
-                for m in agent.context_manager._messages.active_chain
-                if m.role == "tool"
-            ]
-            assert tool_msgs[0].content == "[User steer note: steer me]\ntool-result"
-            assert "after" not in tool_msgs[0].content
-            assert agent._inbox.has_pending is True
-
-            # 下一轮：带图消息 + 其后文本一起合并进上下文（顺序不变）。
-            await agent._loop.run_turn()
-
-        user_msgs = [
-            m for m in agent.context_manager._messages.active_chain if m.role == "user"
+        chain = agent.context_manager.get_context_window()
+        assert [m.role for m in chain] == [
+            "user",
+            "assistant",
+            "tool",
+            "user",
+            "assistant",
         ]
-        assert user_msgs[-1].content == "after"
-        assert [r.id for r in user_msgs[-1].media or []] == [ref.id]
+        assert chain[2].content == "tool-result"
+        assert chain[2].tool_call_id == tc.id
+        assert chain[3].content == "steer me\nafter"
+        assert chain[3].media == [ref]
+        assert agent._inbox.has_pending is False
 
 
 class TestProtocolMediaField:

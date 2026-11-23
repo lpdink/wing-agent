@@ -134,12 +134,25 @@ class FileMessageLog(MessageLog):
             return
         blobs = [json.dumps(r, ensure_ascii=False).encode("utf-8") for r in records]
         self._path.mkdir(parents=True, exist_ok=True)
-        with open(self._path / self._HISTORY, "ab") as f:
-            for blob in blobs:
-                f.write(blob)
-                f.write(b"\n")
-            f.flush()
-            os.fsync(f.fileno())
+        history = self._path / self._HISTORY
+        start = None
+        try:
+            with open(history, "ab") as f:
+                start = f.tell()
+                for blob in blobs:
+                    f.write(blob)
+                    f.write(b"\n")
+                f.flush()
+                os.fsync(f.fileno())
+        except OSError:
+            # A buffered flush or fsync can fail after bytes reach the file.
+            # SessionStore owns the append stream, so truncate back to its prior tip.
+            if start is not None:
+                try:
+                    os.truncate(history, start)
+                except OSError:
+                    log.exception("Failed to roll back history append: %s", history)
+            raise
 
     # ── aux kv ────────────────────────────────
 

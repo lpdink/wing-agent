@@ -258,7 +258,7 @@ class _SerializeMixin:
         - assistant-assistant：无效轮次重试续跑——截断轮的 content 与重试轮
           的 tool call 是两条相邻 assistant，合并恰好还原「text + tool_use
           同一条」的未截断形态；
-        - user-user：tool_result 后紧跟 steer 注入的 user 文本。
+        - user-user：tool_result 块在前，其后接 steer 输入的文本与媒体块。
         """
         if not msgs:
             return msgs

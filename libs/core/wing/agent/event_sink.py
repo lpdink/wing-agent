@@ -30,13 +30,12 @@ from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log
-from wing.event import EventTarget
-from wing.event_bus import event_bus
 from wing.event import (
     AssistantTurnEvent,
     ContextStatsEvent,
     DoneEvent,
     ErrorEvent,
+    EventTarget,
     LLMCallMetricsEvent,
     ReasoningEvent,
     TextEvent,
@@ -47,11 +46,15 @@ from wing.event import (
     TurnResultEvent,
     TurnStartedEvent,
     UserMessageAcceptedEvent,
+    UserMessageCommittedEvent,
+    UserMessageQueuedEvent,
+    UserMessagesDroppedEvent,
 )
+from wing.event_bus import event_bus
 from wing.request_context import get_request_context
 
 if TYPE_CHECKING:
-    from wing.event import WingEvent
+    from wing.event import PendingUserMessage, WingEvent
     from wing.schema import LLMUsage, MediaRef, Message, ToolCall
 
 
@@ -178,13 +181,37 @@ class AgentEventSink:
     def turn_started(self) -> None:
         self.emit(TurnStartedEvent(session_id=self._session_id))
 
+    def user_message_queued(self, pending: PendingUserMessage) -> None:
+        self.emit(
+            UserMessageQueuedEvent(
+                origin_request_id=pending.origin_request_id,
+                content=pending.content,
+                media=pending.media,
+            )
+        )
+
+    def user_message_committed(
+        self, message: Message, origin_request_ids: list[str]
+    ) -> None:
+        assert message.uuid is not None
+        self.emit(
+            UserMessageCommittedEvent(
+                message_uuid=message.uuid,
+                origin_request_ids=origin_request_ids,
+                content=message.content or "",
+                media=message.media or [],
+            )
+        )
+
+    def user_messages_dropped(self, origin_request_ids: list[str]) -> None:
+        if origin_request_ids:
+            self.emit(UserMessagesDroppedEvent(origin_request_ids=origin_request_ids))
+
     def user_message_accepted(
         self, content: str, origin_request_id: str | None
     ) -> None:
-        """用户消息被消费进模型上下文（新 turn 输入或 steer 注入）。"""
         self.emit(
             UserMessageAcceptedEvent(
-                session_id=self._session_id,
                 content=content,
                 origin_request_id=origin_request_id or "",
             )

@@ -38,6 +38,7 @@ from .react_loop import ReActLoop
 from .tool_executor import ToolExecutor, _current_tool_call_id
 
 if TYPE_CHECKING:
+    from wing.event import PendingUserMessage
     from wing.media import MediaAccess
 
 
@@ -258,6 +259,9 @@ class WingAgent:
         """inbox 里是否有待处理输入（已投递、worker 尚未取走）。"""
         return self._inbox.has_pending
 
+    def pending_user_messages(self) -> list[PendingUserMessage]:
+        return self._loop.pending_user_messages()
+
     @property
     def tools(self) -> list[Tool]:
         """当前可执行工具集（排序快照）。"""
@@ -443,7 +447,12 @@ class WingAgent:
         media: list[MediaRef] | None = None,
     ) -> None:
         """接收用户消息或 feedback。media 非空时消息携带媒体引用（字节在存储）。"""
-        await self._inbox.post(content, request_id, role, tool_call_id, media=media)
+        item = await self._inbox.post(
+            content, request_id, role, tool_call_id, media=media
+        )
+        pending = item.pending_user_message() if item is not None else None
+        if pending is not None:
+            self._sink.user_message_queued(pending)
 
     @property
     def compacting(self) -> bool:
@@ -567,7 +576,9 @@ class WingAgent:
         """
         started = time.monotonic()
         self._inbox.cancel_all_waiters()
-        dropped = [b.request_id for b in self._inbox.clear() if b.request_id]
+        dropped = [
+            b.request_id for b in self._inbox.clear() if b.request_id is not None
+        ]
         # 手动压缩是会话级独占操作（持有 inbox 取出口闸门）：积压已在入口清掉（不把
         # 锁/取消等待期间新到的消息一起吞掉），这里再收掉在飞的压缩。取消不写链。
         await self._cancel_compaction()

@@ -1469,6 +1469,8 @@ class SessionManager:
 
         session = self.ensure_loaded(session_id)
         validate_media_refs(session.store, session.session_id, media)
+        if request_id is not None:
+            require_utf8(request_id, field="request_id")
 
         event_bus.emit(
             DeliveredEvent(

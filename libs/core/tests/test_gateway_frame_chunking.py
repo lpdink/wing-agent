@@ -21,11 +21,16 @@ from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import WebSocket
-
 from _support import gateway_auth_config, wait_until_async
+from fastapi import WebSocket
 from wing.config import ApiKeyEntry
-from wing.event import EventTarget, NoticeEvent, wire_dump
+from wing.event import (
+    EventTarget,
+    NoticeEvent,
+    UserMessageCommittedEvent,
+    UserMessageQueuedEvent,
+    wire_dump,
+)
 from wing.event_bus import event_bus
 from wing.gateway.frames import (
     HARD_LIMIT_BYTES,
@@ -235,6 +240,38 @@ class TestChunkedDelivery:
         assert [e["index"] for e in envelopes] == list(range(len(envelopes)))
         assert {e["id"] for e in envelopes} == {envelopes[0]["id"]}
         assert "".join(e["data"] for e in envelopes) == payload
+
+    async def test_adjacent_chunked_input_events_are_sent_contiguously(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", 512)
+        server = _make_server()
+        stub = _RecordingWs()
+        _register(server, _as_ws(stub))
+        text = "x" * 2000
+        queued = UserMessageQueuedEvent(
+            origin_request_id="request",
+            content=text,
+            media=[],
+            target=EventTarget(scope="global"),
+        )
+        committed = UserMessageCommittedEvent(
+            message_uuid="message",
+            origin_request_ids=["request"],
+            content=text,
+            media=[],
+            target=EventTarget(scope="global"),
+        )
+        server._on_event(queued)
+        server._on_event(committed)
+        counts = [
+            len(build_frames(json.dumps(wire_dump(event)), event.type))
+            for event in (queued, committed)
+        ]
+        assert min(counts) > 1
+        await wait_until_async(lambda: len(stub.sent) == sum(counts))
+        events = [json.loads(frame)["of_type"] for frame in stub.sent]
+        assert events == [queued.type] * counts[0] + [committed.type] * counts[1]
 
     async def test_global_and_client_scope_share_the_path(self, monkeypatch):
         monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", 512)

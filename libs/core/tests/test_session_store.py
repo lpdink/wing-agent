@@ -176,8 +176,9 @@ class TestFileLogStreaming:
 
     def test_iter_all_parses_lazily(self, tmp_path: Path, monkeypatch):
         """取第一条只解析第一条——不得预读/物化整份文件。"""
-        import wing.store.file as file_module
         from types import SimpleNamespace
+
+        import wing.store.file as file_module
         from wing.store.file import FileMessageLog
 
         log = FileMessageLog(tmp_path)
@@ -215,6 +216,28 @@ class TestFileLogStreaming:
 
         assert (tmp_path / "history.jsonl").read_bytes() == before
         assert [r["content"] for r in log.iter_all()] == ["keep"]
+
+    def test_failed_fsync_rolls_back_whole_append(self, tmp_path, monkeypatch):
+        import os
+
+        from wing.store.file import FileMessageLog
+
+        log = FileMessageLog(tmp_path)
+        log.append([{"role": "user", "content": "keep"}])
+        before = (tmp_path / "history.jsonl").read_bytes()
+
+        def fail_fsync(fd):
+            assert os.fstat(fd).st_size > len(before)
+            raise OSError("fsync failed after flush")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "fsync", fail_fsync)
+            with pytest.raises(OSError, match="fsync failed"):
+                log.append([{"content": "first"}, {"content": "second"}])
+
+        assert (tmp_path / "history.jsonl").read_bytes() == before
+        log.append([{"content": "later"}])
+        assert [record["content"] for record in log.iter_all()] == ["keep", "later"]
 
     def test_append_failure_does_not_create_file(self, tmp_path: Path):
         from wing.store.file import FileMessageLog

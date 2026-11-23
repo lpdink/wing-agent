@@ -16,11 +16,7 @@ OSError，与磁盘打满的 ENOSPC 同类），断言用户看得见的三件�
 能力即复刻"同一故障击穿两层兜底 handler"的现场。root 无视权限位，故在 root
 下跳过（CI 与本地开发都是普通用户）。
 
-不变量逃生舱：注入落盘故障必然让**磁盘**链断开（故障期间该会话的写入整体
-失败，内存链与磁盘分叉，恢复后新记录的 parent_uuid 指向一个没写进文件的
-uuid）——这是 `TrackedList` 既有的"先改内存再落盘"语义在故障下的必然结果
-（磁盘链修复不在 #187 范围）。本场景断言的是消费者存活与续期，故显式关闭
-teardown 的内置不变量并给出理由。
+失败期间的输入由精确丢弃事件收口，恢复后的历史链保持完整。
 """
 
 from __future__ import annotations
@@ -47,18 +43,7 @@ async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
             "root / 无权限位的平台：本场景靠去掉 history.jsonl 的写权限注入落盘失败"
         )
 
-    probe.register(
-        MODEL,
-        # 第 2 个 Turn 可能被故障那轮吃掉（取决于故障落在哪一步）——第 2/3 个
-        # Turn 同文，恢复轮的断言因此不依赖"故障轮是否发出过模型请求"。
-        Turn.of(text="first"),
-        Turn.of(text="recovered"),
-        Turn.of(text="recovered"),
-    )
-    probe.without_invariants(
-        "注入落盘故障必然让磁盘链断开（故障期间该会话写入整体失败，内存链与磁盘"
-        "分叉）——本场景断言消费者存活与续期，磁盘链修复不在 #187 范围"
-    )
+    probe.register(MODEL, Turn.of(text="first"), Turn.of(text="recovered"))
     session = await probe.session(model=MODEL)
 
     result = await session.chat("one")
@@ -72,7 +57,16 @@ async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
     os.chmod(history, 0o400)
     try:
         cursor = session.watch.cursor
-        await session.send("two")
+        failed_id = await session.send("two")
+        dropped = await session.watch.expect("user_messages_dropped")
+        assert dropped.data["origin_request_ids"] == [failed_id]
+        session.watch.assert_never(
+            "user_message_committed", where={"origin_request_ids": [failed_id]}
+        )
+        assert [m["content"] for m in (await session.get())["messages"]] == [
+            "one",
+            "first",
+        ]
         event = await session.watch.expect(["turn_result", "error"], within=30)
 
         # ① error 收口：报告三连都到达客户端（前端据此复位 working 态）。
@@ -97,3 +91,9 @@ async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
     result = await session.chat("three")
     assert result.data["subtype"] == "success", result.data
     assert result.data["result"] == "recovered", result.data
+    assert [m["content"] for m in probe.history(session).messages()] == [
+        "one",
+        "first",
+        "three",
+        "recovered",
+    ]

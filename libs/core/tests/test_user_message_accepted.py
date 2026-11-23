@@ -17,12 +17,12 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
-
 from _support import mock_generate
 from wing.event import (
     TextEvent,
     TurnStartedEvent,
     UserMessageAcceptedEvent,
+    UserMessageCommittedEvent,
 )
 from wing.event_bus import event_bus
 from wing.schema import (
@@ -63,7 +63,7 @@ def _put(agent, content: str, request_id: str | None = None) -> None:
     from wing.agent.inbox import Inbound
     from wing.schema import Message
 
-    agent._inbox._queue.put_nowait(
+    agent._inbox._enqueue(
         Inbound(message=Message(role="user", content=content), request_id=request_id)
     )
 
@@ -111,6 +111,8 @@ class TestTurnStartAcceptance:
             await agent._loop.run_turn()
 
         def _kind(e: Any) -> str | None:
+            if isinstance(e, UserMessageCommittedEvent):
+                return "committed"
             if isinstance(e, UserMessageAcceptedEvent):
                 return "accepted"
             if isinstance(e, TurnStartedEvent):
@@ -118,11 +120,13 @@ class TestTurnStartAcceptance:
             return None
 
         kinds = [k for e in events if (k := _kind(e)) is not None]
-        assert kinds == ["accepted", "started"]
+        assert kinds == ["committed", "accepted", "started"]
 
     @pytest.mark.asyncio
-    async def test_no_event_for_inbound_without_request_id(self, runtime: Any):
-        """内部投递（无 request_id）不发射。"""
+    async def test_inbound_without_request_id_commits_without_accepted(
+        self, runtime: Any
+    ):
+        """内部投递提交到会话，但不发兼容用量事件。"""
         session = runtime.create_session()
         agent = session.agent
         await _stop_worker(agent)
@@ -136,13 +140,17 @@ class TestTurnStartAcceptance:
             await agent._loop.run_turn()
 
         assert not any(isinstance(e, UserMessageAcceptedEvent) for e in events)
+        committed = [e for e in events if isinstance(e, UserMessageCommittedEvent)]
+        assert len(committed) == 1
+        assert committed[0].origin_request_ids == []
+        assert committed[0].content == "internal-post"
 
 
 class TestSteerAcceptance:
     """发射点②：工具执行后的 steer 注入。"""
 
     @pytest.mark.asyncio
-    async def test_steer_emits_accepted_and_injects_note(self, runtime: Any):
+    async def test_steer_emits_accepted_after_user_commit(self, runtime: Any):
         """工具执行期间排队的消息：steer drain 时发射 accepted，
         且事件落在工具结果事件之后、下一轮 text 事件之前。"""
         session = runtime.create_session()
@@ -214,11 +222,17 @@ class TestSteerAcceptance:
         idx_text = next(i for i, e in enumerate(events) if isinstance(e, TextEvent))
         assert idx_tool_result < idx_steer_accepted < idx_text
 
-        # steer note 注入了最后一个工具结果
         chain = agent.context_manager.get_context_window()
         tool_msgs = [m for m in chain if m.role == "tool"]
         assert len(tool_msgs) == 1
-        assert tool_msgs[0].content == "[User steer note: steer me]\ntool-result"
+        assert tool_msgs[0].content == "tool-result"
+        committed = [e for e in events if isinstance(e, UserMessageCommittedEvent)]
+        assert [e.origin_request_ids for e in committed] == [["req-0"], ["req-steer"]]
+        assert (chain[-2].role, chain[-2].content, chain[-2].uuid) == (
+            "user",
+            "steer me",
+            committed[-1].message_uuid,
+        )
 
     @pytest.mark.asyncio
     async def test_steer_disabled_defers_to_next_turn(self, runtime: Any):

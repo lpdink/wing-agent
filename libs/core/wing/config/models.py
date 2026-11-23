@@ -941,7 +941,7 @@ class Config(BaseModel):
         default=False,
     )
     steer: bool = S(
-        doc="启用 steer 模式（用引导提示约束 agent 行为）",
+        doc="工具批次结束后，将排队的用户输入加入当前轮的下一次模型调用",
         apply=ApplyScope.NEXT_SESSION,
         default=True,
     )

@@ -70,16 +70,17 @@ class TrackedList(Generic[T]):
                 f"expected ChainNode (Message or WingEvent), got {type(item).__name__}"
             )
 
-    def _ensure_type(self, items: list[T]) -> None:
+    def _prepare_append(self, items: list[T]) -> None:
         """检查 ChainNode 家族约束，同时填充 uuid/parentUuid。"""
+        parent_uuid = self._last_uuid
         for it in items:
             self._require_node(it)
             if it.uuid is None:
                 it.uuid = str(uuid_mod.uuid4())
             if it.parent_uuid is None:
-                it.parent_uuid = self._last_uuid
+                it.parent_uuid = parent_uuid
             if it.uuid:
-                self._last_uuid = it.uuid
+                parent_uuid = it.uuid
 
     def _check_type(self, items: list[T]) -> None:
         """检查 ChainNode 家族约束（detached 场景，不填充拓扑字段）。"""
@@ -206,21 +207,17 @@ class TrackedList(Generic[T]):
 
     def append(self, item: T) -> None:
         """追加元素。填充 uuid/parentUuid，写日志。"""
-        self._ensure_type([item])
-        self._data.append(item)
-        self._last_uuid = item.uuid
-        self._persist_append([item])
-        self._update_memory(item)
+        self.extend([item])
 
     def extend(self, items: Union[Iterator[T], List[T]]) -> None:
         """批量追加多条消息。每条填充 uuid/parentUuid，写日志。"""
         lst = list(items)
-        self._ensure_type(lst)
+        self._prepare_append(lst)
+        self._persist_append(lst)
         self._data.extend(lst)
         for item in lst:
             self._update_memory(item)
             self._last_uuid = item.uuid
-        self._persist_append(lst)
 
     def append_detached(self, item: T) -> None:
         """追加消息，但不自动填充 uuid/parentUuid。
@@ -228,9 +225,9 @@ class TrackedList(Generic[T]):
         调用方已自行设置好拓扑关系时使用（compact/rewind 场景）。
         """
         self._check_type([item])
+        self._persist_append([item])
         self._data.append(item)
         self._last_uuid = item.uuid
-        self._persist_append([item])
         self._update_memory(item)
 
     def set_tip(self, uuid: str) -> None:

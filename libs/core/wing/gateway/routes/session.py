@@ -224,7 +224,7 @@ async def send_message(
     request: Request,
 ) -> SendMessageResponse:
     server = get_server(request)
-    request_id = uuid.uuid4().hex
+    request_id = body.request_id if body.request_id is not None else uuid.uuid4().hex
 
     # 被逐出（不在内存）的会话按需水合；磁盘上也没有才 404。
     try:
