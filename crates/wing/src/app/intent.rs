@@ -8,13 +8,22 @@
 //! tasks to avoid blocking the main event loop. Results are delivered back
 //! via [`FetchResult`] through an mpsc channel.
 
+use std::sync::Arc;
+
 use wing_api_client::models::{
     AgentsResponse, BranchesResponse, CommandsResponse, ModelsResponse, SessionInfoResponse,
     SessionListResponse, SettingsGetResponse, SettingsSchemaResponse, SettingsSetResponse,
 };
 
+use crate::ui::chat_view::Submission;
 use crate::util::image_compress::CompressOptions;
 use crate::util::image_compress::CompressedImage;
+
+/// A local submission that may still need restoration after a same-session sync.
+pub struct SendDraft {
+    pub(super) epoch: u64,
+    pub(super) submission: Arc<Submission>,
+}
 
 /// Payload of a background fetch result.
 pub enum FetchPayload {
@@ -86,13 +95,13 @@ pub enum FetchPayload {
     /// 一条消息的**后台发送失败**回执（`SendMessage` 后台任务，见
     /// `runner::spawn_send_message`）。
     ///
-    /// 条目按 `request_id` 认领（pending 就是它的锚），所以和压缩一样在会话守卫
-    /// **之前**分派：换过会话后也该有反馈（条目不在时只 toast，不碰草稿）。
+    /// The original is carried across a snapshot that replaced the pending list.
     SendFailed {
         /// 与 `SendMessage` / pending 条目同一个关联 id。
         request_id: String,
         /// 给 toast 的文案（`Image upload failed: …` / `Send failed: …`）。
         reason: String,
+        draft: Option<SendDraft>,
     },
     /// Show a toast message (for errors or success feedback from background tasks).
     Toast { message: String, is_error: bool },
@@ -120,9 +129,8 @@ pub enum AppIntent {
     /// `tool_call_id` — Some when this message answers a pending Ask event
     /// (routes to the ask's feedback waiter); None for plain user input.
     ///
-    /// `request_id` — client-generated correlation id; echoes back in
-    /// `delivered` / `user_message_accepted` events so the app can match
-    /// the message against its pending queue.
+    /// `request_id` — client-generated correlation ID used by the gateway’s
+    /// queue and commit events to resolve the optimistic entry.
     ///
     /// `images` — 随消息发出的图片（压缩产物，按提交顺序）。空 = 纯文本，
     /// runner 走原路径（不上传、帧里没有 `media` 键）；非空时 runner 先逐张

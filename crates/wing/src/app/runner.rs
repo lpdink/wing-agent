@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SessionUpdate};
+use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SendDraft, SessionUpdate};
 use crate::app::settings::GatewaySaveReport;
 use crate::app::settings::InterfaceSaveReport;
 use crate::app::settings::PendingSettingsSave;
@@ -642,7 +642,7 @@ pub async fn execute_intent(
 /// 与图片 chip + warning toast）；已经上传成功的图留在存储里（政策：媒体永不删除）。
 ///
 /// **返回**：`Ok(())` = 帧已投进 WS 写通道（成功路径不动 pending：条目等后端的
-/// `user_message_accepted` 提升）；`Err(reason)` = 整条没发出去（无连接 / 上传失败 /
+/// commit 事件入历史）；`Err(reason)` = 整条没发出去（无连接 / 上传失败 /
 /// WS 写不出去），`reason` 是给 toast 的文案。
 pub(super) async fn deliver_user_message(
     http: &wing_api_client::GatewayClient,
@@ -890,13 +890,22 @@ pub(super) fn dispatch_send_message(
     message: OutgoingMessage,
     fetch_tx: mpsc::Sender<FetchResult>,
 ) {
-    let Some(transport) = transport else {
+    let Some(transport) = transport.filter(|_| app.connected) else {
+        // A new socket can exist before recovery subscribes to the session.
+        // Keep unsent input in the draft until the event stream is ready.
         // Gateway connection lost — nothing left the client, so the content
         // goes back to the composer. 纯本地动作（无 I/O），不必绕后台任务。
-        app.restore_failed_send(&message.request_id, "Not sent — gateway disconnected");
+        app.restore_failed_send(&message.request_id, "Not sent — gateway disconnected", None);
         return;
     };
-    spawn_send_message(transport, send_chain, message, fetch_tx);
+    let draft = app
+        .chat
+        .pending_submission(&message.request_id)
+        .map(|submission| SendDraft {
+            epoch: app.draft_recovery_epoch,
+            submission,
+        });
+    spawn_send_message(transport, send_chain, message, fetch_tx, draft);
 }
 
 /// 把一条消息的发送挪进后台任务（[`dispatch_send_message`] 的「有连接」分支）。
@@ -911,6 +920,7 @@ fn spawn_send_message(
     send_chain: &mut Option<tokio::task::JoinHandle<()>>,
     mut message: OutgoingMessage,
     fetch_tx: mpsc::Sender<FetchResult>,
+    draft: Option<SendDraft>,
 ) {
     let http = transport.http.clone();
     let ws = transport.ws.request_sender();
@@ -921,14 +931,13 @@ fn spawn_send_message(
             let _ = previous.await;
         }
         if let Err(reason) = deliver_user_message(&http, &ws, &mut message).await {
-            // 内容还给草稿：回执走和压缩同一条 fetch 通道（App 侧不看会话守卫——
-            // 条目按 request_id 认领，找不到就只 toast，不碰草稿）。
             let _ = fetch_tx
                 .send(FetchResult {
                     session_id: message.session_id,
                     payload: FetchPayload::SendFailed {
                         request_id: message.request_id,
                         reason,
+                        draft,
                     },
                 })
                 .await;

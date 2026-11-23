@@ -20,6 +20,7 @@ use super::title;
 use super::turn_state;
 use crate::protocol::AgentInfo;
 use crate::protocol::EventMeta;
+use crate::protocol::QueuedUserMessage;
 use crate::protocol::SessionStatus;
 use crate::protocol::WingEvent;
 use crate::shared::constants::TOOL_BASH;
@@ -31,7 +32,7 @@ use crate::ui::cells::diff_view::DiffView;
 use crate::ui::cells::todo_msg::TodoMessage;
 use crate::ui::cells::tool_call::ToolCallBlock;
 use crate::ui::cells::tool_call::ToolStatus;
-use crate::ui::chat_view::ChatCell;
+use crate::ui::chat_view::{ChatCell, UserMessageBody};
 use crate::ui::status_bar::TurnUsage;
 use crate::ui::toast::Toast;
 use crate::ui::welcome::SessionFacts;
@@ -41,11 +42,12 @@ use wing_api_client::models::SessionUsage;
 
 /// `SyncSession` 快照的借用视图——重放的输入。
 ///
-/// 具名字段而不是 11 个位置参数：`draft` 与 `name` 同为 `Option<String>`，
+/// 使用具名字段：`draft` 与 `name` 同为 `Option<String>`，
 /// `messages` 与 `events` 同为 `&[Value]`，位置一错就是静默的语义错误。
 struct SyncSnapshot<'a> {
     session_id: String,
     messages: &'a [serde_json::Value],
+    pending_user_messages: Option<Vec<QueuedUserMessage>>,
     uncommitted: Option<&'a serde_json::Value>,
     uncommitted_tools: &'a [serde_json::Value],
     events: &'a [serde_json::Value],
@@ -127,21 +129,38 @@ impl App {
             WingEvent::UserMessageAccepted {
                 origin_request_id, ..
             } => {
-                // The message has actually been fed to the model — only now
-                // may it move up into chat history. Untracked ids (another
-                // client's sends) are ignored: this client does not render
-                // them.
-                if !self.chat.promote_pending(&origin_request_id) {
-                    tracing::debug!(
-                        origin_request_id,
-                        "user_message_accepted for untracked message, ignoring"
-                    );
+                if !self.user_input_sync {
+                    self.chat.promote_pending(&origin_request_id);
                 }
             }
+            WingEvent::UserMessageQueued { message, .. } => {
+                self.chat.queue_user_message(
+                    message.origin_request_id,
+                    UserMessageBody::new(message.content, message.media),
+                );
+            }
+            WingEvent::UserMessageCommitted {
+                message_uuid,
+                origin_request_ids,
+                content,
+                media,
+                ..
+            } => {
+                self.chat.remove_pending(&origin_request_ids);
+                self.chat.push_committed_user_message(
+                    Some(message_uuid),
+                    UserMessageBody::new(content, media),
+                );
+            }
+            WingEvent::UserMessagesDropped {
+                origin_request_ids, ..
+            } => {
+                self.chat.discard_pending(&origin_request_ids);
+            }
             WingEvent::Done { .. } => {
-                // Turn-end safety net: promote anything still queued (e.g.
-                // accepted events lost across a disconnect/reconnect).
-                self.chat.promote_all_pending();
+                if !self.user_input_sync {
+                    self.chat.promote_all_pending();
+                }
                 self.finish_turn();
                 self.clear_ask_state();
                 // Restore idle title — but if the user is not focused and a
@@ -166,13 +185,10 @@ impl App {
                 dropped_request_ids,
                 ..
             } => {
-                // The interrupt discarded exactly the requests the backend
-                // reports — messages that arrived while the interrupt was in
-                // flight survive and are promoted by `user_message_accepted`.
-                // Legacy gateways omit the list: keep the blanket discard.
                 match dropped_request_ids {
                     Some(ids) => self.chat.discard_pending(&ids),
-                    None => self.chat.discard_all_pending(),
+                    None if !self.user_input_sync => self.chat.discard_all_pending(),
+                    None => {}
                 }
                 self.finish_turn();
                 self.clear_ask_state();
@@ -215,21 +231,16 @@ impl App {
             }
 
             WingEvent::Error { message, meta, .. } => {
-                // 被拒的 `ClientRequest` 帧带回客户端的 `request_id`（帧关联）：
-                // 命中的那条消息根本没进模型（闸门在 Delivered 之前），所以把产物从
-                // pending 队列取回、还给草稿——否则随后 `done` 的 `promote_all_pending`
-                // 会把它当「已发送」晋升。**无关联的 error**（request_id 是新 uuid 的
-                // turn 级失败，或旧网关的帧）匹配不到任何条目，行为逐字不变。
+                // A frame rejection is scoped to its submission. A turn error
+                // may arrive through the same event with an unrelated request ID.
                 let rejected = self.chat.take_pending(&meta.request_id);
-                self.finish_turn();
-                // The backend cancels every feedback waiter when a turn dies —
-                // a stale ask panel must not outlive it (nor get answered into
-                // a dead waiter), and the record must not stay `blocked`.
-                self.clear_ask_state();
+                if rejected.is_none() || !self.user_input_sync {
+                    self.finish_turn();
+                    self.clear_ask_state();
+                    self.set_program_status(State::Error, Some(&message));
+                    self.notify_unfocused(message.clone(), AttentionKind::Error);
+                }
                 self.chat.push(ChatCell::ErrorMessage(message.clone()));
-                // The most specific failure text wing has for the record.
-                self.set_program_status(State::Error, Some(&message));
-                self.notify_unfocused(message.clone(), AttentionKind::Error);
                 if let Some(submission) = rejected {
                     // 与发送失败同一条回填路径（内容已经在草稿里，理由在 Error cell / toast 里）。
                     self.restore_draft(submission);
@@ -532,6 +543,7 @@ impl App {
             WingEvent::SyncSession {
                 session_id,
                 messages,
+                pending_user_messages,
                 uncommitted,
                 uncommitted_tools,
                 events,
@@ -546,6 +558,7 @@ impl App {
                 self.apply_sync_session(SyncSnapshot {
                     session_id,
                     messages: &messages,
+                    pending_user_messages,
                     uncommitted: uncommitted.as_ref(),
                     uncommitted_tools: &uncommitted_tools,
                     events: &events,
@@ -628,6 +641,7 @@ impl App {
         let SyncSnapshot {
             session_id,
             messages,
+            pending_user_messages,
             uncommitted,
             uncommitted_tools,
             events,
@@ -646,6 +660,7 @@ impl App {
         let switched = self.session_id != session_id;
         self.session_id = session_id;
         if switched {
+            self.draft_recovery_epoch = self.draft_recovery_epoch.wrapping_add(1);
             // 星标此刻挂的是**上一个会话**的状态：先复位成未知（未 pin），
             // 别在一个 RTT 的窗口里把别人的 pin 显成你的——补取的 info 到达
             // 后立即纠正（点击期间也不会据此算错目标值）。
@@ -655,9 +670,22 @@ impl App {
             self.finish_compaction();
         }
 
-        // Clear old content + reset render context before replay.
-        // SyncSession is a full state replacement — not an append.
-        self.chat.clear();
+        // Optimistic sends on this connection may follow the snapshot. A
+        // disconnect already removed echoes whose acknowledgements could be lost.
+        self.user_input_sync = pending_user_messages.is_some();
+        if let Some(messages) = pending_user_messages {
+            self.chat.rebuild_with_pending_queue(
+                messages.into_iter().map(|message| {
+                    (
+                        message.origin_request_id,
+                        UserMessageBody::new(message.content, message.media),
+                    )
+                }),
+                !switched,
+            );
+        } else {
+            self.chat.clear();
+        }
         self.ctx.reset();
 
         // Session facts (skills / rules counts) ride the snapshot straight into

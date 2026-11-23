@@ -280,11 +280,6 @@ impl App {
             ));
             return true;
         }
-        // The message only moves up into chat history when the
-        // model actually receives it (user_message_accepted). Until then it
-        // queues in the pending area below in-flight streaming output — and
-        // carries the submission itself, so a failure can hand it back to the
-        // composer (see `restore_failed_send`).
         let request_id = crate::protocol::generate_request_id();
         // 提交产物随 pending 条目一起留下（正文 + 图片 + 预测引用）：气泡用它拼内容
         // （图块 / 标签），失败回填用它把原件还给草稿。图片字节因此多存一份（≤1 MiB/张），
@@ -309,16 +304,18 @@ impl App {
         true
     }
 
-    /// 一条发不出去的用户消息：从 pending 队列取回产物、还给草稿、提示原因。
-    ///
-    /// 三条发送失败路径（上传 / WS / 断连）与服务端拒绝共用这里——共同点是草稿在提交
-    /// 时就清了，内容只在 pending 里。**纯数据恢复**：只写 composer 与 toast，不 push
-    /// intent、不碰 chat（不重发、不重复上传）。
-    ///
-    /// 条目已经不在队列里（被打断丢弃 / 已提升）⇒ 只提示原因：内容要么已经在历史里
-    /// 看得见，要么由那条路径自己解释过了。
-    pub(super) fn restore_failed_send(&mut self, request_id: &str, reason: &str) -> bool {
-        let Some(submission) = self.chat.take_pending(request_id) else {
+    /// Restore a failed local send, including after a same-session replay.
+    pub(super) fn restore_failed_send(
+        &mut self,
+        request_id: &str,
+        reason: &str,
+        fallback: Option<std::sync::Arc<Submission>>,
+    ) -> bool {
+        let submission = self
+            .chat
+            .take_pending(request_id)
+            .or_else(|| fallback.map(std::sync::Arc::unwrap_or_clone));
+        let Some(submission) = submission else {
             self.show_toast(Toast::warning(
                 reason.to_string(),
                 std::time::Duration::from_secs(3),
@@ -480,11 +477,18 @@ impl App {
             return;
         }
 
-        // 消息的后台发送失败回执：属于那条 pending 条目（按 `request_id` 认领），
-        // 同样在守卫之前分派——换过会话后条目多半已被 `chat.clear()` 清掉，此时
-        // `restore_failed_send` 只 toast 原因（不碰草稿、不假装回填）。
-        if let FetchPayload::SendFailed { request_id, reason } = payload {
-            self.restore_failed_send(&request_id, &reason);
+        if let FetchPayload::SendFailed {
+            request_id,
+            reason,
+            draft,
+        } = payload
+        {
+            let fallback = draft
+                .filter(|draft| {
+                    self.session_id == session_id && self.draft_recovery_epoch == draft.epoch
+                })
+                .map(|draft| draft.submission);
+            self.restore_failed_send(&request_id, &reason, fallback);
             return;
         }
 
@@ -755,6 +759,7 @@ impl App {
 
 /// `/clear` — wipe the chat view (history stays on the gateway).
 fn clear_chat(app: &mut App, _text: &str) -> bool {
+    app.draft_recovery_epoch = app.draft_recovery_epoch.wrapping_add(1);
     app.chat.clear();
     app.refresh_copy_candidates();
     app.show_toast(Toast::info(

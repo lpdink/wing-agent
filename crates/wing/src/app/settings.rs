@@ -705,6 +705,8 @@ pub(super) async fn restart_gateway(
         return;
     }
 
+    app.set_connected(false);
+
     // 3. 重读两份配置 → 新端点（端口 / host / api_key 都可能刚被改过）。
     let backend = crate::cmd::backend_config::read_backend_gateway_config();
     let api_key = AppConfig::load().api_key.filter(|key| !key.is_empty());

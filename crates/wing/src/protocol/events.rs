@@ -194,6 +194,14 @@ where
     super::media::tolerant_media_array(deserializer, "tool_media", false)
 }
 
+/// A user input queued in the inbox, as broadcast and projected by snapshots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedUserMessage {
+    pub origin_request_id: String,
+    pub content: String,
+    pub media: Vec<MediaRef>,
+}
+
 // ============================================================
 // WingEvent — the main event enum
 // ============================================================
@@ -375,19 +383,39 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
-    /// User message accepted into the model context — either as the input of
-    /// a new turn (before `turn_started`) or as a steer note after tool
-    /// execution. The TUI holds sent messages in a pending area and promotes
-    /// them into chat history only when this event arrives: a message moves
-    /// up exactly when the model actually receives it.
-    ///
-    /// `origin_request_id` is the request_id the client submitted with, used
-    /// to correlate with the local pending queue; `content` carries the
-    /// original text. Internal posts (no request_id) never fire this event.
+    /// Per-request acceptance for legacy clients and usage accounting.
     #[serde(rename = "user_message_accepted")]
     UserMessageAccepted {
         content: String,
         origin_request_id: String,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// A user input has entered the inbox.
+    #[serde(rename = "user_message_queued")]
+    UserMessageQueued {
+        #[serde(flatten)]
+        message: QueuedUserMessage,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// The final user message written to history for a batch of inputs.
+    #[serde(rename = "user_message_committed")]
+    UserMessageCommitted {
+        message_uuid: String,
+        origin_request_ids: Vec<String>,
+        content: String,
+        media: Vec<MediaRef>,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// A batch left the inbox but could not be committed.
+    #[serde(rename = "user_messages_dropped")]
+    UserMessagesDropped {
+        origin_request_ids: Vec<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -437,6 +465,10 @@ pub enum WingEvent {
         /// Committed Message projections (active chain).
         #[serde(default)]
         messages: Vec<serde_json::Value>,
+        /// Ordered, uncommitted user inputs. Presence (even `[]`) signals
+        /// support for the queue and commit event protocol.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_user_messages: Option<Vec<QueuedUserMessage>>,
         /// Single uncommitted assistant Message projection (finalized blocks of
         /// the in-progress turn) — rendered via the same `replay_messages` path
         /// as `messages`. Null when no turn is in progress.
@@ -733,6 +765,9 @@ impl WingEvent {
             Self::Done { .. } => "done",
             Self::TurnStarted { .. } => "turn_started",
             Self::UserMessageAccepted { .. } => "user_message_accepted",
+            Self::UserMessageQueued { .. } => "user_message_queued",
+            Self::UserMessageCommitted { .. } => "user_message_committed",
+            Self::UserMessagesDropped { .. } => "user_messages_dropped",
             Self::DiffContent { .. } => "diff_content",
             Self::SyncSession { .. } => "sync_session",
             Self::SessionStateChanged { .. } => "session_state_changed",
@@ -765,6 +800,9 @@ impl WingEvent {
             | Self::Done { meta, .. }
             | Self::TurnStarted { meta, .. }
             | Self::UserMessageAccepted { meta, .. }
+            | Self::UserMessageQueued { meta, .. }
+            | Self::UserMessageCommitted { meta, .. }
+            | Self::UserMessagesDropped { meta, .. }
             | Self::DiffContent { meta, .. }
             | Self::SyncSession { meta, .. }
             | Self::SessionStateChanged { meta, .. }

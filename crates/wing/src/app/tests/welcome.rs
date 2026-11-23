@@ -577,6 +577,7 @@ fn the_start_screen_shows_session_facts_in_the_nameplate() {
     app.handle_event(crate::protocol::WingEvent::SyncSession {
         session_id: "test-session".into(),
         messages: vec![],
+        pending_user_messages: None,
         uncommitted: None,
         uncommitted_tools: vec![],
         events: vec![],

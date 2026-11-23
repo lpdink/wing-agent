@@ -49,6 +49,7 @@ pub use media::UserMessageBody;
 pub use viewport::ChatGeometry;
 pub use viewport::ChatViewWidget;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use ratatui::text::Line;
@@ -72,10 +73,10 @@ pub struct ChatView {
     pub(crate) cells: Vec<CachedCell>,
     /// Cached wrap-aware line count per cell (mirrors cells.len()).
     cell_heights: Vec<usize>,
-    /// User messages awaiting model acceptance, in send order. Rendered
-    /// below all cells; promoted/discarded by the app on acceptance
-    /// events (see `push_pending` and friends).
+    /// Pending inputs below history, in gateway order followed by optimistic sends.
     pub(crate) pending: Vec<PendingMessage>,
+    /// User Message UUIDs projected into this transcript by replay or live commit.
+    committed_user_messages: HashSet<String>,
     /// Cached wrap-aware line count per pending message.
     pending_heights: Vec<usize>,
     /// Scroll offset in lines (0 = top).
@@ -97,10 +98,8 @@ pub struct ChatView {
     /// Used by `scroll_down` to detect the bottom edge and re-arm
     /// auto-scroll immediately, without waiting for the next render pass.
     pub(crate) last_total: usize,
-    /// Counts full content rebuilds ([`Self::clear`]: session switch,
-    /// compaction re-sync, rewind replay). A selection is anchored to content
-    /// rows, so a rebuild invalidates it even when the rebuilt list happens to
-    /// end up with the same number of cells — see `App::selection_guard`.
+    /// Invalidates selection when a rebuild or queue reconciliation changes rows
+    /// without changing cell counts. See `App::selection_guard`.
     rebuilds: u64,
     /// Ctrl+O 的全局展开覆盖（`None` = 跟随 `rendering.thinking` 的默认）。
     ///
@@ -155,6 +154,7 @@ impl ChatView {
             cells: Vec::new(),
             cell_heights: Vec::new(),
             pending: Vec::new(),
+            committed_user_messages: HashSet::new(),
             pending_heights: Vec::new(),
             scroll_offset: 0,
             auto_scroll: true,

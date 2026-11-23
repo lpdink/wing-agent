@@ -109,6 +109,8 @@ pub struct App {
     pub chat: ChatView,
     pub input: InputArea,
     pub session_id: String,
+    user_input_sync: bool,
+    draft_recovery_epoch: u64,
     /// In-app text selection — one gesture, anchored in the *content*
     /// coordinates of the region it started in (chat band or composer), with
     /// its fingerprint, press-frame link and edge auto-scroll deadline, see
@@ -287,6 +289,8 @@ impl App {
             chat,
             input: InputArea::with_max_lines("今天构建什么？".into(), max_input_lines),
             session_id,
+            user_input_sync: false,
+            draft_recovery_epoch: 0,
             selection: SelectionSession::default(),
             should_quit: false,
             intents: Vec::new(),
@@ -641,6 +645,10 @@ impl App {
 
     /// Update the gateway connection state.
     pub fn set_connected(&mut self, connected: bool) {
+        if !connected {
+            // After a lost stream, a local echo may already be in history.
+            self.chat.remove_optimistic_pending();
+        }
         self.connected = connected;
         self.status.connected = connected;
     }

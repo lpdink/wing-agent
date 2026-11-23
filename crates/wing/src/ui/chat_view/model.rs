@@ -10,6 +10,9 @@
 //! a rebuilt content list (top of the content, follow re-armed). Everything else about scrolling
 //! belongs to `super::viewport`.
 
+use std::collections::HashSet;
+use std::sync::Arc;
+
 use ratatui::text::Line;
 
 use crate::shared::constants::TOOL_BASH;
@@ -60,51 +63,106 @@ impl ChatView {
         self.cells.push(CachedCell::new(cell));
     }
 
-    // ── Pending user messages (sent, awaiting model acceptance) ──
-    //
-    // A user message only moves up into chat history when it has really
-    // been fed to the model. Until then it sits in this queue, rendered
-    // below all committed cells ("stuck at the latest"), and is promoted
-    // by `user_message_accepted` or discarded by an interrupt.
-
-    /// Queue a sent-but-not-yet-accepted user message.
-    ///
-    /// The bubble's content is frozen here (text + the submission's predicted media
-    /// refs): the pictures are part of the message from the moment it leaves the
-    /// composer, so the queued bubble draws them right away, and promote hands the same
-    /// body on to history (the encode cache therefore survives the move).
+    /// Show a local submission immediately, before the gateway confirms its queue position.
     pub fn push_pending(&mut self, request_id: String, submission: Submission) {
-        let body = submission.body();
-        self.pending.push(PendingMessage {
-            request_id,
-            submission,
-            cell: CachedCell::new(ChatCell::PendingUserMessage(body)),
-        });
-        // The user's own submission must be visible immediately — pending
-        // messages render below in-flight streaming content.
+        let mut pending = PendingMessage::queued(request_id, submission.body());
+        pending.submission = Some(Arc::new(submission));
+        self.pending.push(pending);
         self.jump_bottom();
     }
 
-    /// Take a pending message **out of the queue without rendering it**, handing
-    /// its submission back for a refill of the composer.
-    ///
-    /// This is the failure path's exit (a failed / rejected send gives the user
-    /// their text and pictures back — see `App::restore_failed_send`), which is
-    /// why it differs from [`Self::discard_pending`]: an *interrupt* commits
-    /// the dropped message as a struck-through cell (the user must see it did
-    /// not go out), while a refill puts the content back in the draft — both
-    /// at once would show the same message twice.
-    ///
-    /// `None` when nothing matches (already promoted, or another client's).
+    /// Place a confirmed input after the other confirmed inputs and before local echoes.
+    pub(crate) fn queue_user_message(&mut self, request_id: String, body: media::UserMessageBody) {
+        let confirmed = self.pending.partition_point(|p| p.submission.is_none());
+        let Some(index) = self.pending.iter().position(|p| p.request_id == request_id) else {
+            self.pending
+                .insert(confirmed, PendingMessage::queued(request_id, body));
+            return;
+        };
+        let mut pending = self.pending.remove(index);
+        let target = if pending.submission.take().is_some() {
+            confirmed
+        } else {
+            index
+        };
+        let same_body =
+            matches!(pending.cell.cell(), ChatCell::PendingUserMessage(b) if b == &body);
+        if !same_body {
+            pending
+                .cell
+                .mutate(|cell| *cell = ChatCell::PendingUserMessage(body));
+        }
+        if !same_body || index != target {
+            self.rebuilds = self.rebuilds.wrapping_add(1);
+        }
+        self.pending.insert(target, pending);
+    }
+
+    pub(crate) fn rebuild_with_pending_queue(
+        &mut self,
+        messages: impl Iterator<Item = (String, media::UserMessageBody)>,
+        preserve_local: bool,
+    ) {
+        let mut queued: Vec<_> = messages
+            .map(|(id, body)| PendingMessage::queued(id, body))
+            .collect();
+        if preserve_local {
+            let seen: HashSet<_> = queued.iter().map(|p| &p.request_id).collect();
+            let mut local = std::mem::take(&mut self.pending);
+            local.retain(|p| p.submission.is_some() && !seen.contains(&p.request_id));
+            queued.append(&mut local);
+        }
+        self.clear();
+        self.pending = queued;
+    }
+
+    /// Keep an original alive while a background send can still fail after a sync.
+    pub(crate) fn pending_submission(&self, request_id: &str) -> Option<Arc<Submission>> {
+        self.pending
+            .iter()
+            .find(|p| p.request_id == request_id)?
+            .submission
+            .clone()
+    }
+
+    /// Remove an optimistic entry and hand its original back to the composer.
     pub fn take_pending(&mut self, request_id: &str) -> Option<Submission> {
         let pos = self
             .pending
             .iter()
-            .position(|p| p.request_id == request_id)?;
-        Some(self.pending.remove(pos).submission)
+            .position(|p| p.request_id == request_id && p.submission.is_some())?;
+        self.pending
+            .remove(pos)
+            .submission
+            .map(Arc::unwrap_or_clone)
     }
 
-    /// Promote the pending message matching `request_id` into history.
+    /// Project a committed user Message once, whether it came from history or the live stream.
+    pub(crate) fn push_committed_user_message(
+        &mut self,
+        uuid: Option<String>,
+        body: media::UserMessageBody,
+    ) {
+        if let Some(uuid) = uuid.filter(|id| !id.is_empty())
+            && !self.committed_user_messages.insert(uuid)
+        {
+            return;
+        }
+        if !body.is_empty() {
+            self.push(ChatCell::UserMessage(body));
+        }
+    }
+
+    pub(crate) fn remove_optimistic_pending(&mut self) {
+        self.pending.retain(|p| p.submission.is_none());
+    }
+
+    pub(crate) fn remove_pending(&mut self, request_ids: &[String]) {
+        self.pending
+            .retain(|p| !request_ids.contains(&p.request_id));
+    }
+
+    /// Legacy acceptance moves a matching local echo into history.
     ///
     /// Returns `false` when nothing matches (the message originated from
     /// another client — not tracked here).
@@ -140,9 +198,7 @@ impl ChatView {
     /// its inbox (they never reached the model) — commit exactly those as
     /// discarded (dim + struck through) instead of silently vanishing.
     ///
-    /// Every other pending message stays queued: it arrived after the
-    /// interrupt request and is still going to be consumed (promoted by
-    /// `user_message_accepted` when that happens).
+    /// Unlisted pending inputs remain queued.
     pub fn discard_pending(&mut self, request_ids: &[String]) {
         let mut kept = Vec::with_capacity(self.pending.len());
         let mut discarded: Vec<media::UserMessageBody> = Vec::new();
@@ -364,6 +420,7 @@ impl ChatView {
     /// up with the same cell count.
     pub fn clear(&mut self) {
         self.cells.clear();
+        self.committed_user_messages.clear();
         self.cell_heights.clear();
         self.pending.clear();
         self.pending_heights.clear();
@@ -377,7 +434,7 @@ impl ChatView {
         // 不是"这一帧怎么看"。
     }
 
-    /// Number of full content rebuilds so far ([`Self::clear`]).
+    /// Revision of structural changes that may preserve cell counts.
     pub fn structure_epoch(&self) -> u64 {
         self.rebuilds
     }

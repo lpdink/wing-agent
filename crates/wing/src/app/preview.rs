@@ -332,6 +332,7 @@ fn sync_event(spec: &Spec) -> WingEvent {
     WingEvent::SyncSession {
         session_id: SESSION_ID.into(),
         messages: Vec::new(),
+        pending_user_messages: None,
         uncommitted: None,
         uncommitted_tools: Vec::new(),
         events: Vec::new(),

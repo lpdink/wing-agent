@@ -18,7 +18,7 @@ use futures_util::StreamExt;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::support::*;
@@ -69,6 +69,7 @@ struct FakeGateway {
     ws_url: String,
     http_base: String,
     frames: Arc<Mutex<Vec<String>>>,
+    events: broadcast::Sender<String>,
     uploads: Arc<Mutex<Vec<Upload>>>,
     route: Arc<Mutex<UploadRoute>>,
 }
@@ -85,6 +86,7 @@ impl FakeGateway {
 
     async fn start_with_ws(keep_ws_alive: bool) -> Self {
         let frames: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let (events, _) = broadcast::channel::<String>(16);
         let uploads: Arc<Mutex<Vec<Upload>>> = Arc::new(Mutex::new(Vec::new()));
         let route = Arc::new(Mutex::new(UploadRoute::Ok));
 
@@ -93,9 +95,11 @@ impl FakeGateway {
         let ws_url = format!("ws://{}/ws", ws_listener.local_addr().unwrap());
         {
             let sink = Arc::clone(&frames);
+            let events = events.clone();
             tokio::spawn(async move {
                 while let Ok((stream, _)) = ws_listener.accept().await {
                     let sink = Arc::clone(&sink);
+                    let mut incoming_events = events.subscribe();
                     tokio::spawn(async move {
                         let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
                             return;
@@ -111,10 +115,20 @@ impl FakeGateway {
                             let _ = ws.close(None).await;
                             return;
                         }
-                        while let Some(Ok(message)) = ws.next().await {
-                            if let Message::Text(text) = message {
-                                // 原样记录（golden 断言要比对**原始字节**，不是 Value 的重排）。
-                                sink.lock().expect("frames").push(text.to_string());
+                        loop {
+                            tokio::select! {
+                                incoming = ws.next() => {
+                                    let Some(Ok(message)) = incoming else { break };
+                                    if let Message::Text(text) = message {
+                                        sink.lock().expect("frames").push(text.to_string());
+                                    }
+                                }
+                                frame = incoming_events.recv() => {
+                                    let Ok(frame) = frame else { break };
+                                    if ws.send(Message::Text(frame.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
                             }
                         }
                     });
@@ -198,6 +212,7 @@ impl FakeGateway {
             ws_url,
             http_base,
             frames,
+            events,
             uploads,
             route,
         }
@@ -415,7 +430,7 @@ async fn images_are_uploaded_in_order_and_ride_the_ws_frame() {
         );
     }
 
-    // 成功路径不动 pending：条目等后端的 `user_message_accepted` 才提升（fake 网关不发）。
+    // 成功路径不动 pending：条目等后端的 commit 事件入历史（fake 网关不发）。
     assert_eq!(app.chat.pending.len(), 1, "成功发送不丢 pending 条目");
     assert!(app.toast.is_none(), "成功路径不 toast");
     assert!(rx.try_recv().is_err(), "成功路径没有回执");
@@ -439,6 +454,68 @@ async fn a_text_only_message_is_the_old_frame_without_an_upload() {
     assert!(gateway.uploads().is_empty(), "纯文本不上传");
     assert_eq!(app.chat.pending.len(), 1, "成功发送不丢 pending 条目");
     assert!(rx.try_recv().is_err(), "成功路径没有回执");
+}
+
+#[tokio::test]
+async fn a_sent_picture_is_reconciled_on_both_websocket_clients() {
+    use crate::ui::chat_view::ChatCell;
+    use serde_json::{Value, json};
+
+    let gateway = FakeGateway::start().await;
+    let mut sending_transport = connect(&gateway).await;
+    let mut subscribing_transport = connect(&gateway).await;
+    let mut sender = test_app();
+    let mut subscriber = test_app();
+    let _receipts = send(
+        &mut sender,
+        Some(&sending_transport),
+        "",
+        vec![image(0xAB, 10)],
+    );
+    let requests = wait_for_frames(&gateway, 1).await;
+    let sent: Value = serde_json::from_str(&requests[0]).unwrap();
+    let meta = json!({
+        "created_at": "2026-01-01T00:00:00Z", "request_id": "gateway-event",
+        "session_id": "test-session"
+    });
+    let frames = [
+        json!({"type": "user_message_queued", "origin_request_id": sent["request_id"], "content": "", "media": sent["media"]}),
+        json!({"type": "user_message_committed", "message_uuid": "user-picture", "origin_request_ids": [sent["request_id"]], "content": "", "media": sent["media"]}),
+    ];
+    for mut frame in frames {
+        frame
+            .as_object_mut()
+            .unwrap()
+            .extend(meta.as_object().unwrap().clone());
+        assert_eq!(gateway.events.send(frame.to_string()).unwrap(), 2);
+        for (app, transport) in [
+            (&mut sender, &mut sending_transport),
+            (&mut subscriber, &mut subscribing_transport),
+        ] {
+            let event = tokio::time::timeout(Duration::from_secs(2), transport.ws.recv_event())
+                .await
+                .expect("broadcast frame")
+                .expect("socket still connected");
+            assert_eq!(event.event_type(), frame["type"]);
+            app.handle_event(event);
+            if frame["type"] == "user_message_queued" {
+                assert_eq!(app.chat.pending_len(), 1);
+                assert!(app.chat.cells.is_empty());
+                assert!(
+                    matches!(app.chat.pending[0].cell.cell(), ChatCell::PendingUserMessage(body)
+                    if body.text.is_empty() && body.media.len() == 1 && body.media[0].id == sent["media"][0]["id"])
+                );
+            }
+        }
+    }
+    for app in [&sender, &subscriber] {
+        assert_eq!(app.chat.pending_len(), 0);
+        assert_eq!(app.chat.len(), 1);
+        assert!(
+            matches!(app.chat.cells[0].cell(), ChatCell::UserMessage(body)
+            if body.text.is_empty() && body.media.len() == 1 && body.media[0].id == sent["media"][0]["id"])
+        );
+    }
 }
 
 /// 上传失败：整条不发（不发送半截）、pending 取回、内容回到草稿、warning toast 带原因。
@@ -473,6 +550,42 @@ async fn an_upload_failure_sends_nothing_and_gives_the_draft_back() {
         "{}",
         toast.message
     );
+    assert_restore_is_pure(&mut app);
+}
+
+#[tokio::test]
+async fn a_failed_upload_returns_the_original_after_a_reconnect_snapshot() {
+    let gateway = FakeGateway::start().await;
+    gateway.fail_uploads_after(0, 400, r#"{"error":"bad_media","detail":"not an image"}"#);
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    let snapshot = serde_json::from_value::<crate::protocol::WingEvent>(serde_json::json!({
+        "type": "sync_session",
+        "session_id": "test-session",
+        "status": "idle",
+        "created_at": "2026-01-01T00:00:00Z",
+        "request_id": "sync",
+        "pending_user_messages": []
+    }))
+    .unwrap();
+    app.handle_event(snapshot.clone());
+
+    let mut rx = send(
+        &mut app,
+        Some(&transport),
+        "keep this",
+        vec![image(0x01, 10)],
+    );
+    app.set_connected(false);
+    app.set_connected(true);
+    app.handle_event(snapshot);
+    app.drain_intents();
+    assert!(app.chat.pending.is_empty());
+    app.input.set_text("new draft");
+    app.handle_fetch_result(wait_for_receipt(&mut rx).await);
+
+    assert!(gateway.frames().is_empty());
+    assert_eq!(app.input.text(), "new draft\nkeep this[Image #1 8×8 10B]");
     assert_restore_is_pure(&mut app);
 }
 
@@ -631,6 +744,7 @@ async fn a_failure_receipt_with_no_pending_entry_only_toasts() {
         payload: FetchPayload::SendFailed {
             request_id: "req-gone".into(),
             reason: "Not sent — gateway disconnected".into(),
+            draft: None,
         },
     });
 

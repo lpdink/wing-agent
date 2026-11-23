@@ -59,6 +59,7 @@ pub(super) fn sync_event_with_status(
     WingEvent::SyncSession {
         session_id: "test-session".into(),
         messages,
+        pending_user_messages: None,
         uncommitted,
         uncommitted_tools,
         events,
