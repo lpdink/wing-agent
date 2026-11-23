@@ -1339,3 +1339,249 @@ async fn oversized_initial_snapshot_reconnects_live_only_and_sync_requests_repla
     assert!(app.user_input_ready());
     assert!(!app.history_incomplete);
 }
+
+/// A real WebSocket codec over a small duplex stream holds a write in flight
+/// until the peer reads it, without depending on operating system socket buffers.
+async fn connect_with_backpressure(gateway: &FakeGateway) -> (Transport, tokio::io::DuplexStream) {
+    use crate::gateway::{GatewayClient, Limits};
+    use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};
+
+    let (client, server) = tokio::io::duplex(256);
+    let mut peer = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+    peer.send(Message::Text(
+        r#"{"type":"connected","client_id":"fake-gw"}"#.into(),
+    ))
+    .await
+    .unwrap();
+    let socket = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
+    let ws = GatewayClient::from_websocket(socket, Limits::default())
+        .await
+        .unwrap();
+    let transport = Transport {
+        http: wing_api_client::GatewayClient::new(&gateway.http_base, None).unwrap(),
+        client_id: ws.client_id().to_owned(),
+        ws,
+    };
+    (transport, peer.into_inner())
+}
+
+#[tokio::test]
+async fn writer_failure_reports_uncertain_for_inflight_input_and_unsent_for_queued_input() {
+    use crate::gateway::client::MessageWriteError;
+    use crate::protocol::ClientRequest;
+
+    let gateway = FakeGateway::start().await;
+    let (transport, mut peer) = connect_with_backpressure(&gateway).await;
+    let mut app = test_app();
+    let mut rx = send(
+        &mut app,
+        Some(&transport),
+        &"x".repeat(16 * 1024),
+        vec![image(0x21, 8)],
+    );
+    tokio::time::timeout(Duration::from_secs(2), peer.read_exact(&mut [0; 2]))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let sender = transport.ws.request_sender();
+    let queued = sender.send_confirmed(ClientRequest {
+        session_id: "test-session".into(),
+        request_id: "queued-behind-write".into(),
+        content: "queued".into(),
+        tool_call_id: None,
+        media: None,
+    });
+    let mut queued = std::pin::pin!(queued);
+    assert!(futures_util::poll!(&mut queued).is_pending());
+    transport
+        .ws
+        .send_message("test-session", "untracked", None, "untracked".into(), None)
+        .await
+        .unwrap();
+
+    drop(peer);
+    let receipt = wait_for_receipt(&mut rx).await;
+    assert!(matches!(&receipt.payload, FetchPayload::SendFinished {
+        request_id, outcome: SendOutcome::Uncertain(_)
+    } if request_id == "req-1"));
+    app.handle_fetch_result(receipt);
+    assert!(app.input.is_empty());
+    assert!(app.toast.as_ref().unwrap().message.contains("/recover"));
+    assert!(
+        matches!(tokio::time::timeout(Duration::from_secs(2), queued).await.unwrap(),
+        Err(MessageWriteError::Unsent(reason)) if reason == "Gateway writer stopped before sending")
+    );
+    assert_eq!(gateway.uploads()[0].body, [0x21; 8]);
+}
+
+#[tokio::test]
+async fn a_directed_reply_interrupted_during_write_reports_uncertainty() {
+    use crate::app::runner::{OutgoingMessage, dispatch_send_message};
+
+    let gateway = FakeGateway::start().await;
+    let (transport, mut peer) = connect_with_backpressure(&gateway).await;
+    let mut app = test_app();
+    let (tx, mut rx) = mpsc::channel(1);
+    dispatch_send_message(
+        &mut app,
+        Some(&transport),
+        &mut None,
+        OutgoingMessage {
+            session_id: "test-session".into(),
+            request_id: "reply".into(),
+            content: "x".repeat(16 * 1024),
+            tool_call_id: Some("ask".into()),
+            images: vec![],
+        },
+        tx,
+    );
+    tokio::time::timeout(Duration::from_secs(2), peer.read_exact(&mut [0; 2]))
+        .await
+        .unwrap()
+        .unwrap();
+    peer.shutdown().await.unwrap();
+
+    let receipt = wait_for_receipt(&mut rx).await;
+    assert!(
+        matches!(&receipt.payload, FetchPayload::Toast { message, is_error: true }
+        if message == "Message delivery unknown: Connection closed during write")
+    );
+    app.handle_fetch_result(receipt);
+    assert!(app.local_sends.is_empty());
+    assert_restore_is_pure(&mut app);
+}
+
+#[tokio::test]
+async fn history_retry_reports_disconnection_and_subscription_failure() {
+    use crate::app::runner::request_session_snapshot;
+
+    let gateway = FakeGateway::start_with_replies(HashMap::from([(
+        "/api/session/subscribe",
+        (503, r#"{"detail":"subscription unavailable"}"#),
+    )]))
+    .await;
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    request_session_snapshot(&mut app, None).await;
+    assert_eq!(
+        app.toast.as_ref().unwrap().message,
+        "History retry needs a connection"
+    );
+    assert!(gateway.session_requests.lock().unwrap().is_empty());
+
+    request_session_snapshot(&mut app, Some(&transport)).await;
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("subscription unavailable")
+    );
+    assert!(app.user_input_ready());
+    assert!(app.snapshot_deadline().is_none());
+}
+
+#[tokio::test]
+async fn a_late_write_receipt_can_be_recovered_after_a_normal_reconnect() {
+    use crate::app::runner::recover_subscription;
+    use crate::gateway::CloseReason;
+
+    let gateway = FakeGateway::start_with_replies(HashMap::from([
+        (
+            "/api/session/resume",
+            (200, r#"{"session_id":"test-session"}"#),
+        ),
+        ("/api/session/subscribe", (200, "{}")),
+    ]))
+    .await;
+    let mut transport = connect(&gateway).await;
+    let mut app = test_app();
+    let mut rx = send(&mut app, Some(&transport), "late receipt", vec![]);
+    wait_for_frames(&gateway, 1).await;
+    gateway.events.send(Message::Close(None)).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), transport.ws.recv_event())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let reason = transport.ws.close_reason();
+    assert!(matches!(reason, Some(CloseReason::CloseFrame { .. })));
+    app.note_connection_lost(reason);
+    apply_written_receipt(&mut app, &mut rx).await;
+
+    let replacement = connect(&gateway).await;
+    recover_subscription(&mut app, &replacement).await.unwrap();
+    assert!(!app.user_input_ready());
+    assert_eq!(
+        gateway.session_requests.lock().unwrap().last().unwrap().1,
+        serde_json::json!({"session_id": "test-session"})
+    );
+    app.handle_event(switch_snapshot("test-session"));
+    assert!(app.user_input_ready());
+    assert!(app.input.is_empty());
+    assert!(app.try_frontend_command("/recover"));
+    assert_eq!(app.input.text(), "late receipt");
+    assert_eq!(gateway.frames().len(), 1);
+}
+
+#[tokio::test]
+async fn a_rejected_live_only_subscription_keeps_the_send_gate_closed() {
+    use crate::app::runner::recover_subscription;
+    use crate::gateway::CloseReason;
+
+    let gateway = FakeGateway::start_with_replies(HashMap::from([
+        ("/api/session/resume", (200, r#"{"session_id":"target"}"#)),
+        (
+            "/api/session/subscribe",
+            (503, r#"{"detail":"retry later"}"#),
+        ),
+    ]))
+    .await;
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    app.await_session_snapshot("target".into());
+    app.note_connection_lost(Some(&CloseReason::FrameTooLarge {
+        size: 32 * 1024 * 1024,
+        max_size: 16 * 1024 * 1024,
+    }));
+    assert!(recover_subscription(&mut app, &transport).await.is_err());
+    assert!(!app.user_input_ready());
+    assert!(app.snapshot_deadline().is_none());
+    assert!(app.recover_live_only);
+    assert_eq!(app.session_id, "test-session");
+    assert_eq!(app.subscription_target(), "target");
+    assert_eq!(
+        gateway.session_requests.lock().unwrap().last().unwrap().1,
+        serde_json::json!({"session_id": "target", "replay": false})
+    );
+    assert!(gateway.frames().is_empty());
+}
+
+#[tokio::test]
+async fn a_connected_socket_does_not_bypass_the_snapshot_send_gate() {
+    let gateway = FakeGateway::start().await;
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    app.await_session_snapshot("test-session".into());
+
+    let mut rx = send(
+        &mut app,
+        Some(&transport),
+        "after sync",
+        vec![image(0x11, 8)],
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(gateway.frames().is_empty());
+    assert!(gateway.uploads().is_empty());
+    assert_eq!(app.input.text(), "after sync[Image #1 8×8 8B]");
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("waiting for session sync")
+    );
+    assert_restore_is_pure(&mut app);
+}

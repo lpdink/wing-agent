@@ -10,7 +10,9 @@ use anyhow::Context;
 use anyhow::Result;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Error as WsError;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -198,6 +200,16 @@ impl GatewayClient {
 
         tracing::debug!("WebSocket connection established");
 
+        Self::from_websocket(ws_stream, limits).await
+    }
+
+    pub(crate) async fn from_websocket<S>(
+        ws_stream: WebSocketStream<S>,
+        limits: Limits,
+    ) -> Result<Self>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         let (mut ws_sink, mut ws_stream) = ws_stream.split();
 
         // Read the first message — should be ConnectResponse.
