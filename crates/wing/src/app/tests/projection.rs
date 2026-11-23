@@ -2029,3 +2029,87 @@ fn history_refresh_cannot_complete_a_pending_subscription() {
     assert_eq!(app.session_id, "target");
     assert!(app.user_input_ready());
 }
+
+#[test]
+fn precise_gateway_events_clear_uncertain_originals_in_either_order() {
+    use crate::app::intent::{FetchPayload, FetchResult, SendOutcome};
+    use crate::ui::chat_view::Submission;
+    use serde_json::json;
+
+    for (kind, input) in [
+        (
+            "user_message_queued",
+            json!({"origin_request_id": "r", "content": "same text", "media": []}),
+        ),
+        (
+            "user_message_committed",
+            json!({"message_uuid": "m", "origin_request_ids": ["r"], "content": "same text", "media": []}),
+        ),
+        (
+            "user_messages_dropped",
+            json!({"origin_request_ids": ["r"]}),
+        ),
+        ("interrupted", json!({"dropped_request_ids": ["r"]})),
+    ] {
+        for event_first in [false, true] {
+            let mut app = test_app();
+            app.chat
+                .push_pending("r".into(), Submission::text("same text"));
+            app.track_local_send("test-session", "r");
+            let mut foreign = input.clone();
+            foreign["session_id"] = json!("other-session");
+            app.handle_event(user_input_event(kind, foreign));
+            assert_eq!(app.local_sends.len(), 1);
+            if event_first {
+                app.handle_event(user_input_event(kind, input.clone()));
+            }
+            app.handle_fetch_result(FetchResult {
+                session_id: "test-session".into(),
+                payload: FetchPayload::SendFinished {
+                    request_id: "r".into(),
+                    outcome: SendOutcome::Uncertain("write interrupted".into()),
+                },
+            });
+            if !event_first {
+                assert_eq!(app.local_sends.len(), 1);
+                assert!(app.toast.as_ref().unwrap().message.contains("/recover"));
+                app.handle_event(user_input_event(kind, input.clone()));
+            }
+            assert!(app.local_sends.is_empty());
+            assert!(app.try_frontend_command("/recover"));
+            assert!(app.input.is_empty());
+        }
+    }
+}
+
+#[test]
+fn only_exact_pending_snapshot_ids_settle_uncertain_originals() {
+    use crate::app::intent::{FetchPayload, FetchResult, SendOutcome};
+    use crate::ui::chat_view::Submission;
+    use serde_json::json;
+
+    let mut app = test_app();
+    app.chat
+        .push_pending("r".into(), Submission::text("some text"));
+    app.track_local_send("test-session", "r");
+    app.handle_fetch_result(FetchResult {
+        session_id: "test-session".into(),
+        payload: FetchPayload::SendFinished {
+            request_id: "r".into(),
+            outcome: SendOutcome::Uncertain("write interrupted".into()),
+        },
+    });
+    let history = json!([{"role": "user", "uuid": "r", "content": "some text"}]);
+    app.handle_event(user_input_snapshot(
+        history,
+        json!([{"origin_request_id": "other", "media": [], "content": "some text"}]),
+    ));
+    assert_eq!(app.local_sends.len(), 1);
+    assert!(app.input.is_empty());
+    app.handle_event(user_input_snapshot(
+        json!([]),
+        json!([{"origin_request_id": "r", "media": [], "content": "some text"}]),
+    ));
+    assert!(app.local_sends.is_empty());
+    assert!(app.input.is_empty());
+}

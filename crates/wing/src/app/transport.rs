@@ -138,6 +138,16 @@ impl Transport {
         session_id: &str,
         workspace: Option<&str>,
     ) -> Result<(String, Recovery)> {
+        self.recover_session_with_replay(session_id, workspace, true)
+            .await
+    }
+
+    pub(super) async fn recover_session_with_replay(
+        &self,
+        session_id: &str,
+        workspace: Option<&str>,
+        replay: bool,
+    ) -> Result<(String, Recovery)> {
         let (effective_id, outcome) = match self.http.resume_session(session_id).await {
             Ok(_) => (session_id.to_string(), Recovery::Resumed),
             Err(e) if e.is_not_found() => {
@@ -183,10 +193,14 @@ impl Transport {
             }
         };
 
-        self.http
-            .subscribe(&effective_id, &self.client_id)
-            .await
-            .context("subscribe failed during session recovery")?;
+        let subscribed = if replay {
+            self.http.subscribe(&effective_id, &self.client_id).await
+        } else {
+            self.http
+                .subscribe_live(&effective_id, &self.client_id)
+                .await
+        };
+        subscribed.context("subscribe failed during session recovery")?;
 
         Ok((effective_id, outcome))
     }

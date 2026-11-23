@@ -431,30 +431,7 @@ impl App {
 
     /// Handle a terminal key event.
     pub(super) fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
-        use crossterm::event::{KeyCode, KeyModifiers};
-
-        let route = self.route_key(&key);
-        let waiting_on_composer = self.pending_session_snapshot.is_some()
-            && match route {
-                KeyRoute::PopupNav | KeyRoute::PopupEmpty if key.code == KeyCode::Enter => true,
-                KeyRoute::Composer | KeyRoute::PopupNav | KeyRoute::PopupEmpty => {
-                    matches!(key.code, KeyCode::Enter | KeyCode::Char('\r' | '\n'))
-                        && !key
-                            .modifiers
-                            .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
-                }
-                _ => false,
-            };
-        let waiting_on_ask =
-            route == KeyRoute::AskPanel && key.code == KeyCode::Enter && !self.user_input_ready();
-        if waiting_on_composer || waiting_on_ask {
-            self.show_toast(Toast::info(
-                "Waiting for session sync",
-                std::time::Duration::from_secs(2),
-            ));
-            return;
-        }
-        match route {
+        match self.route_key(&key) {
             // Modal owners keep the Ctrl+C counter untouched: the gesture only
             // counts while the app itself is receiving keys.
             KeyRoute::Quit => self.handle_quit_key(key),
@@ -592,15 +569,31 @@ impl App {
     /// the only ask key handler. The app-reserved keys (`Esc`,
     /// `PageUp` / `PageDown`) never reach it: [`App::route_key`] keeps them.
     fn handle_ask_panel_key(&mut self, key: crossterm::event::KeyEvent) {
+        let before_reply =
+            if !self.user_input_ready() && key.code == crossterm::event::KeyCode::Enter {
+                self.ask_panels.front().cloned()
+            } else {
+                None
+            };
         let action = self
             .ask_panels
             .front_mut()
             .map(|panel| panel.handle_key(key))
             .unwrap_or(PanelAction::None);
-        self.sync_front_panel();
         if let PanelAction::Reply(content) = action {
-            self.finish_ask_panel(content);
+            if let Some(panel) = before_reply {
+                *self
+                    .ask_panels
+                    .front_mut()
+                    .expect("reply from the front panel") = panel;
+                self.show_snapshot_wait();
+            } else {
+                self.sync_front_panel();
+                self.finish_ask_panel(content);
+                return;
+            }
         }
+        self.sync_front_panel();
     }
 
     /// `/model` picker: modal while open.
@@ -678,6 +671,18 @@ impl App {
 
     /// Everything else goes to the input area.
     fn handle_composer_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        if self.pending_session_snapshot.is_some()
+            && matches!(key.code, KeyCode::Enter | KeyCode::Char('\r' | '\n'))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            && frontend_command(self.input.expand_and_get_text().trim()).is_none()
+        {
+            self.show_snapshot_wait();
+            return;
+        }
         // The *rendered* chrome, not the terminal width: the draft wraps at the
         // columns the card really has (the float and any squeeze included).
         let chrome = self.input.chrome();
@@ -754,6 +759,16 @@ impl App {
             }
             crossterm::event::KeyCode::Enter => {
                 if self.popup.active.should_submit() {
+                    if self.pending_session_snapshot.is_some()
+                        && self
+                            .popup
+                            .active
+                            .completion_text()
+                            .is_none_or(|text| frontend_command(&text).is_none())
+                    {
+                        self.show_snapshot_wait();
+                        return true;
+                    }
                     // Complete the input from popup selection, then route through
                     // submit_message() — the single command dispatch path.
                     match &self.popup.active {
@@ -787,12 +802,12 @@ impl App {
                     self.popup.close_active();
                     let text = self.input.expand_and_get_text();
                     let text = text.trim().to_string();
+                    self.input.clear();
                     if !text.is_empty() {
                         // 命令补全只提交文本：改写草稿的那一步已经用文本重建过
                         // 草稿（图片没有文本形态，重写即丢，见 `set_text`）。
                         self.submit_message(SubmitPayload::text(text));
                     }
-                    self.input.clear();
                 } else {
                     if let Some(completion) = self.popup.active.completion_text() {
                         self.input.set_text(&completion);

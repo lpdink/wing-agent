@@ -1433,6 +1433,7 @@ mod session_list {
         app.handle_key(key(KeyCode::Right));
         app.update_popup_from_input();
         app.handle_key(key(KeyCode::Down)); // kid-01
+        app.await_session_snapshot("pending-session".into());
         app.handle_key(key(KeyCode::Enter));
         let resumed = app
             .drain_intents()

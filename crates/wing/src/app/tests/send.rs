@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use super::support::*;
 use crate::app::intent::FetchPayload;
-use crate::app::intent::FetchResult;
+use crate::app::intent::{FetchResult, SendOutcome};
 use crate::app::transport::GatewayEndpoint;
 use crate::app::transport::Transport;
 use crate::app::transport::connect_transport;
@@ -77,7 +77,7 @@ struct FakeGateway {
     http_base: String,
     frames: Arc<Mutex<Vec<String>>>,
     events: broadcast::Sender<Message>,
-    session_requests: Arc<Mutex<Vec<String>>>,
+    session_requests: Arc<Mutex<Vec<(String, serde_json::Value)>>>,
     uploads: Arc<Mutex<Vec<Upload>>>,
     route: Arc<Mutex<UploadRoute>>,
 }
@@ -165,7 +165,11 @@ impl FakeGateway {
                             let route = route.lock().expect("route").clone();
                             upload_reply(&route, seen.len() - 1, body.len())
                         } else {
-                            session_requests.lock().unwrap().push(target.clone());
+                            let request = serde_json::from_slice(&body).unwrap_or_default();
+                            session_requests
+                                .lock()
+                                .unwrap()
+                                .push((target.clone(), request));
                             let (status, payload) = replies
                                 .get(target.as_str())
                                 .copied()
@@ -384,12 +388,24 @@ fn send(
     dispatch(app, transport, &mut chain, "req-1", content, images)
 }
 
-/// 等一条失败回执（后台任务的失败路径；成功路径没有回执）。
+/// 等一条后台写入回执。
 async fn wait_for_receipt(rx: &mut mpsc::Receiver<FetchResult>) -> FetchResult {
     tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
-        .expect("失败回执必须到达")
+        .expect("send receipt must arrive")
         .expect("回执通道还开着")
+}
+
+async fn apply_written_receipt(app: &mut crate::app::App, rx: &mut mpsc::Receiver<FetchResult>) {
+    let result = wait_for_receipt(rx).await;
+    assert!(matches!(
+        result.payload,
+        FetchPayload::SendFinished {
+            outcome: SendOutcome::Written,
+            ..
+        }
+    ));
+    app.handle_fetch_result(result);
 }
 
 #[tokio::test]
@@ -444,7 +460,7 @@ async fn images_are_uploaded_in_order_and_ride_the_ws_frame() {
     // 成功路径不动 pending：条目等后端的 commit 事件入历史（fake 网关不发）。
     assert_eq!(app.chat.pending.len(), 1, "成功发送不丢 pending 条目");
     assert!(app.toast.is_none(), "成功路径不 toast");
-    assert!(rx.try_recv().is_err(), "成功路径没有回执");
+    apply_written_receipt(&mut app, &mut rx).await;
 }
 
 /// 纯文本路径的兼容红线：帧与引入图片之前**逐字节相同**（没有 `media` 键），也不产生上传。
@@ -464,7 +480,7 @@ async fn a_text_only_message_is_the_old_frame_without_an_upload() {
     );
     assert!(gateway.uploads().is_empty(), "纯文本不上传");
     assert_eq!(app.chat.pending.len(), 1, "成功发送不丢 pending 条目");
-    assert!(rx.try_recv().is_err(), "成功路径没有回执");
+    apply_written_receipt(&mut app, &mut rx).await;
 }
 
 #[tokio::test]
@@ -597,7 +613,13 @@ async fn an_explicit_switch_waits_for_the_target_snapshot_before_taking_input() 
     )
     .await;
     assert_eq!(
-        &*gateway.session_requests.lock().unwrap(),
+        gateway
+            .session_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
         &["/api/session/subscribe", "/api/session/unsubscribe"]
     );
     assert_waits_for_target_snapshot(&mut app, "target");
@@ -674,7 +696,13 @@ async fn a_rejected_subscription_keeps_the_current_session_usable() {
     )
     .await;
     assert_eq!(
-        &*gateway.session_requests.lock().unwrap(),
+        gateway
+            .session_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
         &["/api/session/subscribe"]
     );
     app.handle_event(switch_snapshot("target"));
@@ -945,10 +973,9 @@ async fn a_failure_receipt_with_no_pending_entry_only_toasts() {
 
     app.handle_fetch_result(FetchResult {
         session_id: "test-session".into(),
-        payload: FetchPayload::SendFailed {
+        payload: FetchPayload::SendFinished {
             request_id: "req-gone".into(),
-            reason: "Not sent — gateway disconnected".into(),
-            draft: None,
+            outcome: SendOutcome::Unsent("Not sent — gateway disconnected".into()),
         },
     });
 
@@ -1000,10 +1027,10 @@ async fn dispatch_returns_before_the_round_trip_finishes() {
         "上传应答还没回，帧不该已经发出"
     );
 
-    // 后台任务自己走完：帧到达、没有回执（成功路径）。
+    // 后台任务自己走完：帧到达并报告本地写入成功。
     let frames = wait_for_frames(&gateway, 1).await;
     assert_eq!(frames.len(), 1);
-    assert!(rx.try_recv().is_err(), "成功路径没有回执");
+    apply_written_receipt(&mut app, &mut rx).await;
 }
 
 /// 两条快速提交（第一条的图还在上传、用户又发了一条）保持**提交顺序**。
@@ -1050,8 +1077,8 @@ async fn two_quick_submissions_keep_their_order() {
     assert_eq!(uploads[0].body, vec![0xAA; 300]);
     assert_eq!(uploads[1].body, vec![0xAB; 300]);
     assert_eq!(uploads[2].body, vec![0xBB; 40]);
-    assert!(rx_a.try_recv().is_err(), "两条都成功 = 没有回执");
-    assert!(rx_b.try_recv().is_err(), "两条都成功 = 没有回执");
+    apply_written_receipt(&mut app, &mut rx_a).await;
+    apply_written_receipt(&mut app, &mut rx_b).await;
 }
 
 /// 回填是**纯数据恢复**：不产生 intent（不重发、不重复上传）、不往 chat 里写 cell。
@@ -1061,4 +1088,254 @@ fn assert_restore_is_pure(app: &mut crate::app::App) {
         "回填不发任何 intent（重发 / 上传都没有）"
     );
     assert!(app.chat.cells.is_empty(), "回填不写 chat（内容只回草稿）");
+}
+
+#[tokio::test]
+async fn expired_snapshot_uses_only_the_subscribed_target_and_can_retry() {
+    use crate::app::AppIntent;
+    use crate::app::runner::{
+        OutgoingMessage, Switch, adopt_new_session, dispatch_send_message, request_session_snapshot,
+    };
+    use crate::ui::chat_view::ChatCell;
+    use crossterm::event::KeyCode;
+
+    let gateway = FakeGateway::start_with_replies(HashMap::from([
+        ("/api/session/subscribe", (200, "{}")),
+        ("/api/session/unsubscribe", (200, "{}")),
+    ]))
+    .await;
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    app.chat
+        .push(ChatCell::UserMessage("old transcript".into()));
+    adopt_new_session(
+        &mut app,
+        &transport,
+        "test-session".into(),
+        "target".into(),
+        Switch::Resume,
+    )
+    .await;
+    let deadline = app.snapshot_deadline().unwrap();
+    app.input.set_text("target draft");
+    app.input.insert_image(image(0x01, 10));
+    app.expire_session_snapshot(deadline - Duration::from_millis(1));
+    app.handle_key(key(KeyCode::Enter));
+    assert!(!app.user_input_ready());
+    assert_eq!(app.input.text(), "target draft[Image #1 8×8 10B]");
+    assert!(app.drain_intents().is_empty());
+
+    app.expire_session_snapshot(deadline);
+    assert_eq!(app.session_id, "target");
+    assert!(app.user_input_ready());
+    assert!(app.snapshot_deadline().is_none());
+    assert!(
+        matches!(app.chat.cells.as_slice(), [cell] if matches!(cell.cell(), ChatCell::WarningMessage(text) if text.contains("/sync")))
+    );
+    app.handle_event(switch_snapshot("test-session"));
+    assert_eq!(app.session_id, "target");
+    app.handle_key(key(KeyCode::Enter));
+    let Some(AppIntent::SendMessage {
+        content,
+        tool_call_id,
+        request_id,
+        images,
+    }) = app
+        .drain_intents()
+        .into_iter()
+        .find(|intent| matches!(intent, AppIntent::SendMessage { .. }))
+    else {
+        panic!("the confirmed target must be able to receive input");
+    };
+    let (tx, _rx) = mpsc::channel(8);
+    dispatch_send_message(
+        &mut app,
+        Some(&transport),
+        &mut None,
+        OutgoingMessage {
+            session_id: "target".into(),
+            content,
+            tool_call_id,
+            request_id,
+            images,
+        },
+        tx,
+    );
+    let sent: serde_json::Value =
+        serde_json::from_str(&wait_for_frames(&gateway, 1).await[0]).unwrap();
+    assert_eq!(sent["session_id"], "target");
+    assert_eq!(
+        gateway.uploads()[0].path,
+        "/api/session/media?session_id=target"
+    );
+
+    app.input.set_text("/sync");
+    app.handle_key(key(KeyCode::Enter));
+    assert!(
+        app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, AppIntent::RefreshSession))
+    );
+    request_session_snapshot(&mut app, Some(&transport)).await;
+    assert!(!app.user_input_ready());
+    assert_eq!(
+        gateway.session_requests.lock().unwrap().last().unwrap().0,
+        "/api/session/subscribe"
+    );
+    app.handle_event(switch_snapshot("target"));
+    assert!(app.user_input_ready());
+    assert!(!app.history_incomplete);
+}
+
+#[tokio::test]
+async fn an_unacknowledged_write_survives_disconnect_and_can_be_recovered_explicitly() {
+    use crossterm::event::KeyCode;
+
+    let gateway = FakeGateway::start().await;
+    let transport = connect(&gateway).await;
+    let mut app = test_app();
+    let mut rx = send(
+        &mut app,
+        Some(&transport),
+        "original",
+        vec![image(0x17, 10)],
+    );
+    wait_for_frames(&gateway, 1).await;
+    apply_written_receipt(&mut app, &mut rx).await;
+    app.set_connected(false);
+    app.set_connected(true);
+    let mut snapshot = switch_snapshot("test-session");
+    if let crate::protocol::WingEvent::SyncSession(snapshot) = &mut snapshot {
+        snapshot.messages.push(
+            serde_json::json!({"role": "user", "uuid": "history-uuid", "content": "original"}),
+        );
+    }
+    app.handle_event(snapshot);
+    assert!(app.input.is_empty());
+    assert_eq!(app.local_sends.len(), 1);
+
+    app.await_session_snapshot("target".into());
+    app.handle_event(switch_snapshot("target"));
+    assert!(app.try_frontend_command("/recover"));
+    assert!(app.input.is_empty());
+
+    app.await_session_snapshot("test-session".into());
+    app.handle_event(switch_snapshot("test-session"));
+    app.input.set_text("/recover");
+    app.update_popup_from_input();
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.input.text(), "original[Image #1 8×8 10B]");
+    assert!(app.local_sends.is_empty());
+    assert!(
+        !app.drain_intents()
+            .iter()
+            .any(|intent| matches!(intent, crate::app::AppIntent::SendMessage { .. }))
+    );
+    assert_eq!(gateway.frames().len(), 1);
+}
+
+#[tokio::test]
+async fn oversized_initial_snapshot_reconnects_live_only_and_sync_requests_replay() {
+    use crate::app::runner::{
+        Switch, adopt_new_session, recover_subscription, request_session_snapshot,
+    };
+    use crate::gateway::{CloseReason, GatewayClient, Limits};
+    use serde_json::json;
+
+    let gateway = FakeGateway::start_with_replies(HashMap::from([
+        ("/api/session/resume", (200, r#"{"session_id":"target"}"#)),
+        ("/api/session/subscribe", (200, "{}")),
+        ("/api/session/unsubscribe", (200, "{}")),
+    ]))
+    .await;
+    let ws = GatewayClient::connect_with_limits(
+        &gateway.ws_url,
+        None,
+        Limits {
+            max_buffered_bytes: 128,
+            ..Limits::default()
+        },
+    )
+    .await
+    .unwrap();
+    let mut first = Transport {
+        client_id: ws.client_id().into(),
+        ws,
+        http: wing_api_client::GatewayClient::new(&gateway.http_base, None).unwrap(),
+    };
+    let mut app = test_app();
+    adopt_new_session(
+        &mut app,
+        &first,
+        "test-session".into(),
+        "target".into(),
+        Switch::Resume,
+    )
+    .await;
+    assert!(!app.user_input_ready());
+
+    let chunk = json!({"type": "_chunk", "id": "history", "index": 0, "count": 2,
+        "of_type": "sync_session", "data": "x".repeat(129)});
+    gateway
+        .events
+        .send(Message::Text(chunk.to_string().into()))
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), first.ws.recv_event())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        first.ws.close_reason(),
+        Some(CloseReason::ReassemblyFailed { .. })
+    ));
+    app.note_connection_lost(first.ws.close_reason());
+    drop(first);
+    assert_eq!(app.session_id, "test-session");
+    assert!(!app.user_input_ready());
+
+    let mut second = connect(&gateway).await;
+    recover_subscription(&mut app, &second).await.unwrap();
+    assert_eq!(app.session_id, "target");
+    assert!(app.user_input_ready());
+    assert!(app.history_incomplete);
+    {
+        let requests = gateway.session_requests.lock().unwrap();
+        let subscriptions = requests
+            .iter()
+            .filter(|(path, _)| path == "/api/session/subscribe")
+            .map(|(_, body)| body.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            subscriptions,
+            [
+                json!({"session_id": "target"}),
+                json!({"session_id": "target", "replay": false})
+            ]
+        );
+    }
+
+    let live = json!({"type": "user_message_queued", "session_id": "target", "origin_request_id": "live",
+        "content": "live input", "media": [], "created_at": "2026-01-01T00:00:00Z", "request_id": "event"});
+    gateway
+        .events
+        .send(Message::Text(live.to_string().into()))
+        .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), second.ws.recv_event())
+        .await
+        .unwrap()
+        .unwrap();
+    app.handle_event(event);
+    assert_eq!(app.chat.pending[0].request_id, "live");
+
+    request_session_snapshot(&mut app, Some(&second)).await;
+    assert_eq!(
+        gateway.session_requests.lock().unwrap().last().unwrap().1,
+        json!({"session_id": "target"})
+    );
+    assert!(!app.user_input_ready());
+    app.handle_event(switch_snapshot("target"));
+    assert!(app.user_input_ready());
+    assert!(!app.history_incomplete);
 }

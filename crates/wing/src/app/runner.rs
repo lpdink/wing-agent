@@ -13,13 +13,13 @@ use tokio::sync::mpsc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
-use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SendDraft, SessionUpdate};
+use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SendOutcome, SessionUpdate};
 use crate::app::settings::GatewaySaveReport;
 use crate::app::settings::InterfaceSaveReport;
 use crate::app::settings::PendingSettingsSave;
 use crate::app::settings::changed_leaf_paths;
-use crate::app::transport::GatewayEndpoint;
 use crate::app::transport::Transport;
+use crate::app::transport::{GatewayEndpoint, Recovery};
 use crate::gateway::client::MessageWriteError;
 use crate::protocol::{ClientRequest, MediaRef};
 use crate::shared::pinning::{is_pinned, pin_tag_ops};
@@ -307,7 +307,7 @@ pub async fn execute_intent(
         }
         AppIntent::CreateSession { workspace } => {
             if let Some(t) = transport {
-                let old_session_id = app.session_id.clone();
+                let old_session_id = app.subscription_target().to_owned();
                 let req = wing_api_client::models::CreateSessionRequest {
                     workspace: workspace.clone(),
                     // 血缘（软信号）：TUI 被 agent 拉起时（env 里有
@@ -329,7 +329,7 @@ pub async fn execute_intent(
             session_id: target_id,
         } => {
             if let Some(t) = transport {
-                let old_session_id = app.session_id.clone();
+                let old_session_id = app.subscription_target().to_owned();
                 match t.http.resume_session(&target_id).await {
                     Ok(resp) => {
                         adopt_new_session(app, t, old_session_id, resp.session_id, Switch::Resume)
@@ -340,7 +340,7 @@ pub async fn execute_intent(
             }
         }
         AppIntent::ForkSession { target_uuid } => {
-            if let Some(t) = transport {
+            if let Some(t) = transport.as_ref().filter(|_| app.user_input_ready()) {
                 let old_session_id = app.session_id.clone();
                 match t.http.fork_session(&old_session_id, &target_uuid).await {
                     Ok(resp) => {
@@ -376,7 +376,7 @@ pub async fn execute_intent(
             }
         }
         AppIntent::RewindSession { target_uuid } => {
-            if let Some(t) = transport {
+            if let Some(t) = transport.as_ref().filter(|_| app.user_input_ready()) {
                 match t.http.rewind_session(&app.session_id, &target_uuid).await {
                     Ok(_) => {
                         app.show_toast(Toast::info(
@@ -393,6 +393,7 @@ pub async fn execute_intent(
                 }
             }
         }
+        AppIntent::RefreshSession => request_session_snapshot(app, transport.as_ref()).await,
         AppIntent::ReloadSystem => {
             if let Some(t) = transport {
                 match t.http.reload_system().await {
@@ -765,6 +766,52 @@ pub(super) async fn adopt_new_session(
     );
 }
 
+pub(super) async fn recover_subscription(
+    app: &mut App,
+    transport: &Transport,
+) -> anyhow::Result<Recovery> {
+    let replay = !app.recover_live_only;
+    let (session_id, recovery) = transport
+        .recover_session_with_replay(
+            app.subscription_target(),
+            app.launch_workspace.as_deref(),
+            replay,
+        )
+        .await?;
+    app.recover_live_only = false;
+    app.await_session_snapshot(session_id);
+    app.set_connected(true);
+    if !replay {
+        app.use_live_session();
+    }
+    Ok(recovery)
+}
+
+pub(super) async fn request_session_snapshot(app: &mut App, transport: Option<&Transport>) {
+    let Some(transport) = transport.filter(|_| app.connected) else {
+        app.show_toast(Toast::warning(
+            "History retry needs a connection",
+            std::time::Duration::from_secs(4),
+        ));
+        return;
+    };
+    let target = app.subscription_target().to_owned();
+    let result = tokio::time::timeout(
+        super::SESSION_SNAPSHOT_TIMEOUT,
+        transport.http.subscribe(&target, &transport.client_id),
+    )
+    .await;
+    let warning = match result {
+        Ok(Ok(())) => {
+            app.await_session_snapshot(target);
+            return;
+        }
+        Ok(Err(error)) => format!("Could not request history: {error}"),
+        Err(_) => "History request timed out. Use /sync to try again.".into(),
+    };
+    app.show_toast(Toast::warning(warning, std::time::Duration::from_secs(4)));
+}
+
 /// `AppIntent::CompactSession` 的落地：无连接直接回失败，有连接把往返挪进后台任务。
 ///
 /// 无连接这条不是防御性代码：intent 在这儿被静默丢掉的话，客户端永远等不到回执，
@@ -881,7 +928,9 @@ pub(super) fn dispatch_send_message(
     message: OutgoingMessage,
     fetch_tx: mpsc::Sender<FetchResult>,
 ) {
-    let Some(transport) = transport.filter(|_| app.user_input_ready()) else {
+    let Some(transport) = transport
+        .filter(|_| app.user_input_ready() && app.subscription_target() == message.session_id)
+    else {
         // A new socket can exist before recovery subscribes to the session.
         // Keep unsent input in the draft until the event stream is ready.
         // Gateway connection lost — nothing left the client, so the content
@@ -889,19 +938,17 @@ pub(super) fn dispatch_send_message(
         app.restore_failed_send(
             &message.session_id,
             &message.request_id,
-            "Not sent — gateway disconnected",
+            if app.connected && transport.is_some() {
+                "Not sent — waiting for session sync"
+            } else {
+                "Not sent — gateway disconnected"
+            },
             None,
         );
         return;
     };
-    let draft = app
-        .chat
-        .pending_submission(&message.request_id)
-        .map(|submission| SendDraft {
-            epoch: app.draft_recovery_epoch,
-            submission,
-        });
-    spawn_send_message(transport, send_chain, message, fetch_tx, draft);
+    app.track_local_send(&message.session_id, &message.request_id);
+    spawn_send_message(transport, send_chain, message, fetch_tx);
 }
 
 /// 把一条消息的发送挪进后台任务（[`dispatch_send_message`] 的「有连接」分支）。
@@ -916,7 +963,6 @@ fn spawn_send_message(
     send_chain: &mut Option<tokio::task::JoinHandle<()>>,
     mut message: OutgoingMessage,
     fetch_tx: mpsc::Sender<FetchResult>,
-    draft: Option<SendDraft>,
 ) {
     let http = transport.http.clone();
     let ws = transport.ws.request_sender();
@@ -926,17 +972,28 @@ fn spawn_send_message(
             // 上一条的成败由它自己的回执处理，这里只接顺序。
             let _ = previous.await;
         }
-        let payload = match deliver_user_message(&http, &ws, &mut message).await {
-            Ok(()) => return,
-            Err(MessageWriteError::Unsent(reason)) => FetchPayload::SendFailed {
-                request_id: message.request_id,
-                reason,
-                draft,
-            },
-            Err(MessageWriteError::Uncertain(reason)) => FetchPayload::Toast {
-                message: format!("Message delivery unknown: {reason}"),
-                is_error: true,
-            },
+        let directed = message.tool_call_id.is_some();
+        let outcome = match deliver_user_message(&http, &ws, &mut message).await {
+            Ok(()) if directed => return,
+            Ok(()) => SendOutcome::Written,
+            Err(MessageWriteError::Unsent(reason)) => SendOutcome::Unsent(reason),
+            Err(MessageWriteError::Uncertain(reason)) if directed => {
+                let _ = fetch_tx
+                    .send(FetchResult {
+                        session_id: message.session_id,
+                        payload: FetchPayload::Toast {
+                            message: format!("Message delivery unknown: {reason}"),
+                            is_error: true,
+                        },
+                    })
+                    .await;
+                return;
+            }
+            Err(MessageWriteError::Uncertain(reason)) => SendOutcome::Uncertain(reason),
+        };
+        let payload = FetchPayload::SendFinished {
+            request_id: message.request_id,
+            outcome,
         };
         let _ = fetch_tx
             .send(FetchResult {

@@ -43,6 +43,37 @@ impl App {
     /// first consumer. The trailing `_ =>` fallback lives in [`Self::handle_state`]
     /// and logs at debug level.
     pub(super) fn handle_event(&mut self, event: WingEvent) {
+        if let Some(session_id) = event.session_id() {
+            match &event {
+                WingEvent::UserMessageQueued { message, .. } => {
+                    self.take_local_send(session_id, &message.origin_request_id);
+                }
+                WingEvent::UserMessageAccepted {
+                    origin_request_id, ..
+                } => {
+                    self.take_local_send(session_id, origin_request_id);
+                }
+                WingEvent::UserMessageCommitted {
+                    origin_request_ids, ..
+                }
+                | WingEvent::UserMessagesDropped {
+                    origin_request_ids, ..
+                }
+                | WingEvent::Interrupted {
+                    dropped_request_ids: Some(origin_request_ids),
+                    ..
+                } => {
+                    self.settle_local_sends(
+                        session_id,
+                        origin_request_ids.iter().map(String::as_str),
+                    );
+                }
+                WingEvent::Error { meta, .. } if session_id != self.session_id => {
+                    self.take_local_send(session_id, &meta.request_id);
+                }
+                _ => {}
+            }
+        }
         match event {
             WingEvent::SyncSession(snapshot) => {
                 if snapshot.session_id == self.subscription_target() {
@@ -121,6 +152,7 @@ impl App {
                 }
             }
             WingEvent::UserMessageQueued { message, .. } => {
+                self.user_input_sync = true;
                 self.chat.queue_user_message(
                     message.origin_request_id,
                     UserMessageBody::new(message.content, message.media),
@@ -133,6 +165,7 @@ impl App {
                 media,
                 ..
             } => {
+                self.user_input_sync = true;
                 self.chat.remove_pending(&origin_request_ids);
                 self.chat.push_committed_user_message(
                     Some(message_uuid),
@@ -145,7 +178,7 @@ impl App {
                 self.chat.discard_pending(&origin_request_ids);
             }
             WingEvent::Done { .. } => {
-                if !self.user_input_sync {
+                if !self.user_input_sync && !self.history_incomplete {
                     self.chat.promote_all_pending();
                 }
                 self.finish_turn();
@@ -174,7 +207,9 @@ impl App {
             } => {
                 match dropped_request_ids {
                     Some(ids) => self.chat.discard_pending(&ids),
-                    None if !self.user_input_sync => self.chat.discard_all_pending(),
+                    None if !self.user_input_sync && !self.history_incomplete => {
+                        self.chat.discard_all_pending()
+                    }
                     None => {}
                 }
                 self.finish_turn();
@@ -220,7 +255,13 @@ impl App {
             WingEvent::Error { message, meta, .. } => {
                 // A frame rejection is scoped to its submission. A turn error
                 // may arrive through the same event with an unrelated request ID.
-                let rejected = self.chat.take_pending(&meta.request_id);
+                let session_id = self.session_id.clone();
+                let original = self.take_local_send(&session_id, &meta.request_id);
+                let rejected = self.chat.take_pending(&meta.request_id).or_else(|| {
+                    original
+                        .filter(|sent| sent.epoch == self.draft_recovery_epoch)
+                        .map(|sent| std::sync::Arc::unwrap_or_clone(sent.submission))
+                });
                 if rejected.is_none() || !self.user_input_sync {
                     self.finish_turn();
                     self.clear_ask_state();
@@ -587,6 +628,63 @@ impl App {
         }
     }
 
+    fn adopt_session_identity(&mut self, session_id: String) -> bool {
+        if self.session_id == session_id {
+            return false;
+        }
+        self.session_id = session_id;
+        self.draft_recovery_epoch = self.draft_recovery_epoch.wrapping_add(1);
+        self.status.pinned = false;
+        self.push_intent(AppIntent::FetchInfo);
+        self.finish_compaction();
+        true
+    }
+
+    pub(super) fn show_snapshot_wait(&mut self) {
+        self.show_toast(Toast::info(
+            "Waiting for session sync",
+            std::time::Duration::from_secs(2),
+        ));
+    }
+
+    pub(super) fn expire_session_snapshot(&mut self, now: tokio::time::Instant) {
+        if !self
+            .snapshot_deadline()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            return;
+        }
+        self.use_live_session();
+    }
+
+    pub(super) fn use_live_session(&mut self) {
+        let Some(pending) = self.pending_session_snapshot.take() else {
+            return;
+        };
+        self.clear_ask_state();
+        self.close_model_panel();
+        if self.adopt_session_identity(pending.session_id) {
+            self.chat.clear();
+            self.status = crate::ui::status_bar::StatusData {
+                connected: self.connected,
+                ..Default::default()
+            };
+            self.session_facts = None;
+            self.user_input_sync = false;
+            self.turn.reset_usage();
+        }
+        self.history_incomplete = true;
+        self.finish_turn();
+        self.turn.last_result = false;
+        self.push_intent(AppIntent::SetTitle(title::title_idle(
+            self.dir_label().as_deref(),
+        )));
+        self.sync_program_status();
+        self.chat.push(ChatCell::WarningMessage(
+            "Session history unavailable. Showing live events. Use /sync to retry history.".into(),
+        ));
+    }
+
     /// Replace the whole view with a session snapshot (`SyncSession`).
     ///
     /// A full state replacement, not an append: clear → session facts →
@@ -615,28 +713,20 @@ impl App {
             usage,
             ..
         } = snapshot;
-        // Update session_id to the new session (Phase 3c).
-        //
-        // 快照不带会话的标签（pin 星标的数据源）：换会话时补一次
-        // `/api/session/info`（响应携带 tags / tag_meta）。只有**身份真的变了**
-        // 才取——首帧（启动）与重连沿用既有路径，不重复请求。
-        let switched = self.session_id != session_id;
-        self.session_id = session_id;
-        if switched {
-            self.draft_recovery_epoch = self.draft_recovery_epoch.wrapping_add(1);
-            // 星标此刻挂的是**上一个会话**的状态：先复位成未知（未 pin），
-            // 别在一个 RTT 的窗口里把别人的 pin 显成你的——补取的 info 到达
-            // 后立即纠正（点击期间也不会据此算错目标值）。
-            self.status.pinned = false;
-            self.push_intent(AppIntent::FetchInfo);
-            // 压缩在飞的是上一个会话：它的回执已经认不到这个会话，本地标记作废。
-            self.finish_compaction();
-        }
+        let switched = self.adopt_session_identity(session_id);
+        self.history_incomplete = false;
 
         // Optimistic sends on this connection may follow the snapshot. A
         // disconnect already removed echoes whose acknowledgements could be lost.
         self.user_input_sync = pending_user_messages.is_some();
         if let Some(messages) = pending_user_messages {
+            let session_id = self.session_id.clone();
+            self.settle_local_sends(
+                &session_id,
+                messages
+                    .iter()
+                    .map(|message| message.origin_request_id.as_str()),
+            );
             self.chat.rebuild_with_pending_queue(
                 messages.into_iter().map(|message| {
                     (
@@ -820,6 +910,7 @@ impl App {
         // an idle snapshot is `idle`. A session switch or reconnect must not
         // leave the record describing the view that was replaced.
         self.sync_program_status();
+        self.offer_uncertain_recovery();
     }
 
     /// Handle tool call results with tool-specific routing.

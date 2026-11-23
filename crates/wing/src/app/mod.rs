@@ -100,6 +100,28 @@ const WIDE_THRESHOLD: u16 = 100;
 /// change's Open Questions.
 const WHEEL_SCROLL_LINES: usize = 3;
 
+const SESSION_SNAPSHOT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+struct PendingSessionSnapshot {
+    session_id: String,
+    deadline: tokio::time::Instant,
+}
+
+#[derive(PartialEq, Eq)]
+enum LocalSendState {
+    Writing { stream_lost: bool },
+    AwaitingAcceptance,
+    Uncertain,
+}
+
+struct LocalSend {
+    session_id: String,
+    request_id: String,
+    epoch: u64,
+    submission: Arc<crate::ui::chat_view::Submission>,
+    state: LocalSendState,
+}
+
 /// Application state.
 pub struct App {
     pub status: StatusData,
@@ -111,7 +133,11 @@ pub struct App {
     pub session_id: String,
     user_input_sync: bool,
     /// The subscribed session whose view has yet to be applied.
-    pending_session_snapshot: Option<String>,
+    pending_session_snapshot: Option<PendingSessionSnapshot>,
+    history_incomplete: bool,
+    recover_live_only: bool,
+    /// Local originals wait here for an exact gateway event or manual recovery.
+    local_sends: Vec<LocalSend>,
     draft_recovery_epoch: u64,
     /// In-app text selection — one gesture, anchored in the *content*
     /// coordinates of the region it started in (chat band or composer), with
@@ -293,6 +319,9 @@ impl App {
             session_id,
             user_input_sync: false,
             pending_session_snapshot: None,
+            history_incomplete: false,
+            recover_live_only: false,
+            local_sends: Vec::new(),
             draft_recovery_epoch: 0,
             selection: SelectionSession::default(),
             should_quit: false,
@@ -647,23 +676,51 @@ impl App {
     }
 
     fn await_session_snapshot(&mut self, session_id: String) {
-        self.pending_session_snapshot = Some(session_id);
+        let previous = self.subscription_target();
+        if previous != session_id {
+            let previous = previous.to_owned();
+            self.mark_send_stream_lost(Some(&previous));
+        }
+        self.pending_session_snapshot = Some(PendingSessionSnapshot {
+            session_id,
+            deadline: tokio::time::Instant::now() + SESSION_SNAPSHOT_TIMEOUT,
+        });
     }
 
     fn subscription_target(&self) -> &str {
         self.pending_session_snapshot
-            .as_deref()
-            .unwrap_or(&self.session_id)
+            .as_ref()
+            .map_or(&self.session_id, |pending| &pending.session_id)
     }
 
     fn user_input_ready(&self) -> bool {
         self.connected && self.pending_session_snapshot.is_none()
     }
 
+    fn snapshot_deadline(&self) -> Option<tokio::time::Instant> {
+        self.pending_session_snapshot
+            .as_ref()
+            .filter(|_| self.connected)
+            .map(|pending| pending.deadline)
+    }
+
+    fn note_connection_lost(&mut self, reason: Option<&crate::gateway::CloseReason>) {
+        use crate::gateway::CloseReason;
+        if (self.pending_session_snapshot.is_some() || self.history_incomplete)
+            && matches!(
+                reason,
+                Some(CloseReason::ReassemblyFailed { .. } | CloseReason::FrameTooLarge { .. })
+            )
+        {
+            self.recover_live_only = true;
+        }
+        self.set_connected(false);
+    }
+
     /// Update the gateway connection state.
     pub fn set_connected(&mut self, connected: bool) {
         if !connected {
-            // After a lost stream, a local echo may already be in history.
+            self.mark_send_stream_lost(None);
             self.chat.remove_optimistic_pending();
         }
         self.connected = connected;
@@ -1349,6 +1406,8 @@ pub async fn run_app(
             }
         };
 
+        let snapshot_deadline = app.snapshot_deadline();
+
         // Select from term events and gateway events.
         tokio::select! {
             Some(term_event) = term_events.recv() => {
@@ -1481,10 +1540,10 @@ pub async fn run_app(
                         // "this session's payload exceeds the frame limit".
                         let reason = transport
                             .as_ref()
-                            .and_then(|t| t.ws.close_reason())
-                            .map(|r| crate::util::osc9::truncate_bytes(&r.describe(), 120));
+                            .and_then(|t| t.ws.close_reason());
+                        app.note_connection_lost(reason);
+                        let reason = reason.map(|r| crate::util::osc9::truncate_bytes(&r.describe(), 120));
                         transport = None;
-                        app.set_connected(false);
                         let text = match reason {
                             Some(reason) => format!("⚡ Connection lost: {reason} — reconnecting..."),
                             None => "⚡ Connection lost — reconnecting...".to_string(),
@@ -1525,19 +1584,19 @@ pub async fn run_app(
                     // this silently start a fresh session — like first launch.
                     // The pushed SyncSession updates App state (session_id,
                     // chat replay), exactly like the `/new` command.
-                    let workspace = app.launch_workspace.clone();
                     let lost_session = app.subscription_target().to_owned();
-                    match t.recover_session(&lost_session, workspace.as_deref()).await {
-                        Ok((session_id, recovery)) => {
-                            app.await_session_snapshot(session_id);
+                    match runner::recover_subscription(&mut app, t).await {
+                        Ok(recovery) => {
                             recovery_pending = false;
-                            app.set_connected(true);
                             app.clear_toast();
                             // 归档会话：新会话可用，但老会话要用户自己恢复——
                             // 提示由 `Recovery::notice` 给出（带可复制的命令）。
                             app.show_toast(recovery.notice(&lost_session).unwrap_or_else(|| {
                                 Toast::info("Reconnected!", std::time::Duration::from_secs(2))
                             }));
+                            if app.history_incomplete && app.pending_session_snapshot.is_none() {
+                                app.offer_uncertain_recovery();
+                            }
                             // The session may have been silently replaced —
                             // the popup list must re-fetch.
                             app.invalidate_session_cache();
@@ -1555,6 +1614,16 @@ pub async fn run_app(
                         }
                     }
                 }
+            }
+            _ = async {
+                if let Some(deadline) = snapshot_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                app.expire_session_snapshot(tokio::time::Instant::now());
+                app.chat_dirty = true;
             }
             // Toast expiry: trigger a redraw to clear the toast overlay.
             _ = async {

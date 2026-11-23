@@ -8,21 +8,19 @@
 //! tasks to avoid blocking the main event loop. Results are delivered back
 //! via [`FetchResult`] through an mpsc channel.
 
-use std::sync::Arc;
-
 use wing_api_client::models::{
     AgentsResponse, BranchesResponse, CommandsResponse, ModelsResponse, SessionInfoResponse,
     SessionListResponse, SettingsGetResponse, SettingsSchemaResponse, SettingsSetResponse,
 };
 
-use crate::ui::chat_view::Submission;
 use crate::util::image_compress::CompressOptions;
 use crate::util::image_compress::CompressedImage;
 
-/// A local submission that may still need restoration after a same-session sync.
-pub struct SendDraft {
-    pub(super) epoch: u64,
-    pub(super) submission: Arc<Submission>,
+/// Socket write outcome. Only `Unsent` confirms that a retry could not duplicate delivery.
+pub enum SendOutcome {
+    Written,
+    Unsent(String),
+    Uncertain(String),
 }
 
 /// Payload of a background fetch result.
@@ -92,16 +90,10 @@ pub enum FetchPayload {
             crate::util::clipboard_paste::PasteFailure,
         >,
     ),
-    /// 一条消息的**后台发送失败**回执（`SendMessage` 后台任务，见
-    /// `runner::spawn_send_message`）。
-    ///
-    /// The original is carried across a snapshot that replaced the pending list.
-    SendFailed {
-        /// 与 `SendMessage` / pending 条目同一个关联 id。
+    /// Socket write result for a local user submission.
+    SendFinished {
         request_id: String,
-        /// 给 toast 的文案（`Image upload failed: …` / `Send failed: …`）。
-        reason: String,
-        draft: Option<SendDraft>,
+        outcome: SendOutcome,
     },
     /// Show a toast message (for errors or success feedback from background tasks).
     Toast { message: String, is_error: bool },
@@ -235,6 +227,9 @@ pub enum AppIntent {
 
     /// Interrupt the current agent turn via HTTP API.
     InterruptSession,
+
+    /// Re-request the snapshot for the current subscription.
+    RefreshSession,
 
     /// Rewind the session to a specific message via HTTP API.
     RewindSession { target_uuid: String },
