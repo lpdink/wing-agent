@@ -796,6 +796,8 @@ impl App {
             let now = std::time::Instant::now();
             let full_card_w = crate::ui::input_area::chrome::card_area(area).width;
             let settings_open = self.settings_panel.is_some();
+            let saving_settings = self.settings_save.is_some();
+            let toast_visible = self.toast.as_ref().is_some_and(|toast| !toast.is_expired());
             let splash_plan = if settings_open {
                 None
             } else {
@@ -807,7 +809,11 @@ impl App {
             };
             let composer_w = splash_plan.map_or(full_card_w, |(_, width)| width);
             let bands = if settings_open {
-                settings_layout(area, self.chat.cells.is_empty())
+                settings_layout(
+                    area,
+                    self.chat.cells.is_empty(),
+                    toast_visible || saving_settings,
+                )
             } else {
                 frame_layout(
                     area,
@@ -962,18 +968,40 @@ impl App {
                 input_rect
             };
 
-            // Toast overlay (rendered last, on top of everything).
-            let mut toast_area: Option<Rect> = None;
-            if let Some(ref toast) = self.toast
-                && !toast.is_expired()
-            {
-                toast_area = render_toast(toast, area, frame.buffer_mut(), &palette);
-                // The toast paints over the chat band (top-right, below the
-                // status bar): its cells are gone, so the link hit boxes under
-                // it must go too.
-                if let Some(area) = toast_area {
-                    self.chat.mask_links(area);
+            let toast = self.toast.as_ref().filter(|toast| !toast.is_expired());
+            let toast_area = if settings_open {
+                // The receipt has a dedicated row, including on frames too short for a toast box.
+                let notification = if saving_settings {
+                    Some(("正在保存…", palette.accent))
+                } else {
+                    toast.map(|toast| {
+                        let color = match toast.kind {
+                            ToastKind::Info => palette.accent,
+                            ToastKind::Warning => palette.warning,
+                            ToastKind::Error => palette.danger,
+                        };
+                        (toast.message.as_str(), color)
+                    })
+                };
+                if let Some(notice) = bands.notice
+                    && let Some((message, color)) = notification
+                {
+                    let message = crate::render::markdown::elide_to_display_width(
+                        &message.split_whitespace().collect::<Vec<_>>().join(" "),
+                        notice.width as usize,
+                    );
+                    frame.render_widget(
+                        ratatui::widgets::Paragraph::new(message)
+                            .style(ratatui::style::Style::default().fg(color)),
+                        notice,
+                    );
                 }
+                None
+            } else {
+                toast.and_then(|toast| render_toast(toast, area, frame.buffer_mut(), &palette))
+            };
+            if let Some(area) = toast_area {
+                self.chat.mask_links(area);
             }
 
             // Markdown pictures — the last write of the frame (see `ui::image::paint`): every widget
@@ -1097,9 +1125,10 @@ struct FrameLayout {
     composer: Rect,
     /// 命令弹层（挂在输入卡下面）；不显示时为 `None`。
     popup: Option<Rect>,
+    notice: Option<Rect>,
 }
 
-fn settings_layout(area: Rect, chat_empty: bool) -> FrameLayout {
+fn settings_layout(area: Rect, chat_empty: bool, toast_visible: bool) -> FrameLayout {
     let status_height = u16::from(area.height > 1);
     let available = area.height - status_height;
     let chat_reserve = if !chat_empty && available >= 5 {
@@ -1107,8 +1136,10 @@ fn settings_layout(area: Rect, chat_empty: bool) -> FrameLayout {
     } else {
         0
     };
-    let settings_height = (available - chat_reserve).min(20);
-    let chat_height = available - settings_height;
+    let lower_budget = available - chat_reserve;
+    let notice_height = u16::from(toast_visible && lower_budget >= 4);
+    let settings_height = (lower_budget - notice_height).min(20);
+    let chat_height = available - settings_height - notice_height;
     FrameLayout {
         status: Rect {
             height: status_height,
@@ -1125,6 +1156,11 @@ fn settings_layout(area: Rect, chat_empty: bool) -> FrameLayout {
             ..area
         },
         popup: None,
+        notice: (notice_height > 0).then_some(Rect {
+            y: area.bottom() - settings_height - notice_height,
+            height: notice_height,
+            ..area
+        }),
     }
 }
 
@@ -1154,6 +1190,7 @@ fn frame_layout(
             band: chunks[1],
             composer: chunks[2],
             popup: (popup_h > 0).then(|| chunks[3]),
+            notice: None,
         };
     }
 
@@ -1183,6 +1220,7 @@ fn frame_layout(
         band: chunks[2],
         composer: chunks[4],
         popup: None,
+        notice: None,
     }
 }
 

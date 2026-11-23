@@ -738,7 +738,7 @@ impl SettingsPanel {
             parts.push("R 读取磁盘");
         }
         if self.can_restart_gateway() {
-            parts.push("Ctrl+R 重启网关");
+            parts.insert(0, "Ctrl+R 重启网关");
         }
         parts.push("/ 搜索 · ? 帮助");
         parts.push(if self.view == View::Categories {
@@ -865,7 +865,17 @@ impl SettingsPanel {
         value: Value,
         anchor: Option<(Root, String)>,
     ) -> SettingsAction {
-        if !self.model_edits.write(&mut self.doc, root, path, &value) {
+        let default = if value.is_boolean() {
+            self.node(root, path)
+                .and_then(|node| node.default.as_ref())
+                .and_then(Value::as_bool)
+        } else {
+            None
+        };
+        if let Some(value) = self
+            .model_edits
+            .write(&mut self.doc, root, path, value, default)
+        {
             self.doc.set_value(root, path, value);
             self.doc.mark_dirty(root, path);
         }
@@ -1204,7 +1214,7 @@ impl SettingsPanel {
             return SettingsAction::None;
         }
         if self.view == View::Tree && self.group().is_some() {
-            self.view = View::Categories;
+            self.leave_items();
             return SettingsAction::None;
         }
         if self.dirty_count() > 0 {
@@ -1227,7 +1237,7 @@ impl SettingsPanel {
     /// 设置项列表的 `←`：折叠 / 跳父行 / enum 往前切值；**已到分组顶层（无处可去）则返回分类**。
     fn left_action(&mut self) -> SettingsAction {
         let Some(row) = self.current_row().cloned() else {
-            self.view = View::Categories;
+            self.leave_items();
             return SettingsAction::None;
         };
         if self
@@ -1269,8 +1279,13 @@ impl SettingsPanel {
         if depth > 0 {
             self.goto_parent();
         } else {
-            self.view = View::Categories;
+            self.leave_items();
         }
+    }
+
+    fn leave_items(&mut self) {
+        self.view = View::Categories;
+        self.choices = None;
     }
 
     fn right_action(&mut self) -> SettingsAction {
@@ -1637,10 +1652,12 @@ impl SettingsPanel {
             });
             return SettingsAction::None;
         }
-        if matches!(
-            row.action,
-            RowAction::Edit(_) | RowAction::Toggle | RowAction::OpenChoices
-        ) {
+        if model::short_name(&self.doc, row.root, &row.path).is_none()
+            && matches!(
+                row.action,
+                RowAction::Edit(_) | RowAction::Toggle | RowAction::OpenChoices
+            )
+        {
             self.pending = Some(Pending::ClearScalar {
                 root: row.root,
                 path: row.path.clone(),

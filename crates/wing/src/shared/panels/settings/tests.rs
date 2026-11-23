@@ -2723,7 +2723,7 @@ fn a_successful_save_that_exits_setup_mode_clears_the_flag() {
     assert!(panel.setup_mode());
 }
 
-// ── v2：双栏（左栏锚点 / 右栏设置项）──────────────────────────
+// ── 分类与设置项 ─────────────────────────────────────────
 
 #[test]
 fn categories_and_items_use_the_same_navigation_keys() {
@@ -2760,7 +2760,7 @@ fn categories_and_items_use_the_same_navigation_keys() {
 }
 
 #[test]
-fn paging_in_the_left_column_uses_the_anchor_viewport() {
+fn paging_categories_uses_the_list_viewport() {
     let mut panel = panel();
     panel.set_viewport_rows(2);
     press_code(&mut panel, KeyCode::PageDown);
@@ -2770,7 +2770,7 @@ fn paging_in_the_left_column_uses_the_anchor_viewport() {
 }
 
 #[test]
-fn left_from_a_top_level_row_steps_out_to_the_left_column() {
+fn left_from_a_top_level_row_returns_to_categories() {
     let mut panel = panel();
     goto(&mut panel, "providers");
     assert_eq!(panel.view(), View::Tree);
@@ -2784,7 +2784,7 @@ fn left_from_a_top_level_row_steps_out_to_the_left_column() {
 }
 
 #[test]
-fn esc_steps_out_one_column_at_a_time_and_only_then_closes() {
+fn escape_returns_to_categories_before_closing() {
     let mut panel = panel();
     goto(&mut panel, "providers");
     assert_eq!(press_code(&mut panel, KeyCode::Esc), SettingsAction::None);
@@ -2954,7 +2954,7 @@ fn injecting_the_interface_root_appends_its_anchor_without_moving_the_cursor() {
 }
 
 #[test]
-fn editing_in_the_right_column_still_produces_the_same_actions() {
+fn editing_in_a_category_keeps_preview_and_save_actions() {
     // v2 只改了导航；编辑/保存/预览的产出必须一字不差（Interface 实时预览是最容易漏的）。
     let mut panel = panel_with_interface();
     goto_title(&mut panel, "Interface");
@@ -3034,39 +3034,12 @@ fn tab_edits_boolean_and_enum_rows_but_never_during_search() {
 }
 
 fn mixed_model_panel() -> SettingsPanel {
-    let mut vision = fx::bool_field("vision", false);
-    vision.doc = "是否接受图片输入".into();
-    let models = fx::list_of(
-        "models",
-        vec![
-            fx::element(fx::str_field("str")),
-            fx::element(fx::object(
-                "ModelSpec",
-                vec![
-                    fx::str_field("id"),
-                    fx::required_str("name"),
-                    fx::str_field("display_name"),
-                    fx::object("capabilities", vec![vision]),
-                ],
-            )),
-        ],
-    );
-    let catalog = fx::root(vec![
-        fx::list(
-            "providers",
-            fx::element(fx::object("ProviderConfig", vec![models])),
-        ),
-        fx::int_field("port", None, None),
-    ]);
     let mut schema = schema();
-    schema.root = catalog;
-    schema.groups = Vec::new();
-    let values = json!({"providers": [{"models": [
-        "legacy/model", {"id": "chosen", "name": "upstream", "display_name": "Friendly", "capabilities": {"vision": true}}, "untouched"
-    ]}], "port": 1234});
+    schema.root = fx::mixed_model_catalog();
+    schema.groups.clear();
     SettingsPanel::new(
         &schema,
-        state_with(values, Vec::new()),
+        state_with(fx::mixed_model_values(), Vec::new()),
         None,
         View::Categories,
     )
@@ -3087,6 +3060,7 @@ fn search(panel: &mut SettingsPanel, query: &str) {
 #[test]
 fn image_input_uses_the_same_rows_for_both_existing_model_shapes() {
     let mut panel = mixed_model_panel();
+    assert!(panel.problems().is_empty(), "{:?}", panel.problems());
     let baseline = model_doc(&panel).clone();
     search(&mut panel, "Image input");
     let switches = panel
@@ -3112,11 +3086,13 @@ fn image_input_uses_the_same_rows_for_both_existing_model_shapes() {
         model_doc(&panel)[0],
         json!({"name": "legacy/model", "capabilities": {"vision": true}})
     );
+    assert!(panel.problems().is_empty(), "{:?}", panel.problems());
     assert_eq!(model_doc(&panel)[1], baseline[1]);
     assert_eq!(model_doc(&panel)[2], baseline[2]);
     press_code(&mut panel, KeyCode::Tab);
     assert_eq!(model_doc(&panel), &baseline);
     assert_eq!(panel.dirty_count(), 0);
+    assert!(panel.problems().is_empty(), "{:?}", panel.problems());
 
     goto(&mut panel, "providers[0].models[1]");
     press_code(&mut panel, KeyCode::Right);
@@ -3127,6 +3103,11 @@ fn image_input_uses_the_same_rows_for_both_existing_model_shapes() {
     assert_eq!(model_doc(&panel)[1]["capabilities"]["vision"], json!(false));
     assert_eq!(model_doc(&panel)[1]["id"], "chosen");
     assert_eq!(model_doc(&panel)[1]["name"], "upstream");
+    panel.apply_save(super::SaveOutcome {
+        gateway: Some(ok_response(Vec::new())),
+        interface_ok: None,
+    });
+    assert!(panel.problems().is_empty(), "{:?}", panel.problems());
 }
 
 #[test]
@@ -3164,4 +3145,85 @@ fn adding_a_model_opens_its_name_editor_without_a_variant_prompt() {
     type_text(&mut panel, "new/model");
     press_code(&mut panel, KeyCode::Enter);
     assert_eq!(model_doc(&panel)[3], json!({"name": "new/model"}));
+}
+
+#[test]
+fn a_real_missing_object_name_still_jumps_to_model_name() {
+    let mut schema = schema();
+    schema.root = fx::mixed_model_catalog();
+    schema.groups.clear();
+    let mut values = fx::mixed_model_values();
+    values["providers"][0]["models"][1] = json!({"id": "missing-name"});
+    let mut panel = SettingsPanel::new(
+        &schema,
+        state_with(values, Vec::new()),
+        None,
+        View::Problems,
+    );
+    assert_eq!(panel.problems().len(), 1, "{:?}", panel.problems());
+    assert_eq!(
+        panel.problems()[0].path.as_deref(),
+        Some("providers[0].models[1].name")
+    );
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.current_row().unwrap().label, "Model name");
+    assert_eq!(
+        panel.current_row().unwrap().value,
+        ValueText::Text("(required)".into())
+    );
+}
+
+#[test]
+fn renaming_and_reverting_a_moved_legacy_model_preserves_its_short_form() {
+    let mut panel = mixed_model_panel();
+    let object = model_doc(&panel)[1].clone();
+    search(&mut panel, "Model name");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Char('d'));
+    assert!(
+        panel.prompt().is_none(),
+        "the virtual required name cannot be cleared"
+    );
+    press_code(&mut panel, KeyCode::Enter);
+    press(&mut panel, ctrl('u'));
+    type_text(&mut panel, "renamed");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(model_doc(&panel)[0], "renamed");
+    search(&mut panel, "Image input");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Tab);
+    goto(&mut panel, "providers[0].models[0]");
+    press_code(&mut panel, KeyCode::Char('J'));
+    assert_eq!(model_doc(&panel)[0], object);
+    goto(&mut panel, "providers[0].models[1].capabilities.vision");
+    press_code(&mut panel, KeyCode::Char('r'));
+    assert_eq!(model_doc(&panel)[1], "renamed");
+    assert!(panel.is_dirty(super::Root::Gateway, "providers[0].models[1].name"));
+    assert!(!panel.is_dirty(
+        super::Root::Gateway,
+        "providers[0].models[1].capabilities.vision"
+    ));
+    goto(&mut panel, "providers[0].models[1]");
+    press_code(&mut panel, KeyCode::Char('d'));
+    assert_eq!(panel.prompt().unwrap().kind, PromptKind::Confirm);
+    press_code(&mut panel, KeyCode::Esc);
+    assert_eq!(model_doc(&panel)[1], "renamed");
+}
+
+#[test]
+fn leaving_expanded_items_with_left_retires_the_enum_choice() {
+    let mut panel = provider_panel();
+    goto(&mut panel, "providers[0].protocol");
+    press_code(&mut panel, KeyCode::Enter);
+    assert!(panel.choices().is_some());
+    press_code(&mut panel, KeyCode::Home);
+    press_code(&mut panel, KeyCode::Left);
+    press_code(&mut panel, KeyCode::Left);
+    assert_eq!(panel.view(), View::Categories);
+    assert!(panel.choices().is_none());
+    press_code(&mut panel, KeyCode::Down);
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.view(), View::Tree);
+    press_code(&mut panel, KeyCode::Esc);
+    assert_eq!(panel.view(), View::Categories);
 }

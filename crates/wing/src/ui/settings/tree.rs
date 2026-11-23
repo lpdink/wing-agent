@@ -74,42 +74,36 @@ fn is_expanded(rows: &[Row], index: usize) -> bool {
         .is_some_and(|next| next.depth > rows[index].depth)
 }
 
-/// 行前缀：光标 / 缩进 / 脏标记 / 展开箭头（选择项行是内项光标）。
 fn prefix(
     row: &Row,
     is_cursor: bool,
     expanded: bool,
+    compact: bool,
     palette: &ThemePalette,
 ) -> Vec<Span<'static>> {
     let mut spans = vec![cursor_span(is_cursor, palette)];
-    if row.depth > 0 {
-        spans.push(Span::raw("  ".repeat(row.depth.min(4))));
-    }
+    let indent = if compact {
+        row.depth.min(6)
+    } else {
+        row.depth.min(4) * 2
+    };
+    spans.push(Span::raw(" ".repeat(indent)));
     if let RowAction::Choose { selected, .. } = &row.action {
         spans.push(choice_marker(*selected, palette));
         return spans;
     }
-    spans.push(dirty_marker(row, palette));
-    spans.push(arrow(row, expanded, palette));
-    spans
-}
-
-/// 脏标记 `●`（success —— 与 `ui/cells/model_picker.rs` 的 `●` 同色）；不脏时留白对齐。
-fn dirty_marker(row: &Row, palette: &ThemePalette) -> Span<'static> {
     if row.markers.dirty {
-        Span::styled("● ".to_string(), Style::default().fg(palette.success))
-    } else {
-        Span::raw("  ")
+        spans.push(Span::styled("● ", Style::default().fg(palette.success)));
+    } else if !compact {
+        spans.push(Span::raw("  "));
     }
-}
-
-/// 展开箭头：结构行 `▾` / `▸`，其余留白（根头行不画箭头）。
-fn arrow(row: &Row, expanded: bool, palette: &ThemePalette) -> Span<'static> {
-    if row.action != RowAction::Expand || row.path.is_empty() {
-        return Span::raw("  ");
+    if row.action == RowAction::Expand && !row.path.is_empty() {
+        let glyph = if expanded { "▾ " } else { "▸ " };
+        spans.push(Span::styled(glyph, Style::default().fg(palette.dim)));
+    } else if !compact {
+        spans.push(Span::raw("  "));
     }
-    let glyph = if expanded { "▾ " } else { "▸ " };
-    Span::styled(glyph.to_string(), Style::default().fg(palette.dim))
+    spans
 }
 
 /// enum 选择项行的内项光标。
@@ -134,7 +128,7 @@ fn row_line(
     width: usize,
     palette: &ThemePalette,
 ) -> Line<'static> {
-    let mut spans = prefix(row, selected, expanded, palette);
+    let mut spans = prefix(row, selected, expanded, width < 48, palette);
     if let RowAction::Choose {
         value: Some(value), ..
     } = &row.action
@@ -171,6 +165,11 @@ fn row_line(
             values.push(Span::styled("…", Style::default().fg(palette.dim)));
         }
         spans.extend(values);
+        let default_hint = " (default)";
+        if matches!(row.value, ValueText::Default(_)) && budget >= value_width + default_hint.len()
+        {
+            spans.push(Span::styled(default_hint, Style::default().fg(palette.dim)));
+        }
     } else {
         spans.extend(clamp_line(Line::from(label), available).spans);
     }
@@ -238,7 +237,6 @@ fn value_spans(row: &Row, color_hint: bool, palette: &ThemePalette) -> Vec<Span<
         ValueText::Default(text) => {
             let mut spans = color_swatch(text, color_hint);
             spans.push(Span::styled(text.clone(), dim));
-            spans.push(Span::styled(" (default)".to_string(), dim));
             spans
         }
         ValueText::Text(text) => {

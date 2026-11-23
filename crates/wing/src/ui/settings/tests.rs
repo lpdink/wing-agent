@@ -207,3 +207,46 @@ fn the_painter_only_touches_its_assigned_rectangle() {
         }
     }
 }
+
+#[test]
+fn both_model_shapes_keep_the_full_vision_label_and_state_at_32_columns() {
+    use crate::shared::panels::settings::test_support as model_fixture;
+
+    for width in [32, 120] {
+        let catalog = model_fixture::mixed_model_catalog();
+        let mut panel = SettingsPanel::new(
+            &fx::schema(&catalog),
+            fx::state(model_fixture::mixed_model_values()),
+            None,
+            View::Categories,
+        );
+        for (index, before, after) in [(0, "disabled", "enabled"), (1, "enabled", "disabled")] {
+            let path = format!("providers[0].models[{index}].capabilities.vision");
+            fx::press(&mut panel, KeyCode::Char('/'));
+            fx::type_text(&mut panel, "Image input");
+            let cursor = panel.cursor();
+            let target = panel
+                .rows()
+                .iter()
+                .position(|row| row.path == path)
+                .unwrap();
+            for _ in cursor..target {
+                fx::press(&mut panel, KeyCode::Down);
+            }
+            assert_eq!(panel.current_row().unwrap().path, path);
+            fx::press(&mut panel, KeyCode::Enter);
+            for state in [before, after] {
+                let text = lines(&frame(&mut panel, width, 4)).join("\n");
+                assert!(
+                    text.lines()
+                        .any(|line| line.contains('❯')
+                            && line.contains(&format!("Image input {state}"))),
+                    "{width} columns, {path}:\n{text}"
+                );
+                if state == before {
+                    fx::press(&mut panel, KeyCode::Tab);
+                }
+            }
+        }
+    }
+}
