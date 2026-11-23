@@ -186,7 +186,7 @@ class TestEnterOperational:
 
         assert result.ok is False
         assert [(i.name, i.ok) for i in result.items] == [("config.yaml", False)]
-        assert "disk on fire" in result.items[0].detail
+        assert result.items[0].detail == "RuntimeError"
         assert server.in_setup_mode is True
 
 

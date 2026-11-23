@@ -1868,6 +1868,7 @@ fn ctrl_r_asks_before_discarding_dirty_changes() {
 fn mark_restart_pending(panel: &mut SettingsPanel) {
     let mut response = ok_response(Vec::new());
     response.reload = Some(wing_api_client::models::ReloadResponse {
+        diagnostics_redacted: true,
         ok: true,
         results: vec![],
         pending_restart_paths: Some(vec!["gateway.port".into()]),
@@ -1911,6 +1912,7 @@ fn restart_required_is_tracked_from_the_last_save() {
     edit_port(&mut panel, "8080");
     let mut response = ok_response(Vec::new());
     response.reload = Some(wing_api_client::models::ReloadResponse {
+        diagnostics_redacted: true,
         ok: true,
         results: vec![],
         pending_restart_paths: Some(vec!["gateway.port".into()]),

@@ -756,7 +756,7 @@ fn route(
                 })
                 .collect();
             let ok = state.reload_items.iter().all(|(_, ok, _)| *ok);
-            (200, json!({"ok": ok, "results": items}).to_string())
+            (200, json!({"ok": ok, "results": items, "diagnostics_redacted": true}).to_string())
         }
 
         ("POST", "/api/shutdown") => (200, json!({"status": "shutting_down"}).to_string()),

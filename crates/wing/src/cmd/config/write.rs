@@ -17,6 +17,7 @@ use super::path::{
 };
 use super::render::json_string;
 use super::render::render_json_value;
+use crate::cmd::settings_api::SettingsSaveFailure;
 use crate::shared::doc_edit;
 use crate::shared::doc_edit::Policy;
 
@@ -134,11 +135,18 @@ pub(super) async fn execute_write<B: SettingsApi>(
             }
         }
         Err(e) => {
-            let (code, message) = api_failure(&e, http_base, "保存配置失败");
-            let stderr = match &note {
-                Some(note) => format!("{message}\n（改动未写盘：{note}）\n"),
-                None => format!("{message}\n"),
+            let code = api_failure(&e, http_base, "保存配置失败").0;
+            let message = match SettingsSaveFailure::from(&e) {
+                SettingsSaveFailure::Conflict => "配置文件已更改，请重新读取后再保存".into(),
+                SettingsSaveFailure::Rejected(reason) => format!("设置未保存：{reason}"),
+                SettingsSaveFailure::Unconfirmed(reason) => {
+                    format!("Gateway 保存未确认：{reason}。请核对磁盘文件后重试")
+                }
             };
+            let mut stderr = format!("wing config error: {message}\n");
+            if let Some(note) = note {
+                stderr.push_str(&format!("（本次请求：{note}）\n"));
+            }
             Outcome::failure(code, stderr)
         }
     }
@@ -194,24 +202,20 @@ fn render_write_text(
     }
     if let Some(reload) = &response.reload {
         if !reload.ok {
-            let action = if was_setup {
+            let action = if was_setup && !response.setup_mode_exited {
                 "检查失败项后再次保存"
             } else {
                 "检查失败项后运行 wing reload 重试"
             };
             let status = if was_setup {
-                "网关初始化失败"
+                "网关初始化中有步骤失败"
             } else {
                 "部分设置未生效"
             };
             out.push_str(&format!("⚠ {status}。{action}\n"));
             for item in reload.results.iter().filter(|item| !item.ok) {
                 out.push_str(&format!("  ✗ {}", item.name));
-                if let Some(detail) = item
-                    .detail
-                    .as_deref()
-                    .filter(|_| reload.pending_restart_paths.is_some())
-                {
+                if let Some(detail) = reload.display_detail(item) {
                     out.push_str(&format!("：{}", crate::cmd::common::single_line(detail)));
                 }
                 out.push('\n');
@@ -1240,6 +1244,7 @@ mod tests {
             ],
             restart_required: vec!["gateway.port".to_string()],
             reload: Some(ReloadResponse {
+                diagnostics_redacted: true,
                 pending_restart_paths: Some(vec!["gateway.port".into()]),
                 new_session_defaults_changed: true,
                 ok: false,

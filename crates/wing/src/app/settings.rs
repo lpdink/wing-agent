@@ -82,6 +82,23 @@ pub(super) enum GatewaySaveReport {
     },
 }
 
+impl From<crate::cmd::settings_api::SettingsSaveFailure> for GatewaySaveReport {
+    fn from(failure: crate::cmd::settings_api::SettingsSaveFailure) -> Self {
+        use crate::cmd::settings_api::SettingsSaveFailure;
+        match failure {
+            SettingsSaveFailure::Conflict => Self::Failed {
+                message: String::new(),
+                conflict: true,
+            },
+            SettingsSaveFailure::Rejected(message) => Self::Failed {
+                message,
+                conflict: false,
+            },
+            SettingsSaveFailure::Unconfirmed(message) => Self::Unconfirmed { message },
+        }
+    }
+}
+
 impl GatewaySaveReport {
     fn attempted(&self) -> bool {
         !matches!(self, Self::Skipped)
@@ -230,6 +247,7 @@ impl App {
             {
                 panel.apply_snapshot(&schema, state);
             } else {
+                panel.set_pending_restart_paths(state.pending_restart_paths.unwrap_or_default());
                 panel.on_settings_changed(&state.fingerprint);
             }
         } else if open_pending {
@@ -390,6 +408,10 @@ impl App {
     }
 
     pub(super) fn settle_gateway_save(&mut self, gateway: GatewaySaveReport) {
+        let was_setup = self
+            .settings_panel
+            .as_ref()
+            .is_some_and(SettingsPanel::setup_mode);
         let interface = self
             .settings_save
             .take()
@@ -416,7 +438,7 @@ impl App {
             GatewaySaveReport::Unconfirmed { .. } => self.settings_cache = None,
             GatewaySaveReport::Failed { .. } | GatewaySaveReport::Skipped => {}
         }
-        self.show_settings_save_notice(&interface, &gateway);
+        self.show_settings_save_notice(&interface, &gateway, was_setup);
     }
 
     /// 409（指纹冲突）：面板顶部横幅「按 R 重新载入」，**不覆盖**本地改动。
@@ -436,8 +458,9 @@ impl App {
         &mut self,
         interface: &InterfaceSaveReport,
         gateway: &GatewaySaveReport,
+        was_setup: bool,
     ) {
-        let text = save_notice_text(interface, gateway);
+        let text = save_notice_text(interface, gateway, was_setup);
         let ok = save_notice_ok(interface, gateway);
         if ok {
             self.chat.push(ChatCell::SystemMessage(text));
@@ -459,15 +482,24 @@ impl App {
 
     /// Only a masked GET can replace the cached document and its fingerprint.
     pub(super) fn note_settings_changed(&mut self, fingerprint: &str) {
-        if self
+        let cache_changed = self
             .settings_cache
             .as_ref()
-            .is_some_and(|(_, state)| state.fingerprint != fingerprint)
-        {
+            .is_some_and(|(_, state)| state.fingerprint != fingerprint);
+        if cache_changed {
             self.settings_cache = None;
         }
-        if let Some(panel) = self.settings_panel.as_mut() {
+        let panel_changed = self.settings_panel.as_mut().is_some_and(|panel| {
             panel.on_settings_changed(fingerprint);
+            panel.is_stale()
+        });
+        if cache_changed || panel_changed || self.settings_pending {
+            self.settings_fetch_id = self.settings_fetch_id.wrapping_add(1);
+            if self.settings_save.is_none()
+                && (self.settings_panel.is_some() || self.settings_pending)
+            {
+                self.push_intent(AppIntent::FetchSettings);
+            }
         }
     }
 }
@@ -480,6 +512,7 @@ impl App {
 pub(super) fn save_notice_text(
     interface: &InterfaceSaveReport,
     gateway: &GatewaySaveReport,
+    was_setup: bool,
 ) -> String {
     let mut lines = vec![save_header(interface, gateway).to_string()];
     lines.extend(interface_line(interface));
@@ -491,17 +524,20 @@ pub(super) fn save_notice_text(
         if let Some(reload) = &response.reload {
             if !reload.ok {
                 for item in reload.results.iter().filter(|item| !item.ok) {
-                    let detail = item
-                        .detail
-                        .as_deref()
-                        .map(crate::cmd::common::single_line)
-                        .filter(|_| reload.pending_restart_paths.is_some());
+                    let detail = reload
+                        .display_detail(item)
+                        .map(crate::cmd::common::single_line);
                     lines.push(match detail {
                         Some(detail) => format!("  ✗ {}：{detail}", item.name),
                         None => format!("  ✗ {}", item.name),
                     });
                 }
-                lines.push("  检查失败项后运行 wing reload 重试".into());
+                let retry = if was_setup && !response.setup_mode_exited {
+                    "检查初始化失败项后按 s 重试"
+                } else {
+                    "检查失败项后运行 wing reload 重试"
+                };
+                lines.push(format!("  {retry}"));
             }
             if reload.new_session_defaults_changed {
                 lines.push("  新会话默认设置已更新".into());
@@ -708,20 +744,37 @@ pub(super) async fn restart_gateway(
     transport: &mut Option<Transport>,
     endpoint: &mut GatewayEndpoint,
 ) {
-    // 1. 请求关闭（失败只 warn：网关可能已经自己死了，它还是在往下走）。
-    match transport.as_ref() {
-        Some(transport) => {
-            if let Err(e) = transport.http.shutdown().await {
-                tracing::warn!("gateway shutdown request failed: {e}");
-            }
-        }
-        None => {
+    let Some(current) = transport.as_ref() else {
+        app.show_toast(Toast::warning(
+            "网关未连接，无法重启",
+            Duration::from_secs(3),
+        ));
+        return;
+    };
+    match current.http.settings_status().await {
+        Ok(status) if status.valid => {}
+        Ok(_) => {
             app.show_toast(Toast::warning(
-                "网关未连接，无法重启",
-                Duration::from_secs(3),
+                "配置文件有问题。修复后再重启网关",
+                Duration::from_secs(5),
+            ));
+            app.push_intent(AppIntent::FetchSettings);
+            return;
+        }
+        Err(_) => {
+            app.show_toast(Toast::warning(
+                "无法确认磁盘配置。请重新读取文件后重试",
+                Duration::from_secs(5),
             ));
             return;
         }
+    }
+    if current.http.shutdown().await.is_err() {
+        app.show_toast(Toast::warning(
+            "网关拒绝关闭。请检查连接与鉴权",
+            Duration::from_secs(5),
+        ));
+        return;
     }
 
     // 2. 等它真的不可达（有界）。
@@ -780,7 +833,7 @@ pub(super) async fn restart_gateway(
                     // 与既有 recovery 路径同一组刷新（会话快照 + 命令表）。
                     app.push_intent(AppIntent::FetchInfo);
                     app.push_intent(AppIntent::FetchCommands);
-                    // 面板的 restart_required 该熄了：不脏时 apply_snapshot 会清掉它。
+                    // GET 读取新进程的待重启状态。
                     app.push_intent(AppIntent::FetchSettings);
                     app.needs_full_redraw = true;
                 }

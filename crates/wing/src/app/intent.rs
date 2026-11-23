@@ -68,12 +68,7 @@ pub enum FetchPayload {
     },
     /// 一次保存的 Gateway 半边回执（`POST /api/settings/set`）。
     SettingsSaved(Box<SettingsSetResponse>),
-    /// Gateway 半边失败：`conflict` 区分 409（指纹冲突）与传输 / 协议错误。
-    SettingsSaveError {
-        message: String,
-        conflict: bool,
-        unconfirmed: bool,
-    },
+    SettingsSaveError(crate::cmd::settings_api::SettingsSaveFailure),
     /// 一条粘贴图片的压缩回执（[`AppIntent::CompressClipboardImage`]）。
     ///
     /// `Err` 是给 toast 的文案（压缩器错误已格式化）。落点靠 `target` 认领：它是

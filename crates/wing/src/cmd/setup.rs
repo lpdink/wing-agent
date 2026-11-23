@@ -55,7 +55,7 @@ use wing_api_client::models::SettingsSetRequest;
 use wing_api_client::models::SettingsSetResponse;
 use wing_api_client::models::SettingsStatusResponse;
 
-use super::settings_api::SettingsApi;
+use super::settings_api::{SettingsApi, SettingsSaveFailure};
 use crate::app::transport::GatewayEndpoint;
 use crate::config::AppConfig;
 use crate::config::ThemePalette;
@@ -471,6 +471,8 @@ async fn save_once<H: SetupBackend>(
     }
 
     // Gateway 半边。
+    let was_setup = panel.setup_mode();
+    let mut apply_failed = false;
     let mut gateway_saved: Option<SettingsSetResponse> = None;
     let mut ready = false;
     if gateway_dirty {
@@ -490,16 +492,43 @@ async fn save_once<H: SetupBackend>(
                         "设置未保存：{} 个问题，见问题清单",
                         response.problems.len()
                     ));
-                } else if !ready {
-                    // 文件写了但网关没就绪（A12）：绝不放行到"没有会话能力"的启动链。
-                    let failed = response
-                        .reload
-                        .as_ref()
-                        .and_then(|r| r.results.iter().find(|item| !item.ok));
-                    parts.push(match failed {
-                        Some(item) => format!("已保存，初始化失败 · {} · 按 s 重试", item.name),
-                        None => "已保存，网关仍未就绪 · 按 s 重试".into(),
-                    });
+                } else {
+                    if let Some(reload) = response.reload.as_ref().filter(|reload| !reload.ok) {
+                        apply_failed = true;
+                        let status = if was_setup && ready {
+                            "已保存，初始化中有步骤失败"
+                        } else if was_setup {
+                            "已保存，初始化失败"
+                        } else {
+                            "已保存，部分设置未生效"
+                        };
+                        let failed = reload
+                            .results
+                            .iter()
+                            .filter(|item| !item.ok)
+                            .collect::<Vec<_>>();
+                        let mut summary = status.to_string();
+                        for item in &failed {
+                            summary.push_str(&format!(" · {}", item.name));
+                        }
+                        let action = if was_setup && !ready {
+                            "按 s 重试"
+                        } else {
+                            "检查后运行 wing reload 重试"
+                        };
+                        summary.push_str(&format!(" · {action}"));
+                        if let Some(detail) =
+                            failed.first().and_then(|item| reload.display_detail(item))
+                        {
+                            summary.push_str(&format!(
+                                " · {}",
+                                crate::cmd::common::single_line(detail)
+                            ));
+                        }
+                        parts.insert(0, summary);
+                    } else if !ready {
+                        parts.insert(0, "已保存，网关仍未就绪 · 按 s 重试".into());
+                    }
                 }
                 // 后端的非致命说明（"旧密钥没有保留"之类）必须让用户看见 ——
                 // 回执就一行，但它是这一屏唯一的出口。
@@ -517,10 +546,14 @@ async fn save_once<H: SetupBackend>(
                 }
                 gateway_saved = Some(response);
             }
-            Err(e) => parts.push(if e.is_conflict() {
-                "设置文件已更改，按 R 重新读取文件".into()
-            } else {
-                format!("Gateway 保存未确认：{e}")
+            Err(error) => parts.push(match SettingsSaveFailure::from(&error) {
+                SettingsSaveFailure::Conflict => "设置文件已更改，按 R 重新读取文件".into(),
+                SettingsSaveFailure::Rejected(reason) => {
+                    format!("Gateway 未保存：{reason}。修复后按 s 重试")
+                }
+                SettingsSaveFailure::Unconfirmed(reason) => {
+                    format!("Gateway 保存未确认：{reason}。请核对磁盘文件")
+                }
             }),
         }
     }
@@ -551,7 +584,12 @@ async fn save_once<H: SetupBackend>(
         } else {
             format!("✓ 配置就绪，正在启动…（{caveats}）")
         };
-        return (Note::ok(text), true);
+        let note = if apply_failed {
+            Note::error(text)
+        } else {
+            Note::ok(text)
+        };
+        return (note, true);
     }
     if caveats.is_empty() {
         return (Note::ok("设置已保存"), false);
@@ -1076,19 +1114,14 @@ mod tests {
 
     // ── 假后端 / 假事件源 ───────────────────────────────────────
 
-    /// 假后端的 `set` 结果（`ApiClientError` 不可 Clone，用可克隆的替身）。
-    #[derive(Clone)]
-    enum FakeSet {
-        Saved(SettingsSetResponse),
-        Failed,
-    }
-
     /// 假后端的脚本化响应 + 调用记录。
+    #[derive(Clone)]
     struct FakeBackend {
         schema: SettingsSchemaResponse,
         state: SettingsGetResponse,
         status: SettingsStatusResponse,
-        set: FakeSet,
+        set: Option<SettingsSetResponse>,
+        retry_set: Option<SettingsSetResponse>,
         interface: Option<InterfaceSource>,
         /// 让 Interface 半边的原子写失败（两半独立性测试）。
         interface_write_fails: bool,
@@ -1107,7 +1140,8 @@ mod tests {
                     problems: first_run_state().problems,
                     fingerprint: Some("fp-1".into()),
                 },
-                set: FakeSet::Saved(saved_response(true, "fp-2", true, vec![])),
+                set: Some(saved_response(true, "fp-2", true, vec![])),
+                retry_set: None,
                 interface: None,
                 interface_write_fails: false,
                 sets: RefCell::new(Vec::new()),
@@ -1141,12 +1175,18 @@ mod tests {
             &self,
             req: &SettingsSetRequest,
         ) -> Result<SettingsSetResponse, ApiClientError> {
-            self.sets.borrow_mut().push(req.clone());
-            match &self.set {
-                FakeSet::Saved(response) => Ok(response.clone()),
-                FakeSet::Failed => Err(ApiClientError::Api {
-                    status: 500,
-                    detail: "保存服务炸了".into(),
+            let mut sets = self.sets.borrow_mut();
+            sets.push(req.clone());
+            let response = if sets.len() > 1 {
+                self.retry_set.as_ref().or(self.set.as_ref())
+            } else {
+                self.set.as_ref()
+            };
+            match response {
+                Some(response) => Ok(response.clone()),
+                None => Err(ApiClientError::Api {
+                    status: 504,
+                    detail: "upstream timeout".into(),
                     body: None,
                 }),
             }
@@ -1453,7 +1493,7 @@ mod tests {
     async fn ready_falls_back_to_status_when_the_receipt_does_not_say_exited() {
         // `setup_mode_exited=false` + `status.valid=true` ⇒ 同样就绪（兜底路径）。
         let mut backend = FakeBackend::first_run();
-        backend.set = FakeSet::Saved(saved_response(true, "fp-2", false, vec![]));
+        backend.set = Some(saved_response(true, "fp-2", false, vec![]));
         backend.status = SettingsStatusResponse {
             valid: true,
             setup_mode: false,
@@ -1470,7 +1510,7 @@ mod tests {
     #[tokio::test]
     async fn a_rejected_save_stays_in_the_loop_with_fresh_problems() {
         let mut backend = FakeBackend::first_run();
-        backend.set = FakeSet::Saved(saved_response(
+        backend.set = Some(saved_response(
             false,
             "fp-1",
             false,
@@ -1496,7 +1536,7 @@ mod tests {
     async fn a_save_that_cannot_ready_the_gateway_does_not_leave_the_loop() {
         // `ok=true` 但既不 exited 且 status 仍 invalid：绝不放行走正常启动链（A12）。
         let mut backend = FakeBackend::first_run();
-        backend.set = FakeSet::Saved(saved_response(true, "fp-2", false, vec![]));
+        backend.set = Some(saved_response(true, "fp-2", false, vec![]));
         let mut config = AppConfig::default();
         let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
 
@@ -1507,28 +1547,65 @@ mod tests {
     #[tokio::test]
     async fn failed_initialization_can_retry_the_saved_document() {
         let mut backend = FakeBackend::first_run();
+        backend.state.setup_mode = true;
         let mut response = saved_response(true, "fp-2", false, vec![]);
         response.reload = Some(wing_api_client::models::ReloadResponse {
+            diagnostics_redacted: true,
             ok: false,
             results: vec![wing_api_client::models::ReloadResultItem {
                 name: "runtime".into(),
                 ok: false,
-                detail: None,
+                detail: Some("permission denied".into()),
             }],
             pending_restart_paths: None,
             new_session_defaults_changed: false,
         });
-        backend.set = FakeSet::Saved(response);
+        backend.set = Some(response);
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
+        assert_eq!(outcome, SetupOutcome::Quit);
+        let failure = screen(&terminal);
+        assert!(failure.contains("初始化失败 · runtime"), "{failure}");
+        assert!(failure.contains("permission denied"), "{failure}");
+
+        backend.sets.borrow_mut().clear();
+        backend.retry_set = Some(saved_response(true, "fp-3", true, vec![]));
         let mut events = edit_and_save("enabled");
         events.push(key(KeyCode::Char('s')));
-        let mut config = AppConfig::default();
-        let (outcome, terminal) = run(&backend, &mut config, events).await;
-        assert_eq!(outcome, SetupOutcome::Quit);
-        assert!(screen(&terminal).contains("初始化失败 · runtime"));
+        let (outcome, _) = run(&backend, &mut config, events).await;
+        assert_eq!(outcome, SetupOutcome::Ready);
         let saves = backend.sets();
         assert_eq!(saves.len(), 2);
         assert_eq!(saves[1].base.as_deref(), Some("fp-2"));
         assert_eq!(saves[1].document, saves[0].document);
+    }
+
+    #[tokio::test]
+    async fn operational_gateway_repair_reports_partial_reload_on_the_ready_frame() {
+        let mut backend = FakeBackend::first_run();
+        backend.status.valid = true;
+        let mut response = saved_response(true, "fp-2", false, vec![]);
+        response.reload = Some(wing_api_client::models::ReloadResponse {
+            diagnostics_redacted: true,
+            ok: false,
+            results: vec![wing_api_client::models::ReloadResultItem {
+                name: "provider".into(),
+                ok: false,
+                detail: None,
+            }],
+            pending_restart_paths: Some(vec![]),
+            new_session_defaults_changed: false,
+        });
+        backend.set = Some(response);
+        let (outcome, terminal) = run(
+            &backend,
+            &mut AppConfig::default(),
+            edit_and_save("enabled"),
+        )
+        .await;
+        assert_eq!(outcome, SetupOutcome::Ready);
+        let screen = screen(&terminal);
+        assert!(screen.contains("部分设置未生效 · provider"), "{screen}");
     }
 
     // ── ⑤ Ctrl+C 双击 → Quit ────────────────────────────────────
@@ -1686,12 +1763,13 @@ mod tests {
         let mut response = saved_response(true, "fp-2", true, vec![]);
         response.warnings = vec!["原配置文件无法解析，其中的密钥无法保留，请重新填写".into()];
         response.reload = Some(wing_api_client::models::ReloadResponse {
+            diagnostics_redacted: true,
             ok: true,
             results: vec![],
             pending_restart_paths: Some(vec!["gateway.port".into()]),
             new_session_defaults_changed: false,
         });
-        backend.set = FakeSet::Saved(response);
+        backend.set = Some(response);
         let mut config = AppConfig::default();
         let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
 
@@ -1710,7 +1788,7 @@ mod tests {
         let mut backend = FakeBackend::first_run();
         backend.interface = Some(interface_source("auto"));
         backend.interface_write_fails = true;
-        backend.set = FakeSet::Failed;
+        backend.set = None;
         // 先把 Interface 半边弄脏（enum 右切），再把 Gateway 半边弄脏（bool 切换）。
         let mut events = vec![key(KeyCode::Char('/'))];
         events.extend(text("preset"));
@@ -1731,7 +1809,7 @@ mod tests {
     #[tokio::test]
     async fn a_transport_failure_reports_and_stays_in_the_loop() {
         let mut backend = FakeBackend::first_run();
-        backend.set = FakeSet::Failed;
+        backend.set = None;
         let mut config = AppConfig::default();
         let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
 

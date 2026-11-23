@@ -43,8 +43,7 @@ const TABLE: &[HelpRow] = &[
     HelpRow::Key("s", "保存两边（Gateway + Interface）"),
     HelpRow::Key("/", "搜索（跨分组；Enter 保留 · Esc 恢复）"),
     HelpRow::Key("p", "问题清单（再按一次返回树）"),
-    HelpRow::Key("R", "重新载入（丢弃本地改动）"),
-    // Ctrl+R 只在有待重启的变更时（`restart_required` 非空）生效并出现在键位栏。
+    HelpRow::Key("R", "重新读取设置文件（丢弃本地改动）"),
     HelpRow::Key("Ctrl+R", "立即重启网关（有待重启的变更时）"),
     HelpRow::Key("PgUp PgDn", "翻页；Home End 跳首尾"),
     HelpRow::Key("?", "帮助（再按 ? 或 Esc 关闭）"),

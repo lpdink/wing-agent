@@ -26,7 +26,7 @@ import uvicorn
 from wing.background import BackgroundScheduler
 from wing.build_info import get_commit
 from wing.common.logger import log, setup_logger
-from wing.commands import register_prompt_commands
+from wing.commands import magic_registry, register_prompt_commands
 from wing.config import (
     AuthConfig,
     Config,
@@ -41,7 +41,13 @@ from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.request_context import get_request_context
 from wing.runtime import WingRuntime, WriteEffectResult
-from wing.system import ReloadResult, ReloadResultItem, failure_detail, record_step
+from wing.system import (
+    ReloadResult,
+    ReloadResultItem,
+    failure_detail,
+    file_load_failure,
+    record_step,
+)
 
 from .app import create_app
 from .frames import HARD_LIMIT_BYTES, Frame, build_frames
@@ -194,7 +200,7 @@ class GatewayServer:
         self._started_at = datetime.now(timezone.utc)
         if self._boot.ok:
             result = self._enter_operational(config=self._boot.config)
-            if not result.ok:
+            if self._in_setup_mode:
                 # 启动路径**必须消费**这个结果——否则「文件合法但运行时装不上」
                 # 会静默降级：boot_reason=None、problems 为空、503 说「共 0 条问题」，
                 # 而 status.valid=true（预检把用户送进正常启动链再吃一串 503）。
@@ -250,7 +256,7 @@ class GatewayServer:
         """把网关推进正常模式（六步，**幂等**）：① 配置 ② 日志级别 ③ prompt commands
         ④ 建 runtime ⑤ 逐出 job + 后台任务 ⑥ auth 锁死警告。
 
-        任一步失败 ⇒ **停在 setup mode**（``_runtime`` 与 ``_in_setup_mode`` 都不翻转），
+        核心装配失败时停在 setup mode。命令与 hook 文件允许部分加载，
         返回 ``ReloadResult(ok=False, items=[…])`` 如实报明细；文件**不回滚**——它是
         合法配置（保存事务已校验过），下次保存或重启再试。
 
@@ -291,11 +297,23 @@ class GatewayServer:
             return ReloadResult(ok=False, items=items)
 
         # ③ prompt 命令（配置里的 commands.paths）。
-        def _apply_prompt_commands() -> None:
-            register_prompt_commands(config.commands.paths)
-
-        if not record_step(items, "prompt commands", _apply_prompt_commands):
+        try:
+            magic_registry.remove_by_source("prompt")
+            command_failures = register_prompt_commands(config.commands.paths)
+        except Exception as exc:
+            items.append(
+                ReloadResultItem(
+                    name="prompt commands", ok=False, detail=failure_detail(exc)
+                )
+            )
             return ReloadResult(ok=False, items=items)
+        items.append(
+            ReloadResultItem(
+                name="prompt commands",
+                ok=not command_failures,
+                detail=file_load_failure(command_failures, "prompt command"),
+            )
+        )
 
         # ④ runtime（hooks 随之加载；providers 池按需懒建）。
         try:
@@ -308,7 +326,13 @@ class GatewayServer:
                 f"setup mode: cannot enter operational mode — {failure_detail(e)}"
             )
             return ReloadResult(ok=False, items=items)
-        items.append(ReloadResultItem(name="runtime", ok=True))
+        items.append(
+            ReloadResultItem(
+                name="runtime",
+                ok=not runtime.failed_hook_files,
+                detail=file_load_failure(runtime.failed_hook_files, "hook"),
+            )
+        )
 
         # ⑤ 逐出 job + 归档 job + 后台任务（lifespan 的 startup 已跑过时补启；幂等）。
         # 这里必须直调 runtime.wake.start()，不能写 self._start_wake()：后者在
@@ -329,14 +353,14 @@ class GatewayServer:
         detail = self._warn_auth_lockout(config.gateway.auth)
         items.append(ReloadResultItem(name="auth", ok=True, detail=detail))
 
-        # 全部成功：同一个同步块里原子翻转（请求处理之间看不到中间态）。
+        # 扩展文件允许部分加载。核心装配完成后切换到正常模式。
         self._running_schedules = self._schedule_settings(config)
         self._runtime = runtime
         self._in_setup_mode = False
         log.info(
             "setup mode exited: gateway is operational (config reloaded from disk)"
         )
-        return ReloadResult(ok=True, items=items)
+        return ReloadResult(ok=all(item.ok for item in items), items=items)
 
     @staticmethod
     def _schedule_settings(config: Config) -> dict[str, float]:

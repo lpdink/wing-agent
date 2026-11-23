@@ -606,14 +606,7 @@ pub async fn execute_intent(
                     tokio::spawn(async move {
                         let payload = match http.settings_set(&request).await {
                             Ok(response) => FetchPayload::SettingsSaved(Box::new(response)),
-                            Err(e) => FetchPayload::SettingsSaveError {
-                                message: e.to_string(),
-                                conflict: e.is_conflict(),
-                                unconfirmed: !matches!(
-                                    e,
-                                    wing_api_client::ApiClientError::Api { .. }
-                                ),
-                            },
+                            Err(e) => FetchPayload::SettingsSaveError((&e).into()),
                         };
                         let _ = tx
                             .send(FetchResult {
