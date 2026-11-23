@@ -49,14 +49,16 @@ async fn reload_inner(host: Option<String>, port: Option<u16>) -> Result<ReloadR
     let configured = super::backend_config::read_backend_gateway_config();
     let host = host.unwrap_or(configured.host);
     let port = port.unwrap_or(configured.port);
-    let http = common::create_api_client(&host, port)?;
-    if !matches!(http.health().await, Ok(health) if health.service == "wing-gateway") {
+    let discovery = wing_api_client::GatewayClient::new(format!("http://{host}:{port}"), None)?;
+    if !matches!(discovery.health().await, Ok(health) if health.service == "wing-gateway") {
         anyhow::bail!(
             "no running Wing gateway found at {host}:{port}. Run `wing start` to start one, \
              or use `wing reload --host <old-host> --port <old-port>` if its address changed."
         );
     }
-    Ok(http.reload_system().await?)
+    Ok(common::create_api_client(&host, port)?
+        .reload_system()
+        .await?)
 }
 
 /// Render the per-item report, in the response's own order (the name order is
@@ -64,7 +66,7 @@ async fn reload_inner(host: Option<String>, port: Option<u16>) -> Result<ReloadR
 fn format_reload(resp: &ReloadResponse) -> String {
     let mut text = String::new();
     text.push_str(if resp.ok {
-        "reload: ok (running gateway re-read config.yaml)\n"
+        "reload: ok\n"
     } else {
         "reload: FAILED\n"
     });
@@ -76,10 +78,7 @@ fn format_reload(resp: &ReloadResponse) -> String {
         .unwrap_or(0)
         .min(24);
     for item in &resp.results {
-        let detail = item
-            .detail
-            .as_deref()
-            .filter(|_| item.ok || resp.pending_restart_paths.is_some());
+        let detail = resp.display_detail(item);
         let status = if item.ok { "ok" } else { "FAIL" };
         text.push_str(&format!(
             "  {:<4} {:<name_width$} {}\n",
@@ -136,6 +135,7 @@ mod tests {
     #[test]
     fn reload_report_keeps_the_contract_order() {
         let resp = ReloadResponse {
+            diagnostics_redacted: true,
             pending_restart_paths: None,
             new_session_defaults_changed: false,
             ok: true,
@@ -168,15 +168,13 @@ mod tests {
             positions.windows(2).all(|w| w[0] < w[1]),
             "顺序错了：{positions:?}\n{text}"
         );
-        assert!(
-            text.starts_with("reload: ok (running gateway re-read config.yaml)\n"),
-            "{text}"
-        );
+        assert!(text.starts_with("reload: ok\n"), "{text}");
     }
 
     #[test]
     fn reload_report_shows_failures_and_details() {
         let resp = ReloadResponse {
+            diagnostics_redacted: true,
             pending_restart_paths: Some(vec![]),
             new_session_defaults_changed: false,
             ok: false,
@@ -192,6 +190,7 @@ mod tests {
 
         // 单项失败（非 config）继续——逐项如实打印。
         let resp = ReloadResponse {
+            diagnostics_redacted: true,
             pending_restart_paths: Some(vec![]),
             new_session_defaults_changed: false,
             ok: false,
@@ -225,14 +224,12 @@ mod tests {
     #[test]
     fn reload_report_with_no_items_is_still_readable() {
         let resp = ReloadResponse {
+            diagnostics_redacted: true,
             pending_restart_paths: None,
             new_session_defaults_changed: false,
             ok: true,
             results: vec![],
         };
-        assert_eq!(
-            format_reload(&resp),
-            "reload: ok (running gateway re-read config.yaml)\n  (no items reported)\n"
-        );
+        assert_eq!(format_reload(&resp), "reload: ok\n  (no items reported)\n");
     }
 }

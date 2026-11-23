@@ -164,6 +164,10 @@ class SettingsConflictError(RuntimeError):
         self.fingerprint = fingerprint
 
 
+class SettingsWriteError(OSError):
+    """The configuration file could not be replaced."""
+
+
 @dataclass
 class SettingsApplyResult:
     """``apply_settings`` 的回执（领域形状；wire 投影见 ``gateway/projection.py``）。
@@ -267,7 +271,7 @@ class WingRuntime:
 
         install_audit()
 
-        load_hooks(get_config().hooks)
+        self.failed_hook_files = load_hooks(get_config().hooks)
         # TODO(future): config 驱动的 backend 选择（sessions.backend / dsn）——
         # SQL 后端（SQLite/PG/Supabase）到来时的扩展点。
         stores: dict[str, SessionStore] = {
@@ -954,17 +958,19 @@ class WingRuntime:
         # 连读不出文档的坏文件也逐字留证（修复现场的唯一凭据）。
         config_path = get_config_path()
         backup_path: str | None = None
-        if config_path.exists():
-            backup = config_path.with_name(f"{config_path.name}.bak")
-            atomic_write_bytes(backup, config_path.read_bytes())
-            backup_path = str(backup)
+        try:
+            if config_path.exists():
+                backup = config_path.with_name(f"{config_path.name}.bak")
+                atomic_write_bytes(backup, config_path.read_bytes())
+                backup_path = str(backup)
 
-        # ⑥ 规范形 YAML（未知键取自磁盘文档并原样写回；读不出文档时没有未知键可保留）
-        #    + 原子写。
-        text = emit_config_yaml(incoming.data, catalog, extra=current_doc.extra)
-        encoded = text.encode("utf-8")
-        new_fp = ConfigFingerprint(value=hashlib.sha256(encoded).hexdigest())
-        atomic_write_bytes(config_path, encoded)
+            # ⑥ 未知键随文档写回。回执的指纹与应用使用同一份已写入字节。
+            text = emit_config_yaml(incoming.data, catalog, extra=current_doc.extra)
+            encoded = text.encode("utf-8")
+            new_fp = ConfigFingerprint(value=hashlib.sha256(encoded).hexdigest())
+            atomic_write_bytes(config_path, encoded)
+        except OSError as exc:
+            raise SettingsWriteError(exc.errno, exc.strerror) from exc
 
         # ⑦ 生效（失败不回滚——配置本身合法，回执逐项报告）。
         effect = await self.post_write_effect(text)

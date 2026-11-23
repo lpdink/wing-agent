@@ -484,14 +484,15 @@ class TestSettingsSet:
         values, fingerprint = _get_doc(client)
         values["images"]["max_bytes"] = 33
         with patch(
-            "wing.runtime.atomic_write_text",
-            side_effect=OSError("disk full"),
+            "wing.runtime.atomic_write_bytes",
+            side_effect=OSError(28, "No space left on device"),
         ):
             resp = client.post(
                 "/api/settings/set", json={"base": fingerprint, "document": values}
             )
         assert resp.status_code == 500, resp.text
-        assert resp.json()["error"] == "internal_error"
+        assert resp.json()["error"] == "settings_write_failed"
+        assert resp.json()["detail"] == "No space left on device"
         assert _sha256(config_path) == before
 
     def test_set_requires_document(self, gateway):

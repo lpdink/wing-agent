@@ -34,7 +34,7 @@ mod release;
 pub mod reload;
 mod restart;
 pub mod run;
-mod settings_api;
+pub(crate) mod settings_api;
 pub(crate) mod setup;
 pub(crate) mod start;
 mod status;
@@ -1113,35 +1113,27 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
     // Load user configuration (needed early for api_key). `mut`: setup 阶段会预览
     // Interface 根（颜色等改动当场生效），随后原样交给 run_app。
     let mut config = AppConfig::load();
-    let mut api_key = config
-        .api_key
-        .as_deref()
-        .filter(|k| !k.is_empty())
-        .map(|k| k.to_string());
+    let mut endpoint = crate::app::transport::GatewayEndpoint {
+        ws_url: format!("ws://{host}:{port}/ws"),
+        http_base: format!("http://{host}:{port}"),
+        api_key: config.api_key.clone().filter(|key| !key.is_empty()),
+    };
 
-    // Build URLs from host:port — no string replacement needed.
-    let ws_url = format!("ws://{host}:{port}/ws");
-    let http_base = format!("http://{host}:{port}");
-
-    tracing::info!("wing starting, gateway: {ws_url}");
+    tracing::info!("wing starting, gateway: {}", endpoint.ws_url);
 
     // Get current working directory as workspace.
     let workspace = std::env::current_dir()
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    let mut http = GatewayApiClient::new(http_base.clone(), api_key.as_deref())
+    // HTTP client（预检与后面的建会话共用同一个；构造位置就在预检之前）。
+    let mut http = GatewayApiClient::new(endpoint.http_base.clone(), endpoint.api_key.as_deref())
         .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {e}"))?;
 
     // ── 预检：配置可用吗？（最便宜的一次调用；不要把它与"网关不可达"混为一谈）──
     match setup::preflight_config(&http).await {
         setup::Preflight::Ready => {}
         setup::Preflight::Unusable { .. } => {
-            let endpoint = crate::app::transport::GatewayEndpoint {
-                ws_url: ws_url.clone(),
-                http_base: http_base.clone(),
-                api_key: api_key.clone(),
-            };
             // 向导是**同进程两段 TUI** 的第一段：它开进程级会话（接驳必须早于本进程任何
             // 一次 crossterm 事件源创建）。探针判定在这里收束——向导自己的事件循环
             // （`TerminalEvents`）马上要 poll，而事件源注册之后 fd 0 就不能再换（阴性拆接驳
@@ -1175,32 +1167,29 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
                 }
                 Ok(setup::SetupOutcome::Ready) => {
                     screen?;
-                    let saved_key = config.api_key.as_ref().filter(|key| !key.is_empty());
-                    if saved_key != api_key.as_ref() {
-                        http =
-                            GatewayApiClient::new(http_base.clone(), saved_key.map(String::as_str))
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Failed to create HTTP client: {e}")
-                                })?;
-                        api_key = saved_key.cloned();
-                    }
+                    endpoint.api_key = config.api_key.clone().filter(|key| !key.is_empty());
+                    http = GatewayApiClient::new(
+                        endpoint.http_base.clone(),
+                        endpoint.api_key.as_deref(),
+                    )?;
                 }
             }
         }
         setup::Preflight::Failed(e) => {
-            anyhow::bail!("{}", setup::preflight_failure_message(&http_base, &e));
+            anyhow::bail!(
+                "{}",
+                setup::preflight_failure_message(&endpoint.http_base, &e)
+            );
         }
     }
 
     // 1. WS connect (get client_id).
-    let gateway = GatewayClient::connect(&ws_url, api_key.as_deref())
+    let gateway = GatewayClient::connect(&endpoint.ws_url, endpoint.api_key.as_deref())
         .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to connect to gateway at {ws_url}: {e}\n\
-                 Make sure the gateway is running: wing start"
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!(
+            "Failed to connect to gateway at {}: {e}\nMake sure the gateway is running: wing start",
+            endpoint.ws_url
+        ))?;
 
     let client_id = gateway.client_id().to_string();
     tracing::info!(client_id = %client_id, "WS connected");
@@ -1245,11 +1234,7 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
         &mut terminal,
         transport,
         session_id,
-        crate::app::transport::GatewayEndpoint {
-            ws_url,
-            http_base: http_base.clone(),
-            api_key: api_key.clone(),
-        },
+        endpoint.clone(),
         config,
         workspace,
     )
@@ -1267,7 +1252,12 @@ async fn run_tui(host: &str, port: u16) -> Result<()> {
             // 终端恢复**之后**取一次账本并打印退出摘要（仅 TUI 形态；stdio /
             // acp 的 stdout 是协议通道，绝不到这里）。取数有界（2s）——挂在
             // 网关上的请求不该让用户对着备用屏等，失败即降级。
-            exit_summary::print_exit_summary(&http_base, api_key.as_deref(), &exit).await;
+            exit_summary::print_exit_summary(
+                &endpoint.http_base,
+                endpoint.api_key.as_deref(),
+                &exit,
+            )
+            .await;
             tracing::info!("wing exited cleanly");
             Ok(())
         }

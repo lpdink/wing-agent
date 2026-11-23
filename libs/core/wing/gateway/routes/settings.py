@@ -21,7 +21,7 @@ Route handler 只做：读盘 → 调 runtime（仅 set）→ 构造响应。
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 from starlette.responses import JSONResponse
 
 from wing.config import (
@@ -55,7 +55,7 @@ from wing.gateway.projection import (
 )
 from wing.gateway.routes._common import get_server
 from wing.gateway.routes.health import _get_version
-from wing.runtime import SettingsConflictError
+from wing.runtime import SettingsConflictError, SettingsWriteError
 
 from typing import TYPE_CHECKING
 
@@ -222,8 +222,10 @@ async def settings_set(
             )
         except SettingsConflictError as exc:
             return error_response(409, str(exc), error="conflict")
-        except OSError as exc:
-            raise HTTPException(
-                status_code=500, detail=f"failed to write config.yaml: {exc.strerror}"
-            ) from exc
+        except SettingsWriteError as exc:
+            return error_response(
+                500,
+                exc.strerror or "Unable to write config.yaml",
+                error="settings_write_failed",
+            )
         return build_settings_apply_response(result, server.pending_restart_paths())

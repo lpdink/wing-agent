@@ -856,7 +856,7 @@ mod tests {
         )
         .await;
         assert_eq!(code, 3);
-        assert!(stderr.contains("配置已被其它客户端修改"), "{stderr}");
+        assert!(stderr.contains("配置文件已更改"), "{stderr}");
 
         // 连不上 → 2。
         let mut down = FakeBackend::healthy(catalog(), document());
@@ -873,9 +873,10 @@ mod tests {
         )
         .await;
         assert_eq!(code, 2);
-        assert!(stderr.contains("wing start"), "{stderr}");
+        assert!(stderr.contains("保存未确认"), "{stderr}");
+        assert!(!stderr.contains("wing start"), "{stderr}");
 
-        // 500 → 1（原文）。
+        // 没有网关写盘确认的通用 500 → 1。
         let mut broken = FakeBackend::healthy(catalog(), document());
         broken.set = Err(FakeError::Server);
         let (code, _, stderr) = run_cmd(
@@ -888,7 +889,7 @@ mod tests {
         )
         .await;
         assert_eq!(code, 1);
-        assert!(stderr.contains("boom"), "{stderr}");
+        assert!(stderr.contains("保存未确认：HTTP 500"), "{stderr}");
 
         // ok=false → 1，且回执（problems）走 stdout。
         let mut refused = FakeBackend::healthy(catalog(), document());

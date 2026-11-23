@@ -668,17 +668,8 @@ impl App {
                 self.settle_gateway_save(crate::app::settings::GatewaySaveReport::Saved(*response));
                 return;
             }
-            FetchPayload::SettingsSaveError {
-                message,
-                conflict,
-                unconfirmed,
-            } => {
-                use crate::app::settings::GatewaySaveReport;
-                self.settle_gateway_save(if unconfirmed {
-                    GatewaySaveReport::Unconfirmed { message }
-                } else {
-                    GatewaySaveReport::Failed { message, conflict }
-                });
+            FetchPayload::SettingsSaveError(failure) => {
+                self.settle_gateway_save(failure.into());
                 return;
             }
             payload => payload,
@@ -889,7 +880,7 @@ impl App {
             | FetchPayload::Settings { .. }
             | FetchPayload::SettingsFetchError { .. }
             | FetchPayload::SettingsSaved(_)
-            | FetchPayload::SettingsSaveError { .. } => {}
+            | FetchPayload::SettingsSaveError(_) => {}
         }
     }
 }

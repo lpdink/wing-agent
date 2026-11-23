@@ -102,6 +102,8 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 `/api/system/reload` 和保存回执中的 `reload` 保持 `ok`、`results` 及逐项顺序。`pending_restart_paths`
 列出已加载并需要重启的设置路径，空数组表示没有待重启项，缺少字段或 `null` 表示状态未知。
 无效文件保留上一份已加载配置的待重启状态。`new_session_defaults_changed` 表示这次重载改变了新会话的默认值。
+`diagnostics_redacted: true` 表示网关返回的 `detail` 可供显示。初始化允许个别 hook 或命令文件加载失败，
+这时 `reload.ok` 为假，`setup_mode_exited` 仍为真。
 
 > `/api/models` 的响应形状（对象数组；`model_details` 平行数组已不存在）：
 
@@ -136,7 +138,7 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 > **校验失败走 HTTP 200 + `ok=false` + `problems`（不是 4xx）**——刻意的取舍，别"修好"它：
 > 请求本身完全合法，是**用户填的内容**不合法；把它当业务结果返回，前端保存路径永远拿到同一个响应类型
 > （`ok` 决定成败，`problems` 逐条驱动标红）。HTTP 错误码只留给**协议级**失败：**409**（指纹不匹配，
-> `error: "conflict"`，`detail` 带当前指纹）、**401 / 403**（鉴权）、**500**（写盘 `OSError`）。
+> `error: "conflict"`，`detail` 带当前指纹）、**401 / 403**（鉴权）、**500 `settings_write_failed`**（磁盘写入失败，配置文件未被替换）。
 >
 > 其他语义：**全有或全无**（有 problem 时文件一个字节都不写）；写前把现有文件字节级复制到
 > `config.yaml.bak`（覆盖式，只留最近一份）；`changed` 是相对保存前的变更路径（列表按下标 diff，

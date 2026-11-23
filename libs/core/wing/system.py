@@ -89,6 +89,12 @@ def record_step(
 # ============================================================
 
 
+def file_load_failure(failed: int, kind: str) -> str | None:
+    if failed:
+        return f"{failed} {kind} file(s) need attention; check the gateway log"
+    return None
+
+
 def _new_session_defaults(sm: SessionManager, config: Config) -> tuple[object, ...]:
     template = sm.template_manager.default
     return (
@@ -136,22 +142,14 @@ async def reload_system(
 
     def _reload_hooks() -> str | None:
         hooks.clear()
-        failed = load_hooks(config.hooks)
-        return (
-            f"{failed} hook file(s) failed to load; check the gateway log"
-            if failed
-            else None
-        )
+        return file_load_failure(load_hooks(config.hooks), "hook")
 
     record_step(items, "hooks", _reload_hooks)
 
     def _reload_commands() -> str | None:
         magic_registry.remove_by_source("prompt")
-        failed = register_prompt_commands(config.commands.paths)
-        return (
-            f"{failed} prompt command file(s) need attention; check the gateway log"
-            if failed
-            else None
+        return file_load_failure(
+            register_prompt_commands(config.commands.paths), "prompt command"
         )
 
     record_step(items, "prompt commands", _reload_commands)

@@ -191,6 +191,7 @@ def build_reload_response(
     """
     return ReloadResponse(
         ok=result.ok,
+        diagnostics_redacted=True,
         pending_restart_paths=pending_restart_paths,
         new_session_defaults_changed=result.new_session_defaults_changed,
         results=[

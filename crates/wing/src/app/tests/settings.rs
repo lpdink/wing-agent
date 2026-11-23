@@ -1003,6 +1003,7 @@ fn a_full_save_reports_both_sides_in_one_notice() {
     response.changed = vec!["gateway.port".into(), "gateway.auth.enabled".into()];
     response.restart_required = vec!["gateway.port".into()];
     response.reload = Some(wing_api_client::models::ReloadResponse {
+        diagnostics_redacted: true,
         pending_restart_paths: Some(vec!["gateway.port".into()]),
         new_session_defaults_changed: true,
         ok: true,
@@ -1163,7 +1164,7 @@ fn an_interface_only_save_closes_the_receipt_without_a_gateway_line() {
         path: "/home/u/.wing/tui/config.yaml".into(),
         changed: 2,
     };
-    let text = save_notice_text(&interface, &GatewaySaveReport::Skipped);
+    let text = save_notice_text(&interface, &GatewaySaveReport::Skipped, false);
     assert!(text.starts_with("设置已保存"), "{text}");
     assert!(text.contains("✓ Interface"), "{text}");
     assert!(!text.contains("Gateway"), "{text}");
@@ -1299,6 +1300,67 @@ fn a_settings_changed_with_the_panel_closed_drops_the_cache() {
         app.settings_cache.is_none(),
         "关着时丢缓存：旧文档 + 新指纹的 base 会造成丢失更新"
     );
+}
+
+#[test]
+fn a_change_event_retires_an_older_fetch_without_overwriting_the_draft() {
+    use crate::app::intent::{FetchPayload, FetchResult};
+
+    for dirty in [false, true] {
+        let mut app = app_with_settings_panel();
+        if dirty {
+            goto(&mut app, "enabled");
+            press(&mut app, KeyCode::Enter);
+            assert!(panel(&app).dirty_count() > 0);
+        }
+        let original_id = app.settings_fetch_id;
+        app.note_settings_changed("fp-2");
+        assert!(panel(&app).is_stale());
+        assert!(matches!(
+            app.drain_intents().as_slice(),
+            [AppIntent::FetchSettings]
+        ));
+
+        let fetch = |app: &mut App, id, fingerprint| {
+            app.handle_fetch_result(FetchResult {
+                session_id: app.session_id.clone(),
+                payload: FetchPayload::Settings {
+                    id,
+                    schema: Box::new(gateway_schema()),
+                    state: Box::new(gateway_state(sample_values(), fingerprint)),
+                },
+            });
+        };
+        fetch(&mut app, original_id, "fp-1");
+        assert!(app.settings_cache.is_none());
+        assert!(panel(&app).is_stale());
+        let new_id = app.settings_fetch_id;
+        fetch(&mut app, new_id, "fp-2");
+        assert_eq!(panel(&app).is_stale(), dirty);
+        assert_eq!(
+            panel(&app).fingerprint(),
+            if dirty { "fp-1" } else { "fp-2" }
+        );
+    }
+}
+
+#[test]
+fn invalid_disk_keeps_the_restart_debt_and_disables_ctrl_r() {
+    let mut app = app_with_settings_panel();
+    let mut invalid = gateway_state(sample_values(), "fp-2");
+    invalid.pending_restart_paths = Some(vec!["gateway.port".into()]);
+    invalid.problems.push(SettingProblem {
+        path: None,
+        kind: "invalid_value".into(),
+        message: "bad YAML".into(),
+        hint: None,
+    });
+    app.handle_settings_fetch(gateway_schema(), invalid.clone());
+    assert_eq!(panel(&app).restart_required(), &["gateway.port"]);
+    assert!(!panel(&app).can_restart_gateway());
+    invalid.problems.clear();
+    app.handle_settings_fetch(gateway_schema(), invalid);
+    assert!(panel(&app).can_restart_gateway());
 }
 
 // ── 8. 打开 / 刷新 / 重载的三条落地口径 ─────────────────────
@@ -1520,6 +1582,7 @@ fn persisted_with_failed_application_warns_above_the_open_panel() {
     let mut app = app_with_settings_panel();
     let mut response = settings_response(true, "fp-2", vec![]);
     response.reload = Some(wing_api_client::models::ReloadResponse {
+        diagnostics_redacted: true,
         pending_restart_paths: Some(vec![]),
         new_session_defaults_changed: false,
         ok: false,

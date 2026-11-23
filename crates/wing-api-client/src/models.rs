@@ -522,6 +522,17 @@ pub struct ReloadResponse {
     pub pending_restart_paths: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub new_session_defaults_changed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagnostics_redacted: bool,
+}
+
+impl ReloadResponse {
+    /// Older gateways can include raw configuration values in failure text.
+    pub fn display_detail<'a>(&self, item: &'a ReloadResultItem) -> Option<&'a str> {
+        (self.diagnostics_redacted || item.ok)
+            .then_some(item.detail.as_deref())
+            .flatten()
+    }
 }
 
 /// 单个可分叉/回退的消息节点信息。

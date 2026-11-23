@@ -669,7 +669,7 @@ impl SettingsPanel {
         self.stale
     }
 
-    /// 上次保存回执里的 `restart_required`（08 画「按 Ctrl+R 立即重启」）。
+    /// 当前运行网关报告的待重启路径。
     pub fn restart_required(&self) -> &[String] {
         &self.restart_required
     }
@@ -681,6 +681,17 @@ impl SettingsPanel {
     pub(crate) fn saved_interface(&self) -> Option<&Value> {
         self.interface_catalog.as_ref()?;
         Some(self.doc.baseline(Root::Interface))
+    }
+
+    pub fn set_pending_restart_paths(&mut self, paths: Vec<String>) {
+        self.restart_required = paths;
+    }
+
+    pub fn can_restart_gateway(&self) -> bool {
+        !self.restart_required.is_empty()
+            && !self.setup_mode
+            && !self.stale
+            && self.backend_problems.is_empty()
     }
 
     pub fn has_interface(&self) -> bool {
@@ -726,7 +737,7 @@ impl SettingsPanel {
         if self.stale {
             parts.push("R 读取磁盘");
         }
-        if !self.restart_required.is_empty() && !self.setup_mode {
+        if self.can_restart_gateway() {
             parts.push("Ctrl+R 重启网关");
         }
         parts.push("/ 搜索 · ? 帮助");
@@ -1722,7 +1733,7 @@ impl SettingsPanel {
     /// `Ctrl+R`：只在网关报告待重启路径时接受。
     /// 没有 → 无操作 —— 键位栏同样不显示它，免得教用户按一个没有意义的键。
     fn restart_action(&mut self) -> SettingsAction {
-        if self.restart_required.is_empty() {
+        if !self.can_restart_gateway() {
             return SettingsAction::None;
         }
         self.discard_then(DiscardIntent::Restart)

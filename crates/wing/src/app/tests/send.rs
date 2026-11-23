@@ -242,6 +242,35 @@ impl FakeGateway {
     }
 }
 
+#[tokio::test]
+async fn gateway_restart_checks_disk_before_posting_shutdown() {
+    for (status, shutdown_expected) in [
+        (r#"{"valid":false,"setup_mode":false}"#, false),
+        (r#"{"valid":true,"setup_mode":false}"#, true),
+    ] {
+        let server = FakeGateway::start_with_replies(HashMap::from([
+            ("/api/settings/status", (200, status)),
+            ("/api/shutdown", (401, r#"{"error":"unauthorized"}"#)),
+        ]))
+        .await;
+        let mut endpoint = server.endpoint();
+        let mut transport = Some(
+            crate::app::transport::connect_transport(&endpoint)
+                .await
+                .unwrap(),
+        );
+        let mut app = super::support::test_app();
+        crate::app::settings::restart_gateway(&mut app, &mut transport, &mut endpoint).await;
+        let requests = server.session_requests.lock().unwrap();
+        assert_eq!(requests[0].0, "/api/settings/status");
+        assert_eq!(
+            requests.iter().any(|request| request.0 == "/api/shutdown"),
+            shutdown_expected
+        );
+        assert!(transport.is_some());
+    }
+}
+
 fn upload_reply(route: &UploadRoute, seen: usize, size: usize) -> (u16, String) {
     let id = match route {
         UploadRoute::FailAfter {

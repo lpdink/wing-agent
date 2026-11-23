@@ -28,6 +28,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -385,3 +387,60 @@ async def test_syntax_error_file_repairs_through_the_api(probe: Probe) -> None:
         assert request.context().messages[-1].content == "back?", request.describe()
     finally:
         await http.close()
+
+
+@pytest.mark.probe_env(connect=False, config_text=BROKEN_CONFIG)
+@pytest.mark.asyncio
+async def test_setup_reports_partial_extension_failure_and_still_serves(
+    probe: Probe, tmp_path: Path
+) -> None:
+    marker = "probe-fake-value-in-failed-extension"
+    broken_hook = tmp_path / "broken.py"
+    broken_hook.write_text(f"raise RuntimeError({marker!r})", encoding="utf-8")
+    hook_loaded = tmp_path / "hook-loaded"
+    good_hook = tmp_path / "working.py"
+    good_hook.write_text(
+        f"from pathlib import Path\nPath({str(hook_loaded)!r}).touch()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "broken.md").write_text(
+        f"---\ndescription: {marker}\n---\n", encoding="utf-8"
+    )
+    (tmp_path / "working.md").write_text(
+        "---\nname: setup-command\n---\nReady.\n", encoding="utf-8"
+    )
+
+    http = DriverHttp(probe.env.gateway_url)
+    async with http:
+        before = await http.request("GET", "/api/settings/get")
+        config = before["values"]
+        config["providers"][0].update(
+            protocol="openai", base_url=probe.env.provider.base_url
+        )
+        config["agents"][0]["model"] = SETUP_MODEL
+        config["hooks"] = [str(tmp_path / "*.py")]
+        config["commands"] = {"paths": [str(tmp_path / "*.md")]}
+        receipt = await http.request(
+            "POST",
+            "/api/settings/set",
+            body={"base": before["fingerprint"], "document": config},
+        )
+        assert receipt["ok"] and receipt["setup_mode_exited"], receipt
+        reload = receipt["reload"]
+        assert not reload["ok"] and reload["diagnostics_redacted"], reload
+        assert [step["name"] for step in reload["results"]] == SETUP_RELOAD_ITEMS
+        failures = {
+            step["name"]: step["detail"] for step in reload["results"] if not step["ok"]
+        }
+        assert set(failures) == {"prompt commands", "runtime"}, failures
+        assert "1 hook file" in failures["runtime"]
+        assert "1 prompt command file" in failures["prompt commands"]
+        assert marker not in str(receipt)
+        assert hook_loaded.exists()
+        assert "setup-command" in str(await http.request("GET", "/api/commands"))
+        assert (await http.request("GET", "/api/settings/status"))["valid"]
+
+    probe.register(SETUP_MODEL, Turn.of(text="operational after partial activation"))
+    await probe.connect_driver()
+    session = await probe.session(model=SETUP_MODEL)
+    assert (await session.chat("still serves")).data["subtype"] == "success"
