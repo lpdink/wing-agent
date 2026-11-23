@@ -187,6 +187,24 @@ impl CommandSpec {
     }
 }
 
+const MACOS_PLAIN_TEXT: &str = r#"
+ObjC.import('AppKit');
+const text = ObjC.unwrap($.NSPasteboard.generalPasteboard.stringForType($.NSPasteboardTypeString));
+if (typeof text === 'string') {
+    $.NSFileHandle.fileHandleWithStandardOutput.writeData($(text).dataUsingEncoding($.NSUTF8StringEncoding));
+}
+"#;
+
+fn macos_text_spec(mode: PasteMode) -> CommandSpec {
+    match mode {
+        PasteMode::TextOnly => CommandSpec::stdout(
+            "/usr/bin/osascript",
+            &["-l", "JavaScript", "-e", MACOS_PLAIN_TEXT],
+        ),
+        PasteMode::TextOrImage => CommandSpec::stdout("/usr/bin/pbpaste", &[]),
+    }
+}
+
 /// `osascript`：让 AppKit 把剪贴板的 PNG 表示写进 `path`。
 ///
 /// AppKit 在这个转换里会把 TIFF-only 的剪贴板（macOS 截图的规范表示）转成
@@ -288,12 +306,18 @@ impl LinuxImageTool {
 }
 
 /// Linux 的文本读取命令，优先级：Wayland → X11（xclip → xsel）。
-fn linux_text_specs() -> Vec<CommandSpec> {
-    vec![
-        CommandSpec::stdout("wl-paste", &["--no-newline"]),
+fn linux_text_specs(mode: PasteMode) -> Vec<CommandSpec> {
+    let mut specs = match mode {
+        PasteMode::TextOnly => ["text/plain;charset=utf-8", "text/plain"]
+            .map(|mime| CommandSpec::stdout("wl-paste", &["--no-newline", "--type", mime]))
+            .to_vec(),
+        PasteMode::TextOrImage => vec![CommandSpec::stdout("wl-paste", &["--no-newline"])],
+    };
+    specs.extend([
         CommandSpec::stdout("xclip", &["-selection", "clipboard", "-o"]),
         CommandSpec::stdout("xsel", &["--clipboard", "--output"]),
-    ]
+    ]);
+    specs
 }
 
 /// Runs one clipboard reader. Injected so the candidate order, the
@@ -528,7 +552,7 @@ fn read_macos(runner: &impl CommandRunner, mode: PasteMode) -> Result<PasteOutco
             Err(e) => failure = Some(e),
         }
     }
-    match read_text(runner, &CommandSpec::stdout("/usr/bin/pbpaste", &[])) {
+    match read_text(runner, &macos_text_spec(mode)) {
         Ok(Some(text)) => return Ok(PasteOutcome::Text(text)),
         Ok(None) => {}
         Err(e) => failure = failure.or(Some(e)),
@@ -577,7 +601,7 @@ fn read_linux(runner: &impl CommandRunner, mode: PasteMode) -> Result<PasteOutco
             Err(e) => failure = Some(e),
         }
     }
-    match read_linux_text(runner) {
+    match read_linux_text(runner, mode) {
         Ok(Some(text)) => return Ok(PasteOutcome::Text(text)),
         Ok(None) => {}
         Err(e) => failure = failure.or(Some(e)),
@@ -644,9 +668,12 @@ fn image_via_linux_tool(
 /// 文本：`wl-paste` → `xclip` → `xsel`，第一个跑成功的命令是权威的
 /// （它说没有文本就是没有，不再问下一个工具）；全部只是普通失败时收场也是
 /// 「没有文本」（空剪贴板在三个工具上都是一次普通失败），只有缺命令 / 超时才上报。
-fn read_linux_text(runner: &impl CommandRunner) -> Result<Option<String>, PasteFailure> {
+fn read_linux_text(
+    runner: &impl CommandRunner,
+    mode: PasteMode,
+) -> Result<Option<String>, PasteFailure> {
     let mut failure: Option<PasteFailure> = None;
-    for spec in linux_text_specs() {
+    for spec in linux_text_specs(mode) {
         match read_text(runner, &spec) {
             Ok(found) => return Ok(found),
             // 超限是硬拒绝（与图片链 `read_linux_image` 对齐）：后面的工具
@@ -843,22 +870,48 @@ mod tests {
     }
 
     #[test]
-    fn settings_text_only_reads_skip_all_image_probes() {
-        for (platform, program) in [
-            (Platform::Macos, "/usr/bin/pbpaste"),
-            (Platform::Linux, "wl-paste"),
-        ] {
-            let runner = FakeRunner::new(move |spec| {
-                assert_eq!(spec.program, program);
-                assert!(!spec.args.iter().any(|arg| arg == "--list-types"));
-                assert!(spec.image_file.is_none());
-                Ok(b"fixture-text\r\n".to_vec())
-            });
-            assert_eq!(
-                read_from_clipboard(&runner, platform, false, PasteMode::TextOnly),
-                Ok(PasteOutcome::Text("fixture-text\r\n".into()))
-            );
-            assert_eq!(runner.called(), [program]);
+    fn settings_readers_request_plain_text_from_mixed_or_non_text_clipboards() {
+        for platform in [Platform::Macos, Platform::Linux] {
+            for (other_type, plain_mime) in [
+                ("image/png", None),
+                ("text/rtf", None),
+                ("application/postscript", None),
+                ("image/png", Some("text/plain;charset=utf-8")),
+                ("text/rtf", Some("text/plain")),
+            ] {
+                let text = "fixture-text\r\n";
+                let runner = FakeRunner::new(move |spec| {
+                    assert!(spec.image_file.is_none());
+                    let has_text = match (platform, spec.program) {
+                        (Platform::Macos, "/usr/bin/osascript") => {
+                            assert_eq!(&spec.args[..3], ["-l", "JavaScript", "-e"]);
+                            assert!(
+                                spec.args[3].contains("stringForType($.NSPasteboardTypeString)")
+                            );
+                            plain_mime.is_some()
+                        }
+                        (Platform::Linux, "wl-paste") => {
+                            assert_eq!(&spec.args[..2], ["--no-newline", "--type"]);
+                            let mime = spec.args[2].as_str();
+                            assert!(matches!(mime, "text/plain;charset=utf-8" | "text/plain"));
+                            plain_mime == Some(mime)
+                        }
+                        (Platform::Linux, "xclip" | "xsel") => false,
+                        _ => panic!("wrong reader for {other_type}: {}", spec.program),
+                    };
+                    if has_text {
+                        Ok(text.as_bytes().to_vec())
+                    } else {
+                        Err(plain_exit(spec.program))
+                    }
+                });
+                let result =
+                    read_from_clipboard(&runner, platform, false, PasteMode::TextOnly).unwrap();
+                assert_eq!(
+                    result,
+                    plain_mime.map_or(PasteOutcome::Empty, |_| PasteOutcome::Text(text.into()))
+                );
+            }
         }
     }
 
@@ -1543,7 +1596,7 @@ mod tests {
             LinuxImageTool::Xclip.read_spec("image/png").args,
             ["-selection", "clipboard", "-t", "image/png", "-o"]
         );
-        let texts = linux_text_specs();
+        let texts = linux_text_specs(PasteMode::TextOrImage);
         let programs: Vec<&str> = texts.iter().map(|spec| spec.program).collect();
         assert_eq!(programs, ["wl-paste", "xclip", "xsel"]);
         assert_eq!(texts[0].args, ["--no-newline"]);

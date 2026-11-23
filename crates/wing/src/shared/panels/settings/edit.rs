@@ -13,7 +13,6 @@
 //! 不支持的构造**跳过**而不是误报。
 
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -25,7 +24,7 @@ use wing_api_client::models::SettingNode;
 use super::doc::Root;
 use super::{SettingsPanel, View};
 use crate::shared::text_edit;
-use crate::shared::text_edit::EditOp;
+use crate::shared::text_edit::{EditOp, TextInputId};
 
 /// 编辑器认得的标量类型（bool 没有编辑器，enum 走内联选择项）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,21 +75,10 @@ pub(crate) enum EditEvent {
     Submit,
 }
 
-/// Identity of a single open settings editor or search input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SettingsPasteTarget(u64);
-
-impl SettingsPasteTarget {
-    pub(crate) fn new() -> Self {
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
 /// 内联编辑器状态。
 #[derive(Clone)]
 pub struct EditState {
-    target: SettingsPasteTarget,
+    target: TextInputId,
     root: Root,
     path: String,
     kind: ScalarKind,
@@ -136,7 +124,7 @@ impl EditState {
         // 于是「打开 → 不改 → Enter」不会把声明默认值物化成显式覆盖。
         let initial_value = validate_buffer(kind, &buffer, required, &constraints).ok();
         Self {
-            target: SettingsPasteTarget::new(),
+            target: TextInputId::new(),
             root,
             path,
             kind,
@@ -287,11 +275,11 @@ impl EditState {
 }
 
 impl SettingsPanel {
-    pub(crate) fn paste_target(&self) -> Option<SettingsPasteTarget> {
+    pub(crate) fn paste_target(&self) -> Option<TextInputId> {
         if let Some(edit) = &self.edit {
             return Some(edit.target);
         }
-        if self.pending.is_some() || self.view == View::Help || self.choices.is_some() {
+        if self.pending.is_some() || self.view == View::Help {
             return None;
         }
         self.search.as_ref().map(|search| search.target)
@@ -300,7 +288,7 @@ impl SettingsPanel {
     /// Apply text only to the input instance that owned the paste gesture.
     pub(crate) fn insert_paste(
         &mut self,
-        target: SettingsPasteTarget,
+        target: TextInputId,
         text: &str,
     ) -> Result<(), &'static str> {
         if self.paste_target() != Some(target) {

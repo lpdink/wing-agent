@@ -1699,21 +1699,29 @@ mod tests {
     #[tokio::test]
     async fn a_ready_save_keeps_the_interface_failure_in_the_receipt() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("auto"));
+        backend.interface = Some(InterfaceSource {
+            groups: crate::config::catalog::interface_groups(),
+            catalog: crate::config::catalog::interface_catalog(),
+            doc: json!({"api_key": "old-fixture-key"}),
+        });
         backend.interface_write_fails = true;
-        // 两边都弄脏：Interface 半边写盘会失败，Gateway 半边成功且就绪 —— 就绪句
-        // 必须把失败带上。
-        let mut events = vec![key(KeyCode::Char('/'))];
-        events.extend(text("preset"));
-        events.extend([key(KeyCode::Enter), key(KeyCode::Right)]);
-        events.push(key(KeyCode::Char('/')));
-        events.extend(text("enabled"));
-        events.extend([key(KeyCode::Enter), key(KeyCode::Enter)]);
-        events.push(key(KeyCode::Char('s')));
-        let mut config = AppConfig::default();
+        let mut events = vec![
+            key(KeyCode::Char('/')),
+            TermEvent::Paste("api_key".into()),
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            TermEvent::Paste("unsaved-fixture-key\n".into()),
+            key(KeyCode::Enter),
+        ];
+        events.extend(edit_and_save("enabled"));
+        let mut config = AppConfig {
+            api_key: Some("old-fixture-key".into()),
+            ..AppConfig::default()
+        };
         let (outcome, terminal) = run(&backend, &mut config, events).await;
 
         assert_eq!(outcome, SetupOutcome::Ready, "网关半边就绪 ⇒ 进正常 TUI");
+        assert_eq!(config.api_key.as_deref(), Some("old-fixture-key"));
         let screen = screen(&terminal);
         assert!(screen.contains("✓ 配置就绪"), "{screen}");
         assert!(

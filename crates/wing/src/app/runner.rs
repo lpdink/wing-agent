@@ -105,7 +105,8 @@ pub async fn execute_intent(
                 use crate::util::clipboard_paste::{PasteMode, read_clipboard};
                 let mode = match target {
                     crate::tui::ClipboardTarget::Default => PasteMode::TextOrImage,
-                    crate::tui::ClipboardTarget::Settings(_) => PasteMode::TextOnly,
+                    crate::tui::ClipboardTarget::TextOnly(_) => PasteMode::TextOnly,
+                    crate::tui::ClipboardTarget::Ignore => return,
                 };
                 let result = read_clipboard(mode).await;
                 let _ = tx

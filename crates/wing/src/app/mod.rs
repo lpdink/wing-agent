@@ -1328,8 +1328,7 @@ pub async fn run_app(
     // Initial program-status record: the session starts at rest (a mid-turn
     // resume replaces this with `working` when its SyncSession lands).
     app.set_program_status(State::Idle, None);
-    let (clipboard_target, clipboard_routes) = tokio::sync::watch::channel(app.clipboard_target());
-    let mut term_events = crate::tui::spawn_event_stream_with_clipboard(Some(clipboard_routes));
+    let mut term_events = crate::tui::spawn_event_stream_with_clipboard();
     let mut transport = Some(transport);
     // Session recovery pending: the transport (WS) is up but the session
     // event subscription isn't re-established yet. Cleared once
@@ -1358,13 +1357,6 @@ pub async fn run_app(
     }
 
     loop {
-        clipboard_target.send_if_modified(|target| {
-            let next = app.clipboard_target();
-            let changed = *target != next;
-            *target = next;
-            changed
-        });
-
         // Draw — frame-gated: streaming deltas coalesce, input draws
         // immediately, idle iterations skip the draw entirely.
         if app.should_draw_now() {
@@ -1446,6 +1438,7 @@ pub async fn run_app(
                         app.handle_paste(&text);
                         app.input_dirty = true;
                     }
+                    TermEvent::ClipboardAnnouncement(request) => request.route(app.clipboard_target()),
                     TermEvent::Clipboard(event) => {
                         // 进度只是「同一张 chip 换了个数字」：让它走帧闸门（合并重绘，
                         // 传输中最多 10 次/秒），不要每条都逼一帧。开始 / 交付 / 失败

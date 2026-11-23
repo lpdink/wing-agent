@@ -40,10 +40,12 @@ pub mod cursor;
 pub mod stdin_proxy;
 
 pub use appearance::detected_appearance;
+pub use clipboard_protocol::ClipboardAnnouncement;
 pub use clipboard_protocol::ClipboardEvent;
 pub use clipboard_protocol::ClipboardFailure;
 pub use clipboard_protocol::ClipboardPayload;
 pub use clipboard_protocol::ClipboardTarget;
+pub use clipboard_protocol::ClipboardText;
 pub use cursor::CursorGate;
 
 /// 唯一的终端类型：`CursorGate` 是出帧口的 backend 装饰，让**稳态**的一帧只以一次 write
@@ -58,6 +60,7 @@ pub enum TermEvent {
     /// OSC 5522 通道的一条事件（读的生命周期 / 丢弃）——见 [`clipboard_protocol`]。
     /// 文本与 bracketed paste 走同一个入口（`App::handle_paste`）。
     Clipboard(ClipboardEvent),
+    ClipboardAnnouncement(ClipboardAnnouncement),
     Resize(u16, u16),
     Focus(bool),
     Tick,
@@ -70,6 +73,7 @@ impl std::fmt::Debug for TermEvent {
             Self::Mouse(mouse) => f.debug_tuple("Mouse").field(mouse).finish(),
             Self::Paste(_) => f.write_str("Paste(<redacted>)"),
             Self::Clipboard(event) => f.debug_tuple("Clipboard").field(event).finish(),
+            Self::ClipboardAnnouncement(_) => f.write_str("ClipboardAnnouncement"),
             Self::Resize(w, h) => f.debug_tuple("Resize").field(w).field(h).finish(),
             Self::Focus(focused) => f.debug_tuple("Focus").field(focused).finish(),
             Self::Tick => f.write_str("Tick"),
@@ -470,12 +474,16 @@ fn enable_paste_events(w: &mut impl io::Write) -> io::Result<()> {
 ///
 /// 必须在 crossterm 事件源首次创建之前调用（fd 0 在此时已经确定：阳性时是 pty slave）。
 pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
-    spawn_event_stream_with_clipboard(None)
+    spawn_event_stream_inner(false)
 }
 
-pub(crate) fn spawn_event_stream_with_clipboard(
-    target: Option<tokio::sync::watch::Receiver<ClipboardTarget>>,
-) -> mpsc::Receiver<TermEvent> {
+/// Start the TUI input stream with ordered clipboard ownership requests.
+/// Respond to each [`TermEvent::ClipboardAnnouncement`] with the current input target.
+pub fn spawn_event_stream_with_clipboard() -> mpsc::Receiver<TermEvent> {
+    spawn_event_stream_inner(true)
+}
+
+fn spawn_event_stream_inner(ordered: bool) -> mpsc::Receiver<TermEvent> {
     let mut slot = event_task_slot();
     // 全进程只调一次（真实调用点只有 `app::run_app`）：第二次 spawn 要么覆盖旧 handle
     // （旧任务永远停不下来），要么（收尾过之后再 spawn）踩上不复位的 `EVENT_STOP`——新流
@@ -487,14 +495,21 @@ pub(crate) fn spawn_event_stream_with_clipboard(
         "spawn_event_stream must run once per process"
     );
     let (tx, rx) = mpsc::channel(128);
-    if stdin_proxy::paste_channel() == stdin_proxy::PasteChannel::Supported
-        && let Some(sequences) = stdin_proxy::take_sequences()
-    {
-        // 写失败不致命（stdout 没了，协议机也没数据可谈）；模式没开成通道自然静默。
-        let mut out = io::stdout();
-        let _ = enable_paste_events(&mut out);
-        let _ = out.flush();
-        clipboard_protocol::spawn(sequences, tx.clone(), target);
+    let supported = stdin_proxy::paste_channel() == stdin_proxy::PasteChannel::Supported;
+    let announcements = (ordered && supported)
+        .then(|| std::sync::Arc::new(clipboard_protocol::Announcements::new()));
+    if supported {
+        let sequences = match &announcements {
+            Some(announcements) => stdin_proxy::take_ordered_sequences(announcements.clone()),
+            None => stdin_proxy::take_sequences(),
+        };
+        if let Some(sequences) = sequences {
+            // Keep the terminal mode paired with its protocol consumer.
+            let mut out = io::stdout();
+            let _ = enable_paste_events(&mut out);
+            let _ = out.flush();
+            clipboard_protocol::spawn(sequences, tx.clone(), ordered);
+        }
     }
     let handle = tokio::spawn(async move {
         loop {
@@ -524,7 +539,15 @@ pub(crate) fn spawn_event_stream_with_clipboard(
                         }
                     }
                     Ok(crossterm::event::Event::Paste(text)) => {
-                        if !forward(&tx, TermEvent::Paste(text)).await {
+                        let event = match announcements
+                            .as_ref()
+                            .and_then(|announcements| announcements.decode(&text))
+                        {
+                            Some(Some(request)) => TermEvent::ClipboardAnnouncement(request),
+                            Some(None) => continue,
+                            None => TermEvent::Paste(text),
+                        };
+                        if !forward(&tx, event).await {
                             break;
                         }
                     }

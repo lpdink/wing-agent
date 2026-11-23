@@ -10,7 +10,9 @@
 //! read 请求）都能被测试从 master 侧读到；结束前还原 fd 1。
 
 use std::time::Duration;
-use std::time::Instant;
+
+use crossterm::event::KeyCode;
+use wing::tui::{ClipboardEvent, ClipboardTarget, TermEvent};
 
 mod common;
 
@@ -108,7 +110,7 @@ fn a_positive_probe_opens_5522_and_serves_a_clipboard_read() {
         .build()
         .expect("runtime");
     let entered = rt.enter();
-    let mut rx = wing::tui::spawn_event_stream();
+    let mut rx = wing::tui::spawn_event_stream_with_clipboard();
     drop(entered);
     let written = read_written(outer_master, Duration::from_secs(1), |acc| {
         acc.windows(8).any(|w| w == b"\x1b[?5522h")
@@ -118,16 +120,42 @@ fn a_positive_probe_opens_5522_and_serves_a_clipboard_read() {
         "阳性终端必须收到 ?5522h，实收 {written:?}"
     );
 
-    // 终端：用户 Cmd+V → unsolicited paste event（listing 只有 text/plain）。
-    write_all(outer_master, &packet("type=read:status=OK:pw=b3Rw", None));
-    write_all(
-        outer_master,
-        &packet(
-            &format!("type=read:status=DATA:mime={}:pw=b3Rw", b64(b".")),
-            Some(b"text/plain\n"),
-        ),
-    );
-    write_all(outer_master, &packet("type=read:status=DONE:pw=b3Rw", None));
+    let next_input = |rx: &mut tokio::sync::mpsc::Receiver<TermEvent>| {
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let event = rx.recv().await.expect("input stream");
+                    if !matches!(event, TermEvent::Tick) {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .expect("input event")
+        })
+    };
+    let paste = |pw| {
+        [
+            packet(&format!("type=read:status=OK:pw={pw}"), None),
+            packet(
+                &format!("type=read:status=DATA:mime={}:pw={pw}", b64(b".")),
+                Some(b"text/plain\n"),
+            ),
+            packet(&format!("type=read:status=DONE:pw={pw}"), None),
+        ]
+        .concat()
+    };
+
+    // One terminal write opens the editor, announces paste, and dismisses it.
+    // The reply may be delayed without changing the order of the announcement.
+    let batch = [b"\r".as_slice(), &paste("b3Rw"), b"\x1b[27u"].concat();
+    write_all(outer_master, &batch);
+    assert!(matches!(next_input(&mut rx), TermEvent::Key(key) if key.code == KeyCode::Enter));
+    let TermEvent::ClipboardAnnouncement(request) = next_input(&mut rx) else {
+        panic!("paste announcement must come before Escape");
+    };
+    assert!(matches!(next_input(&mut rx), TermEvent::Key(key) if key.code == KeyCode::Esc));
+    request.route(ClipboardTarget::Default);
 
     // 协议机写下 follow-up read 请求（带唯一 id）→ 解析出 id。
     let request = read_written(outer_master, Duration::from_secs(2), |acc| {
@@ -160,21 +188,27 @@ fn a_positive_probe_opens_5522_and_serves_a_clipboard_read() {
         &packet(&format!("type=read:status=DONE:id={id}"), None),
     );
 
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let mut delivered = None;
-    while Instant::now() < deadline && delivered.is_none() {
-        match rx.try_recv() {
-            Ok(wing::tui::TermEvent::Clipboard(wing::tui::ClipboardEvent::Delivered(
-                wing::tui::ClipboardPayload::Text(text),
-            ))) => delivered = Some(text),
-            Ok(_) => {}
-            Err(_) => std::thread::sleep(Duration::from_millis(10)),
-        }
-    }
-    assert_eq!(
-        delivered.as_deref(),
-        Some("hello from the pty"),
-        "阳性通道必须把读回的文本投进事件流"
+    assert!(
+        matches!(next_input(&mut rx), TermEvent::Clipboard(ClipboardEvent::Delivered(
+        wing::tui::ClipboardPayload::Text(text),
+    )) if text.as_bytes() == payload)
+    );
+
+    // Reverse the two keys. Even a bare Escape immediately before the OSC
+    // opener must keep its position, and Ignore must issue no read request.
+    let batch = [b"\x1b".as_slice(), &paste("bmV3"), b"\r"].concat();
+    write_all(outer_master, &batch);
+    assert!(matches!(next_input(&mut rx), TermEvent::Key(key) if key.code == KeyCode::Esc));
+    let TermEvent::ClipboardAnnouncement(request) = next_input(&mut rx) else {
+        panic!("paste announcement must come before Enter");
+    };
+    assert!(matches!(next_input(&mut rx), TermEvent::Key(key) if key.code == KeyCode::Enter));
+    request.route(ClipboardTarget::Ignore);
+    let output = read_written(outer_master, Duration::from_millis(250), |_| false);
+    assert!(
+        !output
+            .windows(b"id=wing-paste-2".len())
+            .any(|w| w == b"id=wing-paste-2")
     );
 
     wing::tui::end_tui_session().expect("end tui session");

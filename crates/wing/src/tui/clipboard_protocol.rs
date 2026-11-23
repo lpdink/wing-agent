@@ -30,15 +30,16 @@
 //!   的唯一依据（`pw` 两边都有；listing 的 DATA 与数据的 DATA 靠 `mime` 区分）。每次 read
 //!   用**唯一 id**（`wing-paste-<n>`），被放弃的 read 残留的包因此不会被记到下一次读上。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::TermEvent;
 use super::stdin_proxy::Sequence;
-use crate::shared::panels::settings::SettingsPasteTarget;
+use crate::shared::text_edit::TextInputId;
 use crate::util::image_compress::KNOWN_IMAGE_MIMES;
 use crate::util::mime::normalize_mime;
 
@@ -75,7 +76,85 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 pub enum ClipboardTarget {
     #[default]
     Default,
-    Settings(Option<SettingsPasteTarget>),
+    TextOnly(TextInputId),
+    Ignore,
+}
+
+/// Reply to the terminal's ordered paste announcement before reading clipboard bytes.
+#[derive(Debug)]
+pub struct ClipboardAnnouncement(oneshot::Sender<ClipboardTarget>);
+
+impl ClipboardAnnouncement {
+    pub fn route(self, target: ClipboardTarget) {
+        let _ = self.0.send(target);
+    }
+}
+
+/// Carries announcements across the private PTY alongside keys without placing
+/// clipboard text or the terminal's password on the crossterm input stream.
+pub(super) struct Announcements {
+    prefix: String,
+    pending: Mutex<AnnouncementSlots>,
+}
+
+#[derive(Default)]
+struct AnnouncementSlots {
+    next: u64,
+    replies: HashMap<u64, ClipboardAnnouncement>,
+}
+
+impl Announcements {
+    pub(super) fn new() -> Self {
+        Self {
+            prefix: format!("wing-clipboard-{}-", uuid::Uuid::new_v4()),
+            pending: Mutex::default(),
+        }
+    }
+
+    pub(super) fn mark(&self, bytes: &mut Vec<u8>) -> oneshot::Receiver<ClipboardTarget> {
+        let (reply, result) = oneshot::channel();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.replies.retain(|_, reply| !reply.0.is_closed());
+        let id = pending.next;
+        pending.next += 1;
+        pending.replies.insert(id, ClipboardAnnouncement(reply));
+        // Bracketed paste is a single event in crossterm, ordered with keys.
+        bytes.extend_from_slice(format!("\x1b[200~{}{id}\x1b[201~", self.prefix).as_bytes());
+        result
+    }
+
+    pub(super) fn decode(&self, text: &str) -> Option<Option<ClipboardAnnouncement>> {
+        let id = text.strip_prefix(&self.prefix)?.parse::<u64>().ok()?;
+        let announcement = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replies
+            .remove(&id);
+        // A late marker must still be consumed when its protocol read expired.
+        Some(announcement.filter(|reply| !reply.0.is_closed()))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClipboardText(String);
+
+impl ClipboardText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for ClipboardText {
+    fn from(text: String) -> Self {
+        Self(text)
+    }
+}
+
+impl std::fmt::Debug for ClipboardText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// 剪贴板读回的载荷（App 边界，冻结给 05）。
@@ -121,9 +200,9 @@ pub enum ClipboardEvent {
     ReadProgress { received: u64 },
     /// 读回完成，交付载荷。
     Delivered(ClipboardPayload),
-    Settings {
-        target: SettingsPasteTarget,
-        result: Result<ClipboardPayload, ClipboardFailure>,
+    TextInput {
+        target: TextInputId,
+        result: Result<ClipboardText, ClipboardFailure>,
     },
     /// **在途读**的失败：归属当前这条读（App 侧把它的占位符翻成失败态 + toast）。
     /// `mime` 就是这次读的表示 —— 只有 `image/*` 的读才有占位符可翻。
@@ -241,6 +320,18 @@ impl Packet {
     }
 }
 
+pub(super) fn is_announcement(raw: &[u8]) -> bool {
+    let meta = raw.split(|b| *b == b';').next().unwrap_or_default();
+    meta.split(|b| *b == b':')
+        .any(|field| field == b"status=OK")
+        && Packet::parse(raw).is_some_and(|packet| {
+            packet.op == "read"
+                && packet.status == "OK"
+                && packet.id.is_none()
+                && packet.pw_b64.is_some()
+        })
+}
+
 /// targets listing 的负载：空格 / 换行分隔的 MIME 串（Ghostty 会用 `\n` 结尾）。
 fn parse_listing(payload: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(payload)
@@ -316,9 +407,9 @@ pub(crate) enum Effect {
     Progress { received: u64 },
     /// 读回完成：交付 App。
     Deliver(ClipboardPayload),
-    Settings {
-        target: SettingsPasteTarget,
-        result: Result<ClipboardPayload, ClipboardFailure>,
+    TextInput {
+        target: TextInputId,
+        result: Result<ClipboardText, ClipboardFailure>,
     },
     /// 在途读失败：归属当前这条读。带上它的 MIME —— App 侧据此判断这条读有没有
     /// 占位符（只有图片读有，见 [`Effect::ImageReadStarted`]）。
@@ -353,7 +444,7 @@ struct EventCollector {
 struct ReadState {
     id: String,
     mime: String,
-    settings: Option<SettingsPasteTarget>,
+    settings: Option<TextInputId>,
     data: Vec<u8>,
     deadline: Instant,
     /// 进度水位：最后一次报出去的累计字节数，与那次上报的时刻（[`PROGRESS_STEP`] /
@@ -484,7 +575,7 @@ impl Session {
                 let Some(event) = self.event.take() else {
                     return Vec::new();
                 };
-                if event.target == ClipboardTarget::Settings(None) {
+                if event.target == ClipboardTarget::Ignore {
                     return Vec::new();
                 }
                 let pending = PendingEvent {
@@ -647,10 +738,8 @@ impl Session {
     fn start(&mut self, event: PendingEvent, now: Instant) -> Vec<Effect> {
         let (mime, settings) = match event.target {
             ClipboardTarget::Default => (choose_mime(&event.mimes), None),
-            ClipboardTarget::Settings(Some(target)) => {
-                (choose_text_mime(&event.mimes), Some(target))
-            }
-            ClipboardTarget::Settings(None) => return Vec::new(),
+            ClipboardTarget::TextOnly(target) => (choose_text_mime(&event.mimes), Some(target)),
+            ClipboardTarget::Ignore => return Vec::new(),
         };
         let Some(mime) = mime else {
             return rejected(event.target, ClipboardFailure::NoRepresentation)
@@ -685,7 +774,14 @@ impl Session {
 impl ReadState {
     fn result(self, result: Result<ClipboardPayload, ClipboardFailure>) -> Effect {
         if let Some(target) = self.settings {
-            return Effect::Settings { target, result };
+            let text = result.and_then(|payload| match payload {
+                ClipboardPayload::Text(text) => Ok(text.into()),
+                ClipboardPayload::Image { .. } => Err(ClipboardFailure::NoRepresentation),
+            });
+            return Effect::TextInput {
+                target,
+                result: text,
+            };
         }
         match result {
             Ok(payload) => Effect::Deliver(payload),
@@ -700,11 +796,11 @@ impl ReadState {
 fn rejected(target: ClipboardTarget, failure: ClipboardFailure) -> Option<Effect> {
     match target {
         ClipboardTarget::Default => Some(Effect::PasteRejected(failure)),
-        ClipboardTarget::Settings(Some(target)) => Some(Effect::Settings {
+        ClipboardTarget::TextOnly(target) => Some(Effect::TextInput {
             target,
             result: Err(failure),
         }),
-        ClipboardTarget::Settings(None) => None,
+        ClipboardTarget::Ignore => None,
     }
 }
 
@@ -727,18 +823,19 @@ fn failure_for(status: &str) -> ClipboardFailure {
 pub(crate) fn spawn(
     sequences: mpsc::Receiver<Sequence>,
     events: mpsc::Sender<TermEvent>,
-    target: Option<tokio::sync::watch::Receiver<ClipboardTarget>>,
+    ordered: bool,
 ) {
-    spawn_with(sequences, events, target, write_request);
+    spawn_with(sequences, events, ordered, write_request);
 }
 
 /// [`spawn`] 的测试缝：写出口可注入（单测不该往真 stdout 上写转义序列）。
-fn spawn_with<W>(
-    mut sequences: mpsc::Receiver<Sequence>,
+fn spawn_with<S, W>(
+    mut sequences: mpsc::Receiver<S>,
     events: mpsc::Sender<TermEvent>,
-    target: Option<tokio::sync::watch::Receiver<ClipboardTarget>>,
+    ordered: bool,
     write: W,
 ) where
+    S: Into<Sequence> + Send + 'static,
     W: Fn(&[u8]) -> io::Result<()> + Send + Sync + 'static,
 {
     tokio::spawn(async move {
@@ -750,8 +847,14 @@ fn spawn_with<W>(
                         // 分流层没了（进程收尾）：静默退场。
                         break;
                     };
-                    let target = target.as_ref().map_or(ClipboardTarget::Default, |rx| *rx.borrow());
-                    for effect in session.on_sequence_for(&raw, target, Instant::now()) {
+                    let raw = raw.into();
+                    let target = match raw.route {
+                        Some(route) => tokio::time::timeout(IDLE_TIMEOUT, route)
+                            .await.ok().and_then(Result::ok).unwrap_or(ClipboardTarget::Ignore),
+                        None if ordered => ClipboardTarget::Ignore,
+                        None => ClipboardTarget::Default,
+                    };
+                    for effect in session.on_sequence_for(&raw.bytes, target, Instant::now()) {
                         apply(effect, &events, &write).await;
                     }
                 }
@@ -802,9 +905,9 @@ where
                 .send(TermEvent::Clipboard(ClipboardEvent::Delivered(payload)))
                 .await;
         }
-        Effect::Settings { target, result } => {
+        Effect::TextInput { target, result } => {
             let _ = events
-                .send(TermEvent::Clipboard(ClipboardEvent::Settings {
+                .send(TermEvent::Clipboard(ClipboardEvent::TextInput {
                     target,
                     result,
                 }))
@@ -892,12 +995,12 @@ mod tests {
     #[test]
     fn settings_paste_uses_text_and_keeps_the_target_from_the_first_packet() {
         let mut session = Session::new();
-        let target = SettingsPasteTarget::new();
+        let target = TextInputId::new();
         let pw = b64_encode(b"fixture-otp");
         let start = packet(&format!("type=read:status=OK:pw={pw}"), None);
         assert!(
             session
-                .on_sequence_for(&start, ClipboardTarget::Settings(Some(target)), at(0))
+                .on_sequence_for(&start, ClipboardTarget::TextOnly(target), at(0))
                 .is_empty()
         );
         let listing = packet(
@@ -924,9 +1027,9 @@ mod tests {
         let done = packet("type=read:id=wing-paste-1:status=DONE", None);
         assert_eq!(
             session.on_sequence(&done, at(4)),
-            [Effect::Settings {
+            [Effect::TextInput {
                 target,
-                result: Ok(ClipboardPayload::Text("token".into()))
+                result: Ok(ClipboardText("token".into()))
             }]
         );
     }
@@ -1784,7 +1887,7 @@ mod tests {
         let (ev_tx, mut ev_rx) = mpsc::channel(8);
         let written = Arc::new(Mutex::new(Vec::<u8>::new()));
         let sink = Arc::clone(&written);
-        spawn_with(seq_rx, ev_tx, None, move |bytes| {
+        spawn_with(seq_rx, ev_tx, false, move |bytes| {
             sink.lock().unwrap().extend_from_slice(bytes);
             Ok(())
         });
@@ -1851,7 +1954,7 @@ mod tests {
     async fn driver_reports_failures_as_events() {
         let (seq_tx, seq_rx) = mpsc::channel(8);
         let (ev_tx, mut ev_rx) = mpsc::channel(8);
-        spawn_with(seq_rx, ev_tx, None, |_| Ok(()));
+        spawn_with(seq_rx, ev_tx, false, |_| Ok(()));
 
         // 完整的 event 三连 → 驱动进入「读在途」。
         seq_tx
@@ -1909,7 +2012,7 @@ mod tests {
         let (ev_tx, mut ev_rx) = mpsc::channel(8);
         let written = Arc::new(Mutex::new(Vec::<u8>::new()));
         let sink = Arc::clone(&written);
-        spawn_with(seq_rx, ev_tx, None, move |bytes| {
+        spawn_with(seq_rx, ev_tx, false, move |bytes| {
             sink.lock().unwrap().extend_from_slice(bytes);
             Ok(())
         });

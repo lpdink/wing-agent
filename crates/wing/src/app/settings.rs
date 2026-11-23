@@ -223,8 +223,10 @@ impl App {
         let open_pending = std::mem::take(&mut self.settings_pending);
         self.settings_cache = Some((schema.clone(), state.clone()));
         if let Some(panel) = self.settings_panel.as_mut() {
-            if reload || (panel.dirty_count() == 0 && panel.paste_target().is_none()) {
+            if reload || (panel.dirty_count() == 0 && !panel.has_active_input()) {
                 panel.apply_snapshot(&schema, state);
+            } else if panel.fingerprint() != state.fingerprint {
+                panel.on_settings_changed(&state.fingerprint);
             }
         } else if open_pending {
             self.present_settings_panel(&schema, state);

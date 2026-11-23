@@ -607,8 +607,7 @@ impl App {
             return;
         }
 
-        // 本地剪贴板读取（L1）的回执同样是 composer 的：换过会话草稿还在，粘贴照落
-        // （文本进草稿、图片进流水线）。
+        // Local clipboard replies follow the captured input owner across session switches.
         if let FetchPayload::ClipboardPaste { target, result } = payload {
             self.on_clipboard_paste(target, result);
             return;
