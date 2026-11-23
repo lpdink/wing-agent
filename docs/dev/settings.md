@@ -515,11 +515,8 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 `POST /api/settings/set` 成功后广播 `SettingsChangedEvent`：
 `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（所有已连接客户端），
 `persist = False` 且**不进 `FACT_EVENTS`**——它是网关级**时点通知**（没有 `session_id`、不进任何会话链），
-重连后的正解是重新 `GET /api/settings/status`，重放一条旧通知只会误导。
-
-消费侧**不判断"这是不是我自己刚触发的那一次"**：比指纹就够了——自己的保存会更新本地指纹，
-指纹相同即忽略；不同则面板出横幅 / 缓存的 `(values, fingerprint)` 直接作废（避免"旧文档 + 新指纹"
-被乐观并发当成 base，造成丢失更新）。
+重连或收到 `settings_changed` 后用 `GET /api/settings/get` 刷新已保存文件和运行网关的待重启状态。
+文件指纹用于比对草稿基线，未提交的编辑留在面板中。
 
 ## 13. 已知边界
 

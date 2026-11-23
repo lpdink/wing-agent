@@ -1351,6 +1351,69 @@ fn a_settings_changed_with_the_panel_closed_drops_the_cache() {
 }
 
 #[test]
+fn an_equal_fingerprint_change_and_reconnect_refresh_runtime_settings() {
+    let mut app = app_with_settings_panel();
+    goto(&mut app, "enabled");
+    press(&mut app, KeyCode::Tab);
+    assert!(panel(&app).dirty_count() > 0);
+
+    let original_id = app.settings_fetch_id;
+    app.note_settings_changed("fp-1");
+    assert!(!panel(&app).is_stale());
+    assert!(app.settings_cache.is_none());
+    assert_ne!(app.settings_fetch_id, original_id);
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+
+    let mut state = gateway_state(sample_values(), "fp-1");
+    state.pending_restart_paths = Some(vec!["gateway.port".into()]);
+    app.handle_settings_fetch(gateway_schema(), state);
+    assert_eq!(panel(&app).restart_required(), &["gateway.port"]);
+    assert!(panel(&app).dirty_count() > 0);
+
+    app.refresh_settings_snapshot();
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+    let mut state = gateway_state(sample_values(), "fp-1");
+    state.pending_restart_paths = Some(vec![]);
+    app.handle_settings_fetch(gateway_schema(), state);
+    assert!(panel(&app).restart_required().is_empty());
+    assert!(panel(&app).dirty_count() > 0);
+}
+
+#[test]
+fn system_reload_reports_restart_and_hides_legacy_failure_details() {
+    let mut app = app_with_settings_panel();
+    app.close_settings_panel(false);
+    let pending =
+        serde_json::from_value(json!({"ok": true, "pending_restart_paths": ["gateway.port"]}))
+            .unwrap();
+    app.note_system_reload(&pending);
+    assert!(app.settings_cache.is_none());
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("gateway.port 待重启")
+    );
+
+    let legacy = serde_json::from_value(json!({"ok": false, "results": [{
+        "name": "provider", "ok": false, "detail": "fixture-secret"
+    }]}))
+    .unwrap();
+    app.note_system_reload(&legacy);
+    let toast = app.toast.as_ref().unwrap();
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert!(toast.message.contains("provider 加载失败"));
+    assert!(!toast.message.contains("fixture-secret"));
+}
+
+#[test]
 fn a_change_event_retires_an_older_fetch_without_overwriting_the_draft() {
     use crate::app::intent::{FetchPayload, FetchResult};
 

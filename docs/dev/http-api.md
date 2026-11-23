@@ -122,8 +122,8 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/settings/schema` | 设置目录树（`SettingNodeProto`：默认值 / 约束 / 枚举 / 生效域 `apply` / 密文标记 / 分组 / 列表元素形态）。纯静态，可长缓存；`{version, root, config_path, groups}`，根节点的 `key` / `path` 恒为 `"config"`；`groups[]`（`{id, title, doc, members}`，顺序即界面顺序）是设置面板左列锚点的唯一来源，声明在后端 `config/groups.py` |
-| GET | `/api/settings/get` | 稀疏文档（只有用户显式写下的键；密文叶子恒为 `null`）+ `secrets` 状态表（`set` / `empty` / `absent` + 末 4 位 hint）+ `fingerprint`（文件 sha256；不存在 = `"absent"`）+ 全部 `problems` + `setup_mode` + `config_path`。文件坏掉（YAML 语法错）也照常应答：`values={}` + 一条文档级 problem（`path=null`） |
+| GET | `/api/settings/schema` | 设置目录树（`SettingNodeProto`：默认值 / 约束 / 枚举 / 生效域 `apply` / 密文标记 / 分组 / 列表元素形态）。纯静态，可长缓存；`{version, root, config_path, groups}`，根节点的 `key` / `path` 恒为 `"config"`；`groups[]`（`{id, title, doc, members}`，顺序即界面顺序）是设置分类的唯一来源，声明在后端 `config/groups.py` |
+| GET | `/api/settings/get` | 稀疏文档（只有用户显式写下的键；密文叶子恒为 `null`）+ `secrets` 状态表（`set` / `empty` / `absent` + 末 4 位 hint）+ `fingerprint`（文件 sha256；不存在 = `"absent"`）+ 全部 `problems` + `setup_mode` + `config_path` + `pending_restart_paths`（运行网关已读取、仍待重启的路径，`null` 表示未知）。文件坏掉（YAML 语法错）也照常应答：`values={}` + 一条文档级 problem（`path=null`） |
 | GET | `/api/settings/status` | `{valid, setup_mode, problems, fingerprint}`——启动路径上的最便宜预检。`valid == (not setup_mode and 无 problem)`：降级态**恒** `false` |
 | POST | `/api/settings/set` | 保存事务。body `{base, document}`：`base` = 客户端持有的指纹（显式 `null` / 缺键 = 不做并发检查，CLI `--force`）；`document` = 整份稀疏文档。**密文三态**：`null` = 保留磁盘现值 / 字符串 = 设为该值（`""` = 显式清空）/ 键缺席 = 从文件移除。**鉴权：admin**（`tool_runtime` 403） |
 
@@ -298,7 +298,7 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 **其他**（`event/base.py`、`query_response.py`）：`error` · `notice` · `delivered` · `context_stats` · `branch_targets`。
 
-**网关级事件**（`event/state_change.py`）：`settings_changed` —— `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（广播给所有已连接客户端）；`persist=false` 且**不进 `FACT_EVENTS`**：它是**时点通知**（没有 `session_id`、不进任何会话链），客户端重连后应重新 `GET /api/settings/status`，重放一条旧通知只会误导。消费侧**用指纹比对**判断是不是别人改的（自己的保存会更新本地指纹，相同即忽略；不同则提示"配置已被其它客户端修改"并作废本地缓存）。
+**网关级事件**（`event/state_change.py`）：`settings_changed` —— `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（广播给所有已连接客户端）；`persist=false` 且**不进 `FACT_EVENTS`**：它是**时点通知**（没有 `session_id`、不进任何会话链），重连或收到事件后用 `GET /api/settings/get` 刷新待重启状态。文件指纹只用于判断本地草稿是否过期。
 
 > `notice`：一次性提醒（`level` + `message`，可带 `attempt` / `max_attempts` / `retry_in_s`），`persist=false` 不落盘、不重放。与 `error` 的边界：`error` 是"真错误"（TUI / ACP 据此终结 turn / 渲染错误 / 通知），`notice` 不终结 turn（如"LLM 调用失败，N 秒后重试"）。stdio 前端例外：它把 `error` 只当原因文本，轮末由 `turn_result` / 合成终态帧 / `done` 收口（见 [architecture.md](architecture.md) 的 stdio「终态帧」一节）。
 

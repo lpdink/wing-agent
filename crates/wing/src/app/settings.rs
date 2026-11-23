@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use serde_json::Value;
+use wing_api_client::models::ReloadResponse;
 use wing_api_client::models::SettingsGetResponse;
 use wing_api_client::models::SettingsSchemaResponse;
 use wing_api_client::models::SettingsSetResponse;
@@ -482,26 +483,53 @@ impl App {
     // settings_changed 的消费
     // -----------------------------------------------------------------------
 
-    /// Only a masked GET can replace the cached document and its fingerprint.
     pub(super) fn note_settings_changed(&mut self, fingerprint: &str) {
-        let cache_changed = self
-            .settings_cache
-            .as_ref()
-            .is_some_and(|(_, state)| state.fingerprint != fingerprint);
-        if cache_changed {
-            self.settings_cache = None;
-        }
-        let panel_changed = self.settings_panel.as_mut().is_some_and(|panel| {
+        if let Some(panel) = self.settings_panel.as_mut() {
             panel.on_settings_changed(fingerprint);
-            panel.is_stale()
-        });
-        if cache_changed || panel_changed || self.settings_pending {
-            self.settings_fetch_id = self.settings_fetch_id.wrapping_add(1);
-            if self.settings_save.is_none()
-                && (self.settings_panel.is_some() || self.settings_pending)
-            {
-                self.push_intent(AppIntent::FetchSettings);
-            }
+        }
+        self.refresh_settings_snapshot();
+    }
+
+    /// The gateway's running settings can change while the disk fingerprint stays the same.
+    pub(super) fn refresh_settings_snapshot(&mut self) {
+        self.settings_cache = None;
+        self.settings_fetch_id = self.settings_fetch_id.wrapping_add(1);
+        if self.settings_save.is_none() && (self.settings_panel.is_some() || self.settings_pending)
+        {
+            self.push_intent(AppIntent::FetchSettings);
+        }
+    }
+
+    pub(super) fn note_system_reload(&mut self, response: &ReloadResponse) {
+        self.refresh_settings_snapshot();
+        let summary = if response.ok {
+            "已重新读取网关配置"
+        } else {
+            "网关配置未全部应用"
+        };
+        let mut lines = vec![summary.to_string()];
+        for item in response.results.iter().filter(|item| !item.ok) {
+            let name = crate::cmd::common::single_line(&item.name);
+            let detail = response
+                .display_detail(item)
+                .map(crate::cmd::common::single_line);
+            lines.push(match detail {
+                Some(detail) => format!("{name} 加载失败 · {detail}"),
+                None => format!("{name} 加载失败"),
+            });
+        }
+        if let Some(paths) = &response.pending_restart_paths
+            && !paths.is_empty()
+        {
+            lines.push(format!("{} 待重启 · 打开 /settings", paths.join("、")));
+        }
+        let message = lines.join("\n");
+        let duration = Duration::from_secs(5);
+        if response.ok && lines.len() == 1 {
+            self.show_toast(Toast::info(message, duration));
+        } else {
+            self.chat.push(ChatCell::SystemMessage(message.clone()));
+            self.show_toast(Toast::warning(message, duration));
         }
     }
 }

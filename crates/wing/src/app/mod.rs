@@ -1638,6 +1638,7 @@ pub async fn run_app(
                             // The session may have been silently replaced —
                             // the popup list must re-fetch.
                             app.invalidate_session_cache();
+                            app.refresh_settings_snapshot();
 
                             // Re-request info and commands via HTTP intents.
                             app.push_intent(AppIntent::FetchInfo);

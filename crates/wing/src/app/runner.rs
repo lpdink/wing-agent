@@ -373,28 +373,7 @@ pub async fn execute_intent(
         AppIntent::ReloadSystem => {
             if let Some(t) = transport {
                 match t.http.reload_system().await {
-                    Ok(resp) => {
-                        let status = if resp.ok { "✅" } else { "⚠️" };
-                        let details: Vec<String> = resp
-                            .results
-                            .iter()
-                            .map(|r| {
-                                if r.ok {
-                                    format!("✅ {}", r.name)
-                                } else {
-                                    format!(
-                                        "❌ {}: {}",
-                                        r.name,
-                                        r.detail.as_deref().unwrap_or("unknown")
-                                    )
-                                }
-                            })
-                            .collect();
-                        app.show_toast(Toast::info(
-                            format!("{status} Reload: {}", details.join(", ")),
-                            std::time::Duration::from_secs(4),
-                        ));
-                    }
+                    Ok(resp) => app.note_system_reload(&resp),
                     Err(e) => {
                         app.show_toast(Toast::error(
                             format!("Reload failed: {e}"),
