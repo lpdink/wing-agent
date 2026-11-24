@@ -178,6 +178,10 @@ async def test_archive_roundtrip_is_a_pure_move_and_freezes(probe: Probe) -> Non
 
     # 列表归属：live 消失、归档列表可见（标题 / 模型 / 归档时间）。
     assert session_id not in await _live_ids(probe)
+    indexed = await _archived_entries(probe)
+    assert [entry["id"] for entry in indexed] == [session_id]
+    assert indexed[0]["archived_at"]
+
     index = archived_dir.parent / "index.json"
     index.unlink()
     await probe.restart_gateway()
@@ -188,7 +192,7 @@ async def test_archive_roundtrip_is_a_pure_move_and_freezes(probe: Probe) -> Non
     assert [entry["id"] for entry in entries] == [session_id]
     assert (archived_dir / "history.jsonl").read_bytes() == live_bytes
     assert entries[0]["name"] == "hello"
-    assert entries[0]["archived_at"]
+    assert entries[0]["archived_at"] is None
     assert entries[0]["model_id"] == ROUNDTRIP_MODEL
     assert ".archive" not in await _live_ids(probe)  # 保留命名空间不成会话
 
@@ -212,9 +216,7 @@ async def test_archive_roundtrip_is_a_pure_move_and_freezes(probe: Probe) -> Non
     assert restored["changed"] is True and restored["detail"] == "restored"
     assert (live_dir / "history.jsonl").read_bytes() == live_bytes
 
-    # 重新订阅要走显式调用（句柄已挂载，``resume`` 不会二次订阅）。
-    await _driver(probe).http.subscribe(session_id, _driver(probe).client_id)
-    resumed = _driver(probe).get(session_id)
+    resumed = await _driver(probe).attach(session_id)
     await resumed.chat("after restore")
     after = list(probe.history(resumed).records)
     assert len(after) > len(records_before)
