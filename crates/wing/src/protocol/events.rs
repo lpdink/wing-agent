@@ -738,8 +738,10 @@ fn default_notice_level() -> String {
 impl WingEvent {
     /// Decode one session-history event payload (a chain event record).
     ///
-    /// Replay accepts absent or null metadata and tool call ids as empty strings.
-    /// Decode by reference when the payload already satisfies those rules.
+    /// Gateway history includes metadata from `wire_dump`. Replay accepts
+    /// absent or null metadata and tool call IDs as empty strings in old records.
+    /// Unknown types decode to `Unknown`. Replay callers skip known types
+    /// whose payloads fail to decode.
     pub fn from_history_value(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
         const META: [&str; 2] = ["created_at", "request_id"];
         const TOOL_CALL_ID: &str = "tool_call_id";
@@ -1968,6 +1970,28 @@ mod tests {
     }
 
     #[test]
+    fn history_facts_with_wire_metadata_decode_without_tool_call_id() {
+        for mut payload in [
+            serde_json::json!({"type": "interrupted", "dropped_request_ids": ["queued"]}),
+            serde_json::json!({
+                "type": "error", "message": "busy", "status_code": 409,
+                "error_code": "turn_busy", "detail": "try again"
+            }),
+            serde_json::json!({
+                "type": "compact_done", "original_tokens": 180,
+                "compressed_tokens": 42, "model": "model-a"
+            }),
+        ] {
+            payload["created_at"] = "2026-01-01T00:00:00Z".into();
+            payload["request_id"] = "request-1".into();
+            payload["session_id"] = "session-1".into();
+            let event = WingEvent::from_history_value(&payload).unwrap();
+            assert_eq!(event.event_type(), payload["type"].as_str().unwrap());
+            assert_eq!(serde_json::to_value(event).unwrap(), payload);
+        }
+    }
+
+    #[test]
     fn history_value_null_tool_call_id_reads_as_absent() {
         // The renderers treat null `tool_call_id` exactly like an absent one
         // (the replaced decoders declared it `Option<String>`): both decode to
@@ -1976,14 +2000,29 @@ mod tests {
             let mut payload = serde_json::json!({
                 "type": event_type,
                 "tool_call_id": null,
+                "created_at": "2026-01-01T00:00:00Z",
+                "request_id": "request-1",
+                "session_id": "session-1",
             });
             if event_type == "diff_content" {
                 payload["path"] = "f".into();
                 payload["new_text"] = "n".into();
             }
+            assert!(WingEvent::deserialize(&payload).is_err(), "{event_type}");
             let from_null = WingEvent::from_history_value(&payload).unwrap();
             payload.as_object_mut().unwrap().remove("tool_call_id");
+            let live = WingEvent::deserialize(&payload).unwrap();
             let from_absent = WingEvent::from_history_value(&payload).unwrap();
+            let expected = serde_json::to_value(live).unwrap();
+            for event in [&from_absent, &from_null] {
+                assert_eq!(
+                    serde_json::to_value(event).unwrap(),
+                    expected,
+                    "{event_type}"
+                );
+                assert_eq!(event.request_id(), Some("request-1"));
+                assert_eq!(event.session_id(), Some("session-1"));
+            }
 
             let id = |ev: &WingEvent| match ev {
                 WingEvent::DiffContent { tool_call_id, .. }
@@ -2014,6 +2053,17 @@ mod tests {
                 "path": "f",
             }))
             .is_err()
+        );
+        let malformed_fact = serde_json::json!({
+            "type": "compact_done", "original_tokens": 180,
+            "created_at": "2026-01-01T00:00:00Z",
+            "request_id": "request-1", "session_id": "session-1",
+        });
+        assert_eq!(
+            WingEvent::from_history_value(&malformed_fact)
+                .unwrap_err()
+                .to_string(),
+            "missing field `compressed_tokens`"
         );
         // No discriminator at all.
         assert!(WingEvent::from_history_value(&serde_json::json!({})).is_err());
