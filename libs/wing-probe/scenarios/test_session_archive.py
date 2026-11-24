@@ -178,21 +178,10 @@ async def test_archive_roundtrip_is_a_pure_move_and_freezes(probe: Probe) -> Non
 
     # 列表归属：live 消失、归档列表可见（标题 / 模型 / 归档时间）。
     assert session_id not in await _live_ids(probe)
-    indexed = await _archived_entries(probe)
-    assert [entry["id"] for entry in indexed] == [session_id]
-    assert indexed[0]["archived_at"]
-
-    index = archived_dir.parent / "index.json"
-    index.unlink()
-    await probe.restart_gateway()
-    async with asyncio.timeout(POLL_DEADLINE):
-        while not index.is_file():
-            await asyncio.sleep(POLL_INTERVAL)
     entries = await _archived_entries(probe)
     assert [entry["id"] for entry in entries] == [session_id]
-    assert (archived_dir / "history.jsonl").read_bytes() == live_bytes
     assert entries[0]["name"] == "hello"
-    assert entries[0]["archived_at"] is None
+    assert entries[0]["archived_at"]
     assert entries[0]["model_id"] == ROUNDTRIP_MODEL
     assert ".archive" not in await _live_ids(probe)  # 保留命名空间不成会话
 
@@ -210,6 +199,15 @@ async def test_archive_roundtrip_is_a_pure_move_and_freezes(probe: Probe) -> Non
     # 幂等：重复归档不报错、不移动。
     again = await _archive(probe, session_id, archived=True)
     assert again["changed"] is False and again["detail"] == "already archived"
+
+    index = archived_dir.parent / "index.json"
+    index.unlink()
+    await probe.restart_gateway()
+    async with asyncio.timeout(POLL_DEADLINE):
+        while not index.is_file():
+            await asyncio.sleep(POLL_INTERVAL)
+    assert await _archived_entries(probe) == [{**entries[0], "archived_at": None}]
+    assert (archived_dir / "history.jsonl").read_bytes() == live_bytes
 
     # 恢复：字节一致 + 继续对话后链的前缀逐记录一致（红线）。
     restored = await _archive(probe, session_id, archived=False)
