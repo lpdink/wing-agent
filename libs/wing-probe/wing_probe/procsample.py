@@ -20,7 +20,7 @@ import os
 import resource
 import struct
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -135,7 +135,18 @@ def percentile(values: Sequence[float], pct: float) -> float:
 
     空序列 → ``ValueError``（没有样本就没有百分位，不返回 0）。
     """
+    return _nearest_rank(sorted(values), pct)
+
+
+def percentiles(
+    values: Sequence[float], labeled_pcts: Iterable[tuple[str, float]]
+) -> dict[str, float]:
+    """对同一批样本排序一次，按标签返回各 nearest-rank 百分位。"""
     ordered = sorted(values)
+    return {label: _nearest_rank(ordered, pct) for label, pct in labeled_pcts}
+
+
+def _nearest_rank(ordered: Sequence[float], pct: float) -> float:
     if not ordered:
         raise ValueError("percentile() of an empty sequence")
     rank = max(1, math.ceil(pct / 100.0 * len(ordered)))
@@ -157,6 +168,7 @@ def write_json(path: Path, payload: Any) -> None:
 __all__ = [
     "CpuSampleError",
     "percentile",
+    "percentiles",
     "process_cpu_seconds",
     "self_cpu_seconds",
     "write_json",

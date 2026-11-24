@@ -4,8 +4,7 @@
 两条口径必须写在数据旁边，因为它们是「数字可信」的全部：
 
 1. **百分位是 nearest-rank**（p99 = 升序第 ``ceil(0.99·n)`` 个值，不做线性插值），
-   与 ``scripts/perf/suite_gateway.py`` 一致——两处不共享实现（那边住在一个套件
-   脚本里，跨工具 import 会把整条 perf 测量链拉进来），但秩定义相同。
+   与 ``scripts/perf/suite_gateway.py`` 共用 ``wing_probe.procsample`` 的秩定义。
 2. **投递延迟按通道、按下标配对**：假 Provider 的每帧带一个通道标记
    （``FrameEmit.kind``），可配对的三个通道各有自己的客户端事件（见
    :data:`CHANNEL_EVENTS`）：``content`` ↔ ``text``、``thinking`` ↔ ``reasoning``、
@@ -134,7 +133,9 @@ def spread(values: Sequence[float]) -> dict[str, float]:
     """``{"p50": …, "p99": …, "p999": …}``；空序列 → ``{}``（调用方写 null）。"""
     if not values:
         return {}
-    return {label: percentile(values, pct) for label, pct in SPREAD_PERCENTILES}
+    from wing_probe.procsample import percentiles
+
+    return percentiles(values, SPREAD_PERCENTILES)
 
 
 # ── 投递延迟配对 ───────────────────────────────────────────────
@@ -199,6 +200,11 @@ def build_emit_ledger(provider: Any) -> EmitLedger:
             "emit times, so delivery latency cannot be paired against the emitter "
             "clock (needs FakeProvider.frame_emits)"
         )
+    return emit_ledger_from_snapshot(emits)
+
+
+def emit_ledger_from_snapshot(emits: Iterable[Any]) -> EmitLedger:
+    """将已经读取的发射快照按请求和通道分组。"""
     grouped: dict[int, dict[str, list[tuple[int, float]]]] = {}
     for entry in emits:
         kind = getattr(entry, "kind", None)

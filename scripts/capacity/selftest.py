@@ -89,8 +89,8 @@ def check_stats() -> None:
         "empty samples must yield an empty spread (callers write null, never 0)",
     )
     _check(
-        set(metrics.spread(hundred)) == {"p50", "p99", "p999"},
-        "spread must expose p50 / p99 / p999",
+        metrics.spread(hundred[::-1]) == {"p50": 50.0, "p99": 99.0, "p999": 100.0},
+        "spread must use nearest ranks on unsorted samples",
     )
     try:
         metrics.percentile([], 50.0)
@@ -457,8 +457,17 @@ def check_assemble() -> None:
     )
     requests = RequestLog()
     requests.record({"messages": [{"role": "user", "content": "load:s0:0"}]}, model="m")
-    provider = SimpleNamespace(
-        frame_emits=tuple(
+
+    class CountingProvider(SimpleNamespace):
+        snapshot_reads = 0
+
+        @property
+        def frame_emits(self) -> tuple[Any, ...]:
+            self.snapshot_reads += 1
+            return self.emits
+
+    provider = CountingProvider(
+        emits=tuple(
             [
                 SimpleNamespace(
                     request_index=0, frame_index=0, at=100.005, kind="meta"
@@ -490,6 +499,7 @@ def check_assemble() -> None:
         payloads=[_sample_payload()],
         notes=notes,
     )
+    _check(provider.snapshot_reads == 1, "assemble must read the emit snapshot once")
     metrics_block = record["metrics"]
     samples = record["samples"]
     _check(samples["delivery_available"] is True, "delivery must be reported available")
