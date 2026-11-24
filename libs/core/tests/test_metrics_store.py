@@ -884,6 +884,59 @@ class TestBackfill:
         assert rows["20260102-030405-abcdef"]["parent_session_id"] == "root-1"
         assert rows["20260103-030405-abcdef"]["forked_from"] == "src-1"
 
+    def test_archive_index_repairs_before_filtering_known_ids(
+        self, tmp_path: Path, db: Database, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = _store(tmp_path)
+        shared = "20260101-030405-shared"
+        unknown = "20260102-030405-unknown"
+        fallback = "20260103-030405-fallback"
+        for sid in (shared, unknown, fallback):
+            store.save_metadata(sid, SessionMetadata(workspace=f"/{sid}", tags=LISTED))
+            _write_history(store, sid, "2026-01-01T03:04:05")
+            store.archive(sid)
+        store.save_metadata(shared, SessionMetadata(workspace="/live", tags=LISTED))
+
+        archive = store.root / ".archive"
+        index = archive / "index.json"
+        (archive / unknown / "metadata.json").write_text("{", encoding="utf-8")
+        (archive / fallback / "metadata.json").unlink()
+        read_archived = store.load_archived_metadata
+        reads: list[str] = []
+
+        def count_metadata(session_id: str) -> SessionMetadata | None:
+            reads.append(session_id)
+            return read_archived(session_id)
+
+        monkeypatch.setattr(store, "load_archived_metadata", count_metadata)
+        with patch("wing.store.file.log") as logger:
+            assert backfill_catalog([store], database=db) == 3
+            assert reads == [unknown, fallback]
+            assert logger.warning.call_count == 1
+            assert f"Corrupted metadata.json for session '{unknown}'" in str(
+                logger.warning.call_args
+            )
+
+        rows = {
+            row["session_id"]: row["workspace"]
+            for row in db.query("SELECT session_id, workspace FROM session_catalog")
+        }
+        assert rows == {shared: "/live", unknown: None, fallback: f"/{fallback}"}
+
+        reads.clear()
+        with patch("wing.store.file.log") as logger:
+            assert backfill_catalog([store], database=db) == 0
+            assert reads == []
+            logger.warning.assert_not_called()
+            index.unlink()
+            assert backfill_catalog([store], database=db) == 0
+            assert index.exists()
+            assert reads == []
+            assert f"Corrupted metadata.json for session '{unknown}'" in str(
+                logger.warning.call_args
+            )
+        assert {entry.id for entry in store.list_archived()} == {shared, unknown, fallback}
+
     def test_archived_metadata_api(self, tmp_path: Path) -> None:
         """归档 metadata 只读口：live 区 / 归档区互不可见，不存在返回 None。"""
         store = _store(tmp_path)

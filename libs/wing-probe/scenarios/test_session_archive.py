@@ -178,8 +178,12 @@ async def test_archive_roundtrip_is_a_pure_move_and_freezes(probe: Probe) -> Non
 
     # 列表归属：live 消失、归档列表可见（标题 / 模型 / 归档时间）。
     assert session_id not in await _live_ids(probe)
+    index = archived_dir.parent / "index.json"
+    index.unlink()
     entries = await _archived_entries(probe)
+    assert index.is_file()
     assert [entry["id"] for entry in entries] == [session_id]
+    assert (archived_dir / "history.jsonl").read_bytes() == live_bytes
     assert entries[0]["name"] == "hello"
     assert entries[0]["archived_at"]
     assert entries[0]["model_id"] == ROUNDTRIP_MODEL

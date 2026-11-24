@@ -121,7 +121,7 @@ def backfill_catalog(
     known = _known_ids(db)
     batch: list[tuple[Any, ...]] = []
     for store in stores:
-        for candidate in _candidates(store):
+        for candidate in _candidates(store, known):
             if candidate.session_id in known:
                 continue
             # 先把整批参数解析完（读 metadata / 日志首条）再开事务：文件 I/O 不该占着
@@ -236,7 +236,7 @@ def _log_start(store: SessionStore, session_id: str) -> datetime | None:
     return None
 
 
-def _candidates(store: SessionStore) -> Iterator[_Candidate]:
+def _candidates(store: SessionStore, known: set[str]) -> Iterator[_Candidate]:
     """磁盘上的候选会话：live 区（可读 ``metadata`` / 日志）+ 归档区（只读 metadata）。"""
     try:
         for summary in store.list_summaries():
@@ -253,16 +253,11 @@ def _candidates(store: SessionStore) -> Iterator[_Candidate]:
             )
     except (OSError, ValueError) as exc:  # 一个后端的目录读不动不该中断别的后端
         log.warning(f"session_catalog: cannot list sessions: {exc!r}")
-    for archived in _archived(store):
-        yield archived
+    yield from _archived(store, known)
 
 
-def _archived(store: SessionStore) -> Iterator[_Candidate]:
-    """归档区条目（不具备归档能力的后端 → 空）。
-
-    归档会话的父 / fork 源只存在于它自己的 ``metadata.json`` 里（归档索引不存这两列），
-    因此逐个读一次 metadata——归档列表本身是低频路径。
-    """
+def _archived(store: SessionStore, known: set[str]) -> Iterator[_Candidate]:
+    """先让归档索引对账，再给目录缺少的会话读血缘等 metadata。"""
     try:
         entries = store.list_archived()
     except NotImplementedError:
@@ -271,6 +266,8 @@ def _archived(store: SessionStore) -> Iterator[_Candidate]:
         log.warning(f"session_catalog: cannot list archived sessions: {exc!r}")
         return
     for entry in entries:
+        if entry.id in known:
+            continue
         metadata = store.load_archived_metadata(entry.id)
         if metadata is None:
             yield _Candidate(
