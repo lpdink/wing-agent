@@ -29,6 +29,8 @@ jobs:
   python-check:
     name: Python Check
     runs-on: ubuntu-latest
+    env:
+      UV_NO_SYNC: "1"  # 后续 uv run 复用跳过 wing-cli 的显式安装。
 
     steps:
       # fetch-depth: 0 —— 增量覆盖率门禁要算与目标分支的 merge-base（非 PR 没用上，
@@ -47,7 +49,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked --no-install-package wing-cli
 
       # 与本地**同一条命令**：ruff 覆盖 libs/ + scripts/、vulture 走 60 档 + 白名单
       # （判据在 pyproject.toml 与 docs/dev/coverage.md）。分步调用会让两侧口径再次漂移，
@@ -97,6 +99,8 @@ jobs:
   probe-check:
     name: Probe Check
     runs-on: ubuntu-latest
+    env:
+      UV_NO_SYNC: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +113,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked --no-install-package wing-cli
 
       - name: Probe scenarios
         run: make test-probe
