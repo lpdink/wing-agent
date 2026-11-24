@@ -11,9 +11,8 @@ TrackedList — 链拓扑引擎，UUID + parentUuid 链模型。
   记录级判别靠 role 字段。加载时按 role 分发（事件走 EVENT_TYPES 注册表）。
 - 始终以类型化对象工作，存储层传输 raw dict（ts 由本类注入）
 - 内存中维护 full chain map（_all_items），find/trace_chain 从内存读取
-
-写端由会话串行调用。自动压缩通过 extend_detached 批量追加摘要和重链接节点，
-写入成功后才更新内存并切换 tip。
+- 写端由会话串行调用。自动压缩通过 extend_detached 批量追加摘要和重链接节点，
+  写入成功后才更新内存并切换 tip。文件后端的回截与冷读契约见 FileMessageLog。
 """
 
 from __future__ import annotations

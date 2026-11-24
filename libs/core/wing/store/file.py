@@ -194,6 +194,7 @@ class FileMessageLog(MessageLog):
                 self._tails.offsets.pop(self._path)
 
     def requires_recovery(self) -> bool:
+        """Return whether this store currently holds an in-process tail boundary."""
         with self._tails.lock:
             return self._path in self._tails.offsets
 

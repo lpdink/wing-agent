@@ -290,9 +290,16 @@ class TestFileLogStreaming:
             assert b"later" not in history.read_bytes()
 
         assert list(log.path.iterdir()) == [history]
+        marker = log.path / ".history-recovery.json"
+        marker.write_text(str(len(before)), encoding="utf-8")
+
         reopened = store.open_log(sid)
+        assert reopened.requires_recovery()
         assert [m["content"] for m in reopened.iter_all()] == ["keep"]
-        assert b"uncertain" in history.read_bytes()
+        fresh = FileSessionStore(tmp_path).open_log(sid)
+        assert not fresh.requires_recovery()
+        assert [m["content"] for m in fresh.iter_all()] == ["keep", "uncertain"]
+        assert marker.read_text(encoding="utf-8") == str(len(before))
         reopened.append([{"role": "user", "content": "later"}])
         assert history.read_bytes().startswith(before)
         assert b"uncertain" not in history.read_bytes()
