@@ -324,6 +324,9 @@ class TrackedList(Generic[T]):
     def __iter__(self) -> Iterator[T]:
         return iter(self._data)
 
+    def __reversed__(self) -> Iterator[T]:
+        return reversed(self._data)
+
     def __contains__(self, item: object) -> bool:
         return item in self._data
 

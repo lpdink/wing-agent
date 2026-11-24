@@ -839,9 +839,10 @@ class ContextManager:
         start = self._usage_trust_start(chain)
         if start is None:
             return 0, None
-        window_start = sum(1 for node in islice(chain, start) if isinstance(node, Message))
-        for index in range(len(chain) - 1, start - 1, -1):
-            node = chain[index]
+        window_start = sum(
+            1 for node in islice(chain, start) if isinstance(node, Message)
+        )
+        for node in islice(reversed(chain), len(chain) - start):
             if (
                 isinstance(node, Message)
                 and node.role == "assistant"
