@@ -36,9 +36,10 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
   就是它——**展示的数字 = 门禁的数字**）；同时点名统计面外的改动与净删除的测试行
   （不判定，供评论展示）。`--selftest` 离线自检（diff 状态机、引号路径、两种覆盖率
   格式解析、判定边界、临时 git 仓库端到端），CI 在 python-check 里每次跑。
-- `make patch-cov-python` / `make patch-cov-rust`：本地 = CI 同一条命令——先由
-  既有 `.coverage` / profraw 导出（不重跑测试），再判定；CI 用 env 覆盖
-  `PATCH_BASE` 到目标分支。
+- `make patch-cov-python` / `make patch-cov-rust` 由既有 `.coverage` / profraw
+  导出后判定。Python CI 用 `make export-cov-python` 导出 JSON 供评论和
+  `make patch-cov-python-json` 共用，Rust CI 直接跑 `make patch-cov-rust`。
+  CI 通过 `PATCH_BASE` 指定目标分支。
 - 为什么门禁放 check job：失败面贴在语言对应的检查项上（Python Check / Rust
   Check 红），评论 job 只负责渲染。
 
