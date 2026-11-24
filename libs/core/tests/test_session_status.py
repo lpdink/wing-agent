@@ -33,11 +33,11 @@ def _sid(label: str) -> str:
 def _make_agent(working: bool = False) -> WingAgent:
     """构造最小化 WingAgent（绕过 __init__，避免启动 worker task）。
 
-    仅设置 status property 依赖的属性：_inbox 与 _working。
+    仅设置 status 依赖的 inbox 与 turn 相位。
     """
     agent = object.__new__(WingAgent)
     agent._inbox = Inbox()
-    agent._working = working
+    agent._set_working(working)
     return agent
 
 
@@ -80,7 +80,7 @@ class TestAgentStatus:
 
     def test_back_to_idle_after_turn(self):
         agent = _make_agent(working=True)
-        agent._working = False
+        agent._set_working(False)
         assert agent.status == "idle"
 
 
@@ -112,7 +112,7 @@ class TestSessionStatusDelegation:
         )
 
         assert session.status == "working"
-        agent._working = False
+        agent._set_working(False)
         assert session.status == "idle"
 
 

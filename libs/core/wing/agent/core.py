@@ -156,10 +156,9 @@ class WingAgent:
         self._interrupt_hooks: dict[str, Callable[[], None]] = {}
 
         # ── Worker 生命周期 ──
-        self._working: bool = False
         # 当前 turn 的开始时刻（UTC）——working 状态期间有效，供 resume 的
         # SyncSessionEvent.turn_started_at 取值（前端据此恢复已耗时而非从
-        # resume 时刻重算）。与 _working 同生命周期（_set_working 维护）。
+        # resume 时刻重算）。
         self._turn_started_at: datetime | None = None
         self._interrupt_lock = asyncio.Lock()
         # shutdown 是一次性的终局：置位后终局续期（见 `_on_worker_done` /
@@ -355,7 +354,7 @@ class WingAgent:
         """Session 运行时状态。优先级：waiting > working > idle。"""
         if self._inbox.has_waiters:
             return "waiting"
-        if self._working:
+        if self._turn_started_at is not None:
             return "working"
         return "idle"
 
@@ -843,13 +842,7 @@ class WingAgent:
     # ── 内部 ──
 
     def _set_working(self, value: bool) -> None:
-        self._working = value
-        # turn_started_at 与 working 同生命周期：进入 working 登记开始时刻，
-        # 退出（收口/中断/错误——run_turn 的 finally 必经此处）清空。
-        if value:
-            self._turn_started_at = datetime.now(timezone.utc)
-        else:
-            self._turn_started_at = None
+        self._turn_started_at = datetime.now(timezone.utc) if value else None
 
     def _fire_interrupt_hooks(self) -> None:
         """触发 interrupt hooks（如杀子进程）。"""

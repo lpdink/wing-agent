@@ -217,7 +217,6 @@ class TestReportPathIsUnfailable:
         ), _types(events)
 
         # ② 状态复位：working 归位、可被下一次投递干净使用。
-        assert agent._working is False
         assert agent.status == "idle"
         assert agent.turn_started_at is None
 
@@ -288,7 +287,7 @@ class TestReportPathIsUnfailable:
         ], _types(events)
         assert agent._worker is worker and not worker.done()
         assert agent.status == "idle"
-        assert agent._working is False
+        assert agent.turn_started_at is None
 
         # 磁盘恢复：会话自然继续工作。
         recover()
