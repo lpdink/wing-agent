@@ -48,6 +48,19 @@ class ToolCallEvent(WingEvent):
         )
 
 
+class ToolExecutionTiming(BaseModel):
+    elapsed_ms: int
+    running: bool
+    timeout_secs: float | None = None
+
+
+class ToolExecutionTimingEvent(WingEvent):
+    type: Literal["tool_execution_timing"] = "tool_execution_timing"
+    persist: ClassVar[bool] = False
+    tool_call_id: str
+    timing: ToolExecutionTiming
+
+
 class ToolCallStreamEvent(WingEvent):
     """Streaming tool call args fragment — emitted during LLM generation.
 

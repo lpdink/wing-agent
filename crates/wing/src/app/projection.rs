@@ -19,7 +19,6 @@ use super::turn_state;
 use crate::protocol::EventMeta;
 use crate::protocol::SessionSnapshot;
 use crate::protocol::WingEvent;
-use crate::shared::constants::TOOL_BASH;
 use crate::shared::constants::TOOL_TODO;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::AskPayload;
@@ -349,25 +348,25 @@ impl App {
                 self.ctx.current_thinking = None;
                 self.ctx.current_assistant = None;
 
-                // If a streaming cell already exists for this id, update it
                 if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
                     self.chat.update_tool_args_by_index(idx, tool_args);
                     self.chat.set_tool_status_by_index(idx, ToolStatus::Pending);
-                    // Start timer for Bash tools on execution start.
-                    if tool_name == TOOL_BASH {
-                        self.chat.set_tool_started_at_by_index(idx);
-                    }
                 } else {
-                    let mut block =
-                        ToolCallBlock::new(tool_name.clone(), tool_args, tool_call_id.clone());
-                    // Start timer for Bash tools.
-                    if tool_name == TOOL_BASH {
-                        block.start_timer(std::time::Instant::now());
-                    }
-                    self.chat.push(ChatCell::ToolCall(block));
+                    self.chat.push(ChatCell::ToolCall(ToolCallBlock::new(
+                        tool_name.clone(),
+                        tool_args,
+                        tool_call_id,
+                    )));
                 }
 
                 tracing::debug!(tool = %tool_name, "tool call started");
+            }
+            WingEvent::ToolExecutionTiming {
+                tool_call_id,
+                timing,
+                ..
+            } => {
+                self.chat.set_tool_execution_timing(&tool_call_id, timing);
             }
             WingEvent::ToolCallResult {
                 tool_name,
@@ -707,6 +706,7 @@ impl App {
             events,
             status,
             turn_started_at,
+            tool_execution_timings,
             draft,
             name,
             agent,
@@ -790,7 +790,7 @@ impl App {
         self.model_panel = None;
 
         // Restore working state BEFORE feeding uncommitted content, so
-        // the spinner / Bash timers / terminal title reflect an
+        // the spinner and terminal title reflect an
         // in-progress turn (a mid-turn resume). `turn_started_at`
         // restores the real elapsed instead of recounting from resume.
         //
@@ -831,10 +831,10 @@ impl App {
         //    handle_event as a pseudo-event.
         if let Some(uncommitted_msg) = &uncommitted {
             replay::replay_messages(&mut self.chat, std::slice::from_ref(uncommitted_msg));
-            // A mid-execution Bash card (finalized tool_use, no result
-            // yet) shows elapsed anchored to the turn start.
-            if let Some(instant) = turn_instant {
-                self.chat.mark_pending_bash_running(instant);
+        }
+        if status.turn_in_flight() {
+            for (call_id, timing) in tool_execution_timings {
+                self.chat.set_tool_execution_timing(&call_id, timing);
             }
         }
         // 3. Unfinished tool calls' raw args fragments — through the

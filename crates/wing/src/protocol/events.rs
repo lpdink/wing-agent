@@ -11,6 +11,8 @@
 //! 镜像），所以这里直接复用 [`wing_api_client::models::SessionUsage`] 而不是
 //! 再定义一份——两份定义必然漂移，而它们本就该逐字段相同。
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -20,6 +22,14 @@ use wing_api_client::models::SessionUsage;
 // ============================================================
 // Shared / nested types
 // ============================================================
+
+/// Elapsed at the server when this execution timing was emitted or snapshotted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ToolExecutionTiming {
+    pub elapsed_ms: u64,
+    pub running: bool,
+    pub timeout_secs: Option<f64>,
+}
 
 /// Common metadata present on every event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -249,6 +259,8 @@ pub struct SessionSnapshot {
     /// turn is in progress.
     #[serde(default)]
     pub turn_started_at: Option<String>,
+    #[serde(default)]
+    pub tool_execution_timings: HashMap<String, ToolExecutionTiming>,
     /// Boxed: the agent snapshot is the largest inline payload of this
     /// variant — boxing keeps `WingEvent` small (clippy large_enum_variant).
     #[serde(default)]
@@ -361,6 +373,15 @@ pub enum WingEvent {
         args_fragment: String,
         #[serde(default)]
         is_final: bool,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
+    /// Timing at the start or end of a tool's execution boundary.
+    #[serde(rename = "tool_execution_timing")]
+    ToolExecutionTiming {
+        tool_call_id: String,
+        timing: ToolExecutionTiming,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -764,6 +785,7 @@ impl WingEvent {
             Self::Reasoning { .. } => "reasoning",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolCallStream { .. } => "tool_call_stream",
+            Self::ToolExecutionTiming { .. } => "tool_execution_timing",
             Self::ToolCallResult { .. } => "tool_call_result",
             Self::LlmCallMetrics { .. } => "llm_call_metrics",
             Self::Ask { .. } => "ask",
@@ -800,6 +822,7 @@ impl WingEvent {
             | Self::Reasoning { meta, .. }
             | Self::ToolCall { meta, .. }
             | Self::ToolCallStream { meta, .. }
+            | Self::ToolExecutionTiming { meta, .. }
             | Self::ToolCallResult { meta, .. }
             | Self::LlmCallMetrics { meta, .. }
             | Self::Ask { meta, .. }
@@ -1702,8 +1725,10 @@ mod tests {
                 uncommitted_tools,
                 events,
                 turn_started_at,
+                tool_execution_timings,
                 ..
             }) => {
+                assert!(tool_execution_timings.is_empty());
                 assert_eq!(session_id, "s1");
                 assert_eq!(messages.len(), 1);
                 assert!(uncommitted.is_none());
@@ -1809,7 +1834,10 @@ mod tests {
             "type": "sync_session",
             "session_id": "s1",
             "messages": [],
-            "uncommitted": {"role": "assistant", "content": "partial"},
+            "uncommitted": {"role": "assistant", "content": "partial", "tool_calls": [
+                {"id": "tc2", "name": "Bash", "arguments": {"command": "ls"}}
+            ]},
+            "tool_execution_timings": {"tc2": {"elapsed_ms": 1000, "running": true, "timeout_secs": 30}},
             "uncommitted_tools": [
                 {"tool_call_id": "tc1", "tool_name": "Bash", "args_fragment": "{\"c"}
             ],
@@ -1825,8 +1853,11 @@ mod tests {
                 uncommitted,
                 uncommitted_tools,
                 turn_started_at,
+                tool_execution_timings,
                 ..
             }) => {
+                assert_eq!(tool_execution_timings["tc2"].elapsed_ms, 1000);
+                assert!(tool_execution_timings["tc2"].running);
                 assert!(uncommitted.is_some());
                 assert_eq!(uncommitted_tools.len(), 1);
                 assert_eq!(uncommitted_tools[0]["tool_call_id"].as_str(), Some("tc1"));

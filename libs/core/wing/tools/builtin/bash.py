@@ -6,6 +6,7 @@ import os
 import time
 
 from wing.agent import ToolContext
+from wing.agent.tool_context import measure_tool_execution
 from wing.common.logger import log, utf8_safe
 from wing.common.process import kill_process_group
 from wing.schema import ToolError
@@ -143,7 +144,8 @@ async def _execute_command(command: str, ctx: ToolContext, timeout: int) -> str:
         hook_id = ctx.register_interrupt_hook(lambda: kill_process_group(process))
         try:
             try:
-                await asyncio.wait_for(process.wait(), timeout=timeout)
+                with measure_tool_execution(timeout):
+                    await asyncio.wait_for(process.wait(), timeout=timeout)
             except asyncio.TimeoutError:
                 stdout, stderr = await _drain_pipes(process, timeout=0.5)
                 kill_process_group(process)

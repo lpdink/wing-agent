@@ -268,9 +268,13 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 `tool_runtime` 角色连接时须经 `?client_id=<id>` 自选 client_id（admin 也可自选，未声明者服务端分配）；该 WS 是纯工具执行通道，不参与事件订阅。
 
-**ReAct 事件**（`event/react.py`）：`turn_started` · `user_message_accepted` · `text` · `reasoning` · `tool_call_stream` · `tool_call` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
+**ReAct 事件**（`event/react.py`）：`turn_started` · `user_message_accepted` · `text` · `reasoning` · `tool_call_stream` · `tool_call` · `tool_execution_timing` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
 
 > `tool_call_stream`：LLM 生成工具参数期间的流式渲染事件，携带**增量原始 args 文本碎片**（`args_fragment`，首个事件含完整前缀）。后端不解析 partial JSON，前端自行累积 buffer 并容错解析渲染；参数生成结束后由 `tool_call` 事件携带权威解析结果。
+>
+> `tool_execution_timing` 随内置 Bash 进入和退出子进程等待阶段发出，携带 `tool_call_id` 与 `timing`。`timing` 包含服务端单调钟测得的 `elapsed_ms`、是否仍在运行的 `running` 及适用的超时预算 `timeout_secs`。`sync_session.tool_execution_timings` 与 `session_history_refreshed.tool_execution_timings` 按调用 ID 提供当前未提交批次的可用计时。客户端收到运行中的计时后用本地单调钟续算，收到结束计时后显示固定时长。等待批准时没有进程计时。会话历史重放不提供进程计时。
+>
+> `tool_call_result.duration_ms` 仍以工具调用为测量单位，包含批准和 hook 等调用阶段，供审计与用量使用。参数非法、工具未知或中断时的合成结果省略该字段。
 
 会话订阅端按 WS 到达顺序应用用户输入事件：
 

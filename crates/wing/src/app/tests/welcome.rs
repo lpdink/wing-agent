@@ -579,6 +579,7 @@ fn the_start_screen_shows_session_facts_in_the_nameplate() {
         session_id: "test-session".into(),
         messages: vec![],
         pending_user_messages: None,
+        tool_execution_timings: Default::default(),
         uncommitted: None,
         uncommitted_tools: vec![],
         events: vec![],

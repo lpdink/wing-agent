@@ -25,7 +25,13 @@ from wing.config import (
     resolve_model_capabilities,
     resolve_model_display_name,
 )
-from wing.event import AskEvent, InterruptedEvent, NoticeEvent, WingEvent
+from wing.event import (
+    AskEvent,
+    InterruptedEvent,
+    NoticeEvent,
+    ToolExecutionTiming,
+    WingEvent,
+)
 from wing.provider import RequestOptions
 from wing.provider.base import ModelProvider
 from wing.provider.pool import get_provider
@@ -288,6 +294,9 @@ class WingAgent:
     def turn_started_at(self) -> datetime | None:
         """当前 turn 的开始时刻（UTC）；无进行中 turn 时为 None。"""
         return self._turn_started_at
+
+    def tool_execution_timings(self) -> dict[str, ToolExecutionTiming]:
+        return self._executor.tool_execution_timings()
 
     def uncommitted_message(self) -> dict | None:
         """未提交的 assistant Message 投影（单个 Message 形状 dict | None）。

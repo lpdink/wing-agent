@@ -9,6 +9,7 @@ use crate::protocol::AskQuestion;
 use crate::protocol::EventMeta;
 use crate::protocol::SessionSnapshot;
 use crate::protocol::SessionStatus;
+use crate::protocol::ToolExecutionTiming;
 use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelMode;
@@ -228,97 +229,146 @@ fn mid_turn_bash_sync(turn_started_ago: i64) -> WingEvent {
     )
 }
 
-/// #108: a Bash card replayed mid-execution (resume / late subscription) has
-/// no observable execution instant — `mark_pending_bash_running` anchors it
-/// to the turn start, an upper bound on the tool's runtime. Rendered
-/// an upper bound (`≤837s`), never paired with the tool's own timeout:
-/// `837s/300s` reads as "this Bash blew its budget and was not interrupted".
 #[test]
-fn test_sync_mid_turn_bash_timer_renders_approximate_not_timeout_pair() {
+fn test_sync_mid_turn_bash_without_execution_fact_omits_timer() {
     let mut app = test_app();
     app.handle_event(mid_turn_bash_sync(837));
 
     let header = tool_header(&app, "tc-bash");
-    assert!(
-        header.contains("≤837s") || header.contains("≤838s"),
-        "turn-anchored elapsed must render as an upper bound: {header}"
-    );
-    assert!(
-        !header.contains("300"),
-        "the tool timeout must not appear beside it: {header}"
-    );
+    assert_eq!(header, "⦁ Bash(sleep 100)");
 }
 
-/// #108: the same card finishing while we watch drops the turn-anchored
-/// timer — the frozen value (turn elapsed at completion) would display a
-/// wrong duration forever.
 #[test]
-fn test_sync_replayed_bash_drops_turn_timer_when_result_arrives() {
+fn test_sync_mid_turn_bash_uses_per_call_starts_and_server_duration() {
     let mut app = test_app();
-    app.handle_event(mid_turn_bash_sync(837));
-    app.handle_event(WingEvent::ToolCallResult {
-        tool_name: "Bash".into(),
-        tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
-        tool_call_id: "tc-bash".into(),
-        tool_result: "done".into(),
-        tool_success: true,
-        model: "test-model".into(),
-        tool_media: Vec::new(),
-        meta: EventMeta {
-            created_at: "2026-01-01T00:00:00+00:00".into(),
-            session_id: Some("test-session".into()),
-            request_id: "r".into(),
-        },
-    });
-
-    let header = tool_header(&app, "tc-bash");
-    assert!(
-        !header.contains('≤'),
-        "turn-anchored timer must not outlive the result: {header}"
-    );
-    assert!(
-        !header.contains("s/"),
-        "no frozen timeout pair after the result: {header}"
-    );
-    assert!(header.contains("sleep 100"), "card intact: {header}");
-}
-
-/// The live path is untouched by #108: an execution-anchored timer keeps its
-/// exact form and its frozen runtime after the result lands.
-#[test]
-fn test_live_bash_timer_keeps_frozen_timeout_pair_after_result() {
-    let mut app = test_app();
-    let meta = EventMeta {
-        created_at: "2026-01-01T00:00:00+00:00".into(),
-        session_id: Some("test-session".into()),
-        request_id: "r".into(),
+    let mut sync = mid_turn_bash_sync(837);
+    let WingEvent::SyncSession(snapshot) = &mut sync else {
+        unreachable!();
     };
-    app.handle_event(WingEvent::ToolCall {
-        tool_name: "Bash".into(),
-        tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
-        tool_call_id: "tc-live".into(),
-        meta: meta.clone(),
-    });
-    app.handle_event(WingEvent::ToolCallResult {
-        tool_name: "Bash".into(),
-        tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
-        tool_call_id: "tc-live".into(),
-        tool_result: "done".into(),
-        tool_success: true,
-        model: "test-model".into(),
-        tool_media: Vec::new(),
-        meta,
-    });
+    let calls = snapshot.uncommitted.as_mut().unwrap()["tool_calls"]
+        .as_array_mut()
+        .unwrap();
+    for (id, command) in [("tc-second", "echo two"), ("tc-unstarted", "echo three")] {
+        calls.push(serde_json::json!({
+            "id": id, "name": "Bash", "arguments": {"command": command, "timeout": 60},
+        }));
+    }
+    snapshot.tool_execution_timings = [
+        (
+            "tc-bash".into(),
+            ToolExecutionTiming {
+                elapsed_ms: 5_000,
+                running: true,
+                timeout_secs: Some(300.0),
+            },
+        ),
+        (
+            "tc-second".into(),
+            ToolExecutionTiming {
+                elapsed_ms: 12_000,
+                running: true,
+                timeout_secs: Some(60.0),
+            },
+        ),
+    ]
+    .into_iter()
+    .collect();
+    snapshot.uncommitted_tools.push(serde_json::json!({
+        "tool_call_id": "tc-streaming", "tool_name": "Bash",
+        "args_fragment": r#"{"command":"echo four","timeout":60}"#,
+    }));
+    app.handle_event(sync);
 
+    let first = tool_header(&app, "tc-bash");
+    assert!(
+        first.ends_with(" 5s/300s") || first.ends_with(" 6s/300s"),
+        "{first}"
+    );
+    let second = tool_header(&app, "tc-second");
+    assert!(
+        second.ends_with(" 12s/60s") || second.ends_with(" 13s/60s"),
+        "{second}"
+    );
+    for id in ["tc-unstarted", "tc-streaming"] {
+        let header = tool_header(&app, id);
+        assert!(
+            !header.contains("/60s") && !header.contains('≤'),
+            "{header}"
+        );
+    }
+
+    app.handle_event(bash_execution_timing("tc-bash", 7_250, false, 300));
+    app.handle_event(bash_timing_event(
+        "tool_call_result",
+        "tc-bash",
+        serde_json::json!({"tool_result": "done", "tool_success": true, "duration_ms": 10_000}),
+    ));
+    assert!(tool_header(&app, "tc-bash").ends_with(" 7s/300s"));
+    assert!(tool_header(&app, "tc-second").ends_with("/60s"));
+}
+
+fn bash_timing_event(kind: &str, call_id: &str, fields: serde_json::Value) -> WingEvent {
+    let mut event = serde_json::json!({
+        "type": kind, "session_id": "test-session", "request_id": "r",
+        "created_at": "2100-01-01T00:00:00Z", "tool_name": "Bash", "tool_call_id": call_id,
+        "tool_args": {"command": "sleep 100", "timeout": 300},
+    });
+    event
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    serde_json::from_value(event).unwrap()
+}
+
+fn bash_execution_timing(call_id: &str, elapsed_ms: u64, running: bool, timeout: u64) -> WingEvent {
+    bash_timing_event(
+        "tool_execution_timing",
+        call_id,
+        serde_json::json!({
+            "timing": {"elapsed_ms": elapsed_ms, "running": running, "timeout_secs": timeout},
+        }),
+    )
+}
+
+#[test]
+fn test_live_bash_only_uses_process_timing() {
+    let mut app = test_app();
+    app.handle_event(bash_timing_event(
+        "tool_call",
+        "tc-denied",
+        serde_json::json!({}),
+    ));
+    assert_eq!(tool_header(&app, "tc-denied"), "⦁ Bash(sleep 100)");
+    app.handle_event(bash_timing_event(
+        "tool_call_result",
+        "tc-denied",
+        serde_json::json!({
+            "tool_result": "Command rejected by user.", "tool_success": false, "duration_ms": 2_000,
+        }),
+    ));
+    assert_eq!(tool_header(&app, "tc-denied"), "⦁ Bash(sleep 100)");
+
+    app.handle_event(bash_timing_event(
+        "tool_call",
+        "tc-live",
+        serde_json::json!({}),
+    ));
+    // The server's wall clock is far ahead. The elapsed baseline and effective
+    // budget come from the execution update, independent of event timestamps and tool args.
+    app.handle_event(bash_execution_timing("tc-live", 12_000, true, 15));
     let header = tool_header(&app, "tc-live");
     assert!(
-        header.contains("/300s"),
-        "live timer keeps the frozen timeout pair: {header}"
+        header.ends_with(" 12s/15s") || header.ends_with(" 13s/15s"),
+        "{header}"
     );
-    assert!(
-        !header.contains('≤'),
-        "no upper-bound marker on the live path: {header}"
-    );
+    app.handle_event(bash_timing_event(
+        "tool_call_result",
+        "tc-live",
+        serde_json::json!({
+            "tool_result": "Tool call interrupted by user.", "tool_success": false,
+        }),
+    ));
+    assert_eq!(tool_header(&app, "tc-live"), "⦁ Bash(sleep 100)");
 }
 
 /// #108: turn end (Done / Interrupted) drops the timer of a Bash card whose
@@ -335,6 +385,7 @@ fn test_turn_end_drops_bash_timer_without_result() {
             tool_call_id: "tc-no-result".into(),
             meta: event_meta(),
         });
+        app.handle_event(bash_execution_timing("tc-no-result", 3_000, true, 300));
     };
     let assert_dropped = |app: &App, when: &str| {
         let header = tool_header(app, "tc-no-result");

@@ -14,22 +14,47 @@ import asyncio
 import inspect
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from wing.common.logger import log
-from wing.config import get_config, get_wing_home
 from wing.common.truncate import head_tail_marker
+from wing.config import get_config, get_wing_home
+from wing.event import ToolExecutionTiming
 from wing.hooks import hooks
 from wing.schema import MediaRef, Message, Tool, ToolCall, ToolError, ToolOutput
 
 from .event_sink import AgentEventSink
+from .tool_context import _tool_execution_measurement
 
 # 当前正在执行的工具调用 id。execute() 为每个工具任务设置（gather 各 task
 # 的 context 相互隔离），ask_feedback() 据此把 AskEvent 与 feedback waiter 关联。
 _current_tool_call_id: ContextVar[str | None] = ContextVar(
     "current_tool_call_id", default=None
 )
+
+
+@dataclass
+class _ToolExecutionClock:
+    started_at: float
+    timeout_secs: float | None
+    duration_ms: int | None = None
+
+    def elapsed_ms(self) -> int:
+        return int((time.monotonic() - self.started_at) * 1000)
+
+    def snapshot(self) -> ToolExecutionTiming:
+        duration = self.duration_ms
+        return ToolExecutionTiming(
+            elapsed_ms=self.elapsed_ms() if duration is None else duration,
+            running=duration is None,
+            timeout_secs=self.timeout_secs,
+        )
+
 
 # 被打断的未完成工具调用写入的统一结果内容。
 INTERRUPTED_RESULT = "Tool call interrupted by user."
@@ -70,6 +95,40 @@ class ToolExecutor:
     def __init__(self, sink: AgentEventSink) -> None:
         self._sink = sink
         self._tools: dict[str, Tool] = {}
+        self._tool_clocks: dict[str, _ToolExecutionClock] = {}
+
+    def tool_execution_timings(self) -> dict[str, ToolExecutionTiming]:
+        return {
+            call_id: clock.snapshot() for call_id, clock in self._tool_clocks.items()
+        }
+
+    @contextmanager
+    def _measure_tool_execution(
+        self, clocks: dict[str, _ToolExecutionClock], call_id: str, timeout: float
+    ) -> Iterator[None]:
+        if clocks is not self._tool_clocks:
+            yield
+            return
+
+        # Tool arguments arrive from JSON without coercion against annotations.
+        budget = timeout if isinstance(timeout, (int, float)) else None
+        clock = clocks[call_id] = _ToolExecutionClock(time.monotonic(), budget)
+        self._sink.tool_execution_timing(call_id, clock.snapshot())
+        # A normal return or a wait timeout reaches a known measurement boundary.
+        completed = True
+        try:
+            yield
+        except BaseException as error:
+            completed = isinstance(error, TimeoutError)
+            raise
+        finally:
+            if (
+                completed
+                and clocks is self._tool_clocks
+                and clocks.get(call_id) is clock
+            ):
+                clock.duration_ms = clock.elapsed_ms()
+                self._sink.tool_execution_timing(call_id, clock.snapshot())
 
     def set_tools(self, tools: dict[str, Tool]) -> None:
         self._tools = tools
@@ -85,11 +144,16 @@ class ToolExecutor:
         """
         log.info(f"exec_tool_calls: executing {len(pending_tool_calls)} tool calls")
 
+        # Batch-local ownership keeps late cancellation cleanup off the next batch's map.
+        clocks: dict[str, _ToolExecutionClock] = {}
+        self._tool_clocks = clocks
+
         async def _exec_one(tc: ToolCall) -> Message:
-            log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={tc.id}")
-            token = _current_tool_call_id.set(tc.id)
+            call_id = tc.id
+            log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={call_id}")
+            token = _current_tool_call_id.set(call_id)
             try:
-                result = await self._execute_one(tc, model)
+                result = await self._execute_one(tc, model, clocks)
                 if isinstance(result, ToolOutput):
                     # 截断只作用文本信封——media 是引用元数据（字节在存储层），
                     # 截断它没有任何意义。
@@ -103,6 +167,7 @@ class ToolExecutor:
                 content = f"Error executing tool '{tc.name}': {e}"
                 media = []
             finally:
+                clocks.pop(call_id, None)
                 _current_tool_call_id.reset(token)
             # media 为空时置 None：无媒体消息的落盘记录与引入 media 之前完全一致。
             return Message(
@@ -155,8 +220,14 @@ class ToolExecutor:
             synthesized = sum(1 for item in raw if not isinstance(item, Message))
             log.info(f"exec_tool_calls: interrupted ({synthesized} synthesized)")
             raise InterruptedToolResults(results, original=cancel_err) from None
+        finally:
+            clocks.clear()
+            if self._tool_clocks is clocks:
+                self._tool_clocks = {}
 
-    async def _execute_one(self, tc: ToolCall, model: str) -> str | ToolOutput:
+    async def _execute_one(
+        self, tc: ToolCall, model: str, clocks: dict[str, _ToolExecutionClock]
+    ) -> str | ToolOutput:
         """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。
 
         工具可返回 ``str``（存量，零改动）或 ``ToolOutput``（文本 + 媒体
@@ -168,6 +239,7 @@ class ToolExecutor:
         交 ``duration_ms=None``（账本按「不是一次执行」处理），中断合成的
         结果由 execute() 直接发射、不经这里，同样不会被记成一次执行。
         """
+        call_id = tc.id
         self._sink.tool_started(tc)
         started = time.monotonic()
 
@@ -229,11 +301,17 @@ class ToolExecutor:
                     k: v for k, v in tc.arguments.items() if k in actual_params
                 }
 
-            result = (
-                await tool.function(**call_args)
-                if inspect.iscoroutinefunction(tool.function)
-                else tool.function(**call_args)
+            measurement_token = _tool_execution_measurement.set(
+                partial(self._measure_tool_execution, clocks, call_id)
             )
+            try:
+                result = (
+                    await tool.function(**call_args)
+                    if inspect.iscoroutinefunction(tool.function)
+                    else tool.function(**call_args)
+                )
+            finally:
+                _tool_execution_measurement.reset(measurement_token)
             if isinstance(result, ToolOutput):
                 content = result.content
                 media = list(result.media)

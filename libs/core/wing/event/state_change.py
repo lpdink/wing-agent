@@ -16,7 +16,7 @@ from pydantic import Field
 from wing.store import SessionUsage
 
 from .base import AgentInfo, SessionStatus, WingEvent
-from .react import PendingUserMessage
+from .react import PendingUserMessage, ToolExecutionTiming
 
 # ============================================================
 # Session 生命周期事件
@@ -52,6 +52,7 @@ class _SessionSnapshot(WingEvent):
       （`[{tool_call_id, tool_name, args_fragment}]`），前端经既有 live
       ToolCallStream 分支局部解析渲染活工具卡
     events：活跃链上的**事实类**事件节点（按链序，过滤规则见 get_active_events）
+    tool_execution_timings：未提交工具的执行计时（按 tool_call_id 索引）
     pending_user_messages：尚未提交的输入，准备中的批次在队首
     agent：该 session 的 AgentInfo
     name：session 名称
@@ -69,6 +70,7 @@ class _SessionSnapshot(WingEvent):
     # 前端不做推断（漏给值应当是构造期的错误，而非静默退化成"不在跑"）。
     status: SessionStatus
     turn_started_at: str | None = None
+    tool_execution_timings: dict[str, ToolExecutionTiming] = Field(default_factory=dict)
     agent: AgentInfo | None = None
     name: str | None = None
     draft: str | None = None

@@ -48,6 +48,7 @@ use wing::config::ThemePalette;
 use wing::config::rendering::ThinkingMode;
 use wing::protocol::AskOption;
 use wing::protocol::AskQuestion;
+use wing::protocol::ToolExecutionTiming;
 use wing::render::markdown::ImageOpts;
 use wing::render::renderable::CellContext;
 use wing::shared::panels::ask::AskPanel;
@@ -261,7 +262,7 @@ fn build(config: &AppConfig, palette: &ThemePalette, width: u16) -> Vec<Line<'st
 
     // ── 工具调用：各状态 × 各渲染策略 ────────────────────────────
     section(&mut lines, "tool calls", width, palette);
-    tools(&mut lines, &ctx, width, now);
+    tools(&mut lines, &ctx, width);
 
     // ── todo / diff / ask ───────────────────────────────────────
     section(&mut lines, "todo", width, palette);
@@ -353,14 +354,31 @@ fn user_card(
     lines.push(blank);
 }
 
-fn tools(lines: &mut Vec<Line<'static>>, ctx: &CellContext<'_>, width: u16, now: Instant) {
+fn tools(lines: &mut Vec<Line<'static>>, ctx: &CellContext<'_>, width: u16) {
+    // Bash：执行中，显示已耗时和生效的超时预算。
+    let mut running = ToolCallBlock::new(
+        "Bash".into(),
+        serde_json::json!({ "command": "cargo build -p wing", "timeout": 30 }),
+        "call-bash-running".into(),
+    );
+    running.set_execution_timing(ToolExecutionTiming {
+        elapsed_ms: 6_000,
+        running: true,
+        timeout_secs: Some(30.0),
+    });
+    lines.extend(ChatCell::ToolCall(running).to_lines(width, ctx));
+
     // Bash：成功 + 计时 + 结果输出。
     let mut ok = ToolCallBlock::new(
         "Bash".into(),
         serde_json::json!({ "command": "cargo test -p wing --lib config::" }),
         "call-bash-ok".into(),
     );
-    ok.start_timer(now - Duration::from_secs(3));
+    ok.set_execution_timing(ToolExecutionTiming {
+        elapsed_ms: 3_000,
+        running: false,
+        timeout_secs: None,
+    });
     ok.set_result("ok. 24 passed; 0 failed".into(), true);
     lines.extend(ChatCell::ToolCall(ok).to_lines(width, ctx));
 
@@ -379,7 +397,11 @@ fn tools(lines: &mut Vec<Line<'static>>, ctx: &CellContext<'_>, width: u16, now:
         serde_json::json!({ "command": "cargo clippy -- -D warnings" }),
         "call-bash-fail".into(),
     );
-    fail.start_timer(now - Duration::from_secs(9));
+    fail.set_execution_timing(ToolExecutionTiming {
+        elapsed_ms: 9_000,
+        running: false,
+        timeout_secs: None,
+    });
     fail.set_result(
         "error: unused variable `args`\n  --> src/theme.rs:12:9".into(),
         false,

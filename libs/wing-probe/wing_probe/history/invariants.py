@@ -71,6 +71,7 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = DELTA_EVENT_TYPES | frozenset(
     {
         # event/react.py
         "tool_call",
+        "tool_execution_timing",
         "tool_call_result",
         "llm_call_metrics",
         "assistant_turn",
