@@ -1215,13 +1215,16 @@ fn test_sync_replays_pending_ask_answerable() {
     })];
     app.handle_event(sync_event(vec![], None, vec![], events, None));
 
-    assert!(cell_kinds(&app).contains(&"ask"), "ask cell rendered");
+    assert_eq!(cell_kinds(&app), ["ask"]);
     // Answerable: the panel is registered with the right id, and the
     // legacy choices were normalized into options.
     assert_eq!(app.ask_panels.len(), 1);
-    assert_eq!(app.ask_panels[0].tool_call_id, "ask-1");
-    assert_eq!(app.ask_panels[0].questions[0].options.len(), 2);
-    assert_eq!(app.ask_panels[0].mode, PanelMode::Question);
+    let panel = &app.ask_panels[0];
+    assert_eq!(panel.tool_call_id, "ask-1");
+    assert_eq!(panel.questions.len(), 1);
+    assert_eq!(panel.questions[0].question, "proceed?");
+    assert_eq!(panel.questions[0].options.len(), 2);
+    assert_eq!(panel.mode, PanelMode::Question);
     // The placeholder says the app is waiting for an answer above.
     assert_eq!(app.input.placeholder, "Answering above · Esc to interrupt");
 
@@ -1324,16 +1327,20 @@ fn test_sync_replays_legacy_required_ask_as_a_required_choice_panel() {
     let events = vec![serde_json::json!({
         "type": "ask",
         "tool_call_id": "ask-2",
-        "question": "dangerous command, proceed?",
+        "question": "dangerous, proceed?",
         "choices": ["yes", "no"],
         "required": true,
     })];
     app.handle_event(sync_event(vec![], None, vec![], events, None));
-    assert!(cell_kinds(&app).contains(&"ask"));
+    assert!(matches!(app.chat.cells[0].cell(), ChatCell::Ask(_)));
     assert_eq!(app.ask_panels.len(), 1);
-    assert_eq!(app.ask_panels[0].tool_call_id, "ask-2");
-    assert_eq!(app.ask_panels[0].mode, PanelMode::RequiredChoice);
-    assert_eq!(app.ask_panels[0].questions[0].options[0].label, "yes");
+    let panel = &app.ask_panels[0];
+    assert_eq!(panel.tool_call_id, "ask-2");
+    assert_eq!(panel.mode, PanelMode::RequiredChoice);
+    assert!(panel.is_interactive());
+    assert_eq!(panel.questions.len(), 1);
+    assert_eq!(panel.questions[0].question, "dangerous, proceed?");
+    assert_eq!(panel.questions[0].options[0].label, "yes");
 }
 
 #[test]
@@ -1346,7 +1353,11 @@ fn test_sync_replays_legacy_non_required_ask_without_registering_it() {
         "choices": ["a", "b"],
     })];
     app.handle_event(sync_event(vec![], None, vec![], events, None));
-    assert!(cell_kinds(&app).contains(&"ask"), "still displayed");
+    let ChatCell::Ask(msg) = app.chat.cells[0].cell() else {
+        panic!("expected a static Ask cell");
+    };
+    assert_eq!(msg.panel.mode, PanelMode::Notice);
+    assert!(!msg.panel.is_interactive());
     assert!(app.ask_panels.is_empty(), "never answerable");
 }
 
