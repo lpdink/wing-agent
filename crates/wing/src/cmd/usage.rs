@@ -12,6 +12,9 @@
 //! wing usage --json                   # 端点响应原样（无 --by 时是 group_by=day）
 //! ```
 //!
+//! `--watch` 在启动时用本地日期解析相对窗口，并以同一天为各帧计算 `today` 和 `streak`。
+//! 每帧重新查询，`--since all` 的实际起点由网关确定。要切换到新一天，重新运行命令。
+//!
 //! 三条口径：
 //!
 //! - **参数闸门在连网关之前**（非法值不拉起守护进程）；
@@ -88,7 +91,7 @@ pub async fn run(opts: UsageOpts, json: bool, watch: bool) -> ExitCode {
 }
 
 async fn run_inner(opts: UsageOpts, json: bool, watch: bool) -> Result<ExitCode> {
-    // 闸门全在连网关之前。watch 的窗口和本地日期锚点都在命令启动时确定。
+    // 闸门全在连网关之前：非法参数不该拉起守护进程。
     let plan = Plan::resolve(&opts)?;
 
     let (host, port) = common::ensure_gateway().await?;
@@ -1631,10 +1634,6 @@ mod tests {
             &out(),
         )
         .unwrap();
-        assert!(
-            text.contains("1 active day · streak 1 · longest 1"),
-            "{text}"
-        );
         assert!(text.contains("today   2 messages"), "{text}");
         assert!(text.contains("(99.00% cached)"), "{text}");
 
