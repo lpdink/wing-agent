@@ -31,7 +31,8 @@ pub use image::ImageStage;
 pub use widget::ComposerWidget;
 pub use widget::cursor_screen_pos;
 
-/// The draft's wrapped rows for the current draw, reusable at the same text width.
+/// The draft's wrapped rows for one draw. The draft and chip labels stay fixed
+/// while the same rows are reused at a matching text width.
 #[derive(Default)]
 pub(crate) struct VisualRows {
     width: u16,

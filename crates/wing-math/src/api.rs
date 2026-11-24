@@ -54,7 +54,7 @@ const MAX_ENV_DEPTH: usize = 8;
 /// 花括号深度拦不住 **brace-free** 的嵌套（`\left(\left(…`、`\hat \hat …`、`\frac \frac …`、
 /// `\sqrt \sqrt …`）：那些链既没有 `{` 也不产生任何结构信号，却会让 parser / layout 递归到
 /// 爆栈。所以闸门放在解析器自己的递归计数上（它覆盖**所有**会递归的构造），并且**在排版之前**
-/// 判定：`parse_chars_with_depth` 一旦置位就直接拒绝，AST 与排版都不跑。
+/// 解析遇到深度上限时返回残缺 AST，进入检查和排版前直接拒绝。
 ///
 /// 口径是"每进入一层 `parse_atom` / `parse_sequence_until_ex` 加 1"，所以**一层结构通常占 2 个
 /// 单位**。实测映射（本机 release）：

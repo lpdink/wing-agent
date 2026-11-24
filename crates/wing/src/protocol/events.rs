@@ -747,15 +747,20 @@ impl WingEvent {
             return Self::deserialize(value);
         };
         let missing = |key| obj.get(key).is_none_or(serde_json::Value::is_null);
-        if !META.into_iter().any(missing) {
-            let decoded = Self::deserialize(value);
-            if decoded.is_ok() || !missing(TOOL_CALL_ID) {
-                return decoded;
-            }
+        let kind = obj.get("type").and_then(serde_json::Value::as_str);
+        // These fact events either ignore the ID or default it when absent.
+        // Select the path before decoding: media deserializers can log warnings.
+        let needs_tool_id = match kind {
+            Some("interrupted" | "error" | "compact_done") => false,
+            Some("ask" | "diff_content") => obj
+                .get(TOOL_CALL_ID)
+                .is_some_and(serde_json::Value::is_null),
+            _ => missing(TOOL_CALL_ID),
+        };
+        if !needs_tool_id && !META.into_iter().any(missing) {
+            return Self::deserialize(value);
         }
 
-        // Re-decode the normalized payload even for errors: filling a key can
-        // change which invalid field serde reports first.
         let mut normalized = value.clone();
         for key in META
             .into_iter()
