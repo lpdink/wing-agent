@@ -342,6 +342,84 @@ mod tests {
         assert_eq!(style_of(&normal).fg, Some(palette.text));
     }
 
+    #[test]
+    fn plain_chat_cells_preserve_styled_lines_without_side_channels() {
+        use crate::shared::panels::ask::{AskPanel, AskPayload};
+        use crate::ui::cells::todo_msg::TodoItem;
+
+        let (palette, layout) = test_ctx();
+        let ctx = make_ctx(&palette, &layout);
+        let width = 32;
+        let notice = |text: &'static str, color| {
+            let style = Style::default().fg(color);
+            vec![
+                Line::from(vec![Span::styled("│ ", style), Span::styled(text, style)]),
+                Line::from(""),
+            ]
+        };
+        let diff = DiffView::new(
+            "notes.md".into(),
+            Some("old line\n".into()),
+            "new line\n".into(),
+            3,
+            3,
+        );
+        let todo = TodoMessage::new(vec![TodoItem {
+            content: "Check output".into(),
+            status: "in_progress".into(),
+            active_form: Some("Checking output".into()),
+        }]);
+        let ask = AskMessage::new(AskPanel::from_ask(AskPayload {
+            tool_call_id: "ask-1",
+            questions: &[],
+            question: "Review the [notes](notes.md) before continuing?",
+            choices: &["Continue".into()],
+            required: false,
+        }));
+        let cases = [
+            (
+                "warning",
+                ChatCell::WarningMessage("Retrying".into()),
+                notice("Retrying", palette.warning),
+            ),
+            (
+                "error",
+                ChatCell::ErrorMessage("Request failed".into()),
+                notice("Request failed", palette.danger),
+            ),
+            (
+                "diff",
+                ChatCell::Diff(diff.clone()),
+                diff.to_lines(&palette, width),
+            ),
+            (
+                "todo",
+                ChatCell::Todo(todo.clone()),
+                todo.to_lines(&palette),
+            ),
+            (
+                "ask",
+                ChatCell::Ask(ask.clone()),
+                ask.to_lines(&palette, width),
+            ),
+            (
+                "separator",
+                ChatCell::Separator,
+                vec![Line::from(Span::styled(
+                    "─".repeat(width as usize),
+                    Style::default().fg(palette.dim),
+                ))],
+            ),
+        ];
+
+        for (name, cell, expected) in cases {
+            let (lines, links, images) = cell.render_lines(width, &ctx).into_parts();
+            assert_eq!(lines, expected, "{name} lines");
+            assert_eq!(links, vec![Vec::new(); lines.len()], "{name} links");
+            assert_eq!(images, vec![Vec::new(); lines.len()], "{name} images");
+        }
+    }
+
     /// The assistant-message cell reads the math mode off the palette, like
     /// every other render path: `off` must leave the LaTeX source verbatim
     /// here too (the cell builds its own `RenderOpts`, so a hardcoded mode
