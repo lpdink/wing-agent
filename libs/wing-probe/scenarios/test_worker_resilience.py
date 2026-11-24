@@ -16,7 +16,9 @@ OSError，与磁盘打满的 ENOSPC 同类），断言用户看得见的三件�
 能力即复刻"同一故障击穿两层兜底 handler"的现场。root 无视权限位，故在 root
 下跳过（CI 与本地开发都是普通用户）。
 
-失败期间的输入由精确丢弃事件收口，恢复后的历史链保持完整。
+打开日志失败时，丢弃事件仅包含失败批次的输入 ID。追加与回截均失败时，两个
+订阅者收到写入结果不明和 ``session_history_refreshed``。同一网关逐出再水合仍只
+看到已确认的前缀。解除故障后，续写前回截，Provider 上下文与落盘历史一致。
 """
 
 from __future__ import annotations
@@ -101,7 +103,7 @@ async def test_persist_outage_does_not_zombie_the_session(probe: Probe) -> None:
 
 @pytest.mark.probe_env(models=[MODEL], hooks=["hooks/*.py"])
 @pytest.mark.asyncio
-async def test_indeterminate_append_refreshes_two_subscribers_and_recovers_after_restart(
+async def test_indeterminate_append_refreshes_two_subscribers_and_recovers_in_process(
     probe: Probe,
 ) -> None:
     probe.register(MODEL, Turn.of(text="first"), Turn.of(text="recovered"))
@@ -155,10 +157,7 @@ os.ftruncate = fail_truncate
                 "user_message_queued", where={"origin_request_id": failed_id}
             )
             error = await subscriber.watch.expect("error")
-            assert (
-                "write outcome unknown, recovery boundary saved"
-                in error.data["message"]
-            )
+            assert "write outcome unknown" in error.data["message"]
             await subscriber.watch.expect("done")
             reconciled = await subscriber.watch.expect("session_history_refreshed")
             assert reconciled.data["pending_user_messages"] == []
@@ -167,24 +166,26 @@ os.ftruncate = fail_truncate
             subscriber.watch.assert_never(
                 "user_messages_dropped", where={"origin_request_ids": [failed_id]}
             )
-        assert b"uncertain input" in history.read_bytes()
+        uncertain = history.read_bytes()
+        assert b"uncertain input" in uncertain
         assert len(probe.requests_for(MODEL)) == 1
+        await other.http.unsubscribe(session.session_id, other.client_id)
     finally:
         await other.close()
 
-    await probe.restart_gateway()
-    resumed = await probe.resume(session.session_id)
-    sync = await resumed.watch.expect("sync_session")
+    driver = session.driver
+    await driver.http.unsubscribe(session.session_id, driver.client_id)
+    assert (await session.release())["released"] is True
+    await driver.http.subscribe(session.session_id, driver.client_id)
+    sync = await session.watch.expect("sync_session")
     assert sync.data["messages"] == subscribed.data["messages"]
     assert sync.data["pending_user_messages"] == []
-    assert b"uncertain input" in history.read_bytes(), (
-        "cold load must leave the bytes alone"
-    )
+    assert history.read_bytes() == uncertain
     control.unlink()
-    assert (await resumed.chat("three")).data["result"] == "recovered"
+    assert (await session.chat("three")).data["result"] == "recovered"
     assert probe.context(MODEL, 1).texts("user") == ["one", "three"]
     assert b"uncertain input" not in history.read_bytes()
-    assert [m["content"] for m in probe.history(resumed).messages()] == [
+    assert [m["content"] for m in probe.history(session).messages()] == [
         "one",
         "first",
         "three",
