@@ -151,12 +151,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    let tools = args.tools.as_ref().map(|s| {
-        s.split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect::<Vec<String>>()
-    });
+    let tools = args.tools.as_deref().map(super::args::parse_tool_list);
 
     let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
@@ -176,13 +171,7 @@ async fn run_inner(args: RunArgs) -> Result<RunOutput> {
                 .resume_session(resume_id)
                 .await
                 .map_err(|e| common::session_error(resume_id, &e))?;
-            // `-r` + `--tag`: tags are added to the resumed session (idempotent;
-            // the resumed session keeps its existing tags).
-            if !args.tag.is_empty() {
-                http.tag_session(&resp.session_id, Some(args.tag.clone()), None)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to tag session: {e}"))?;
-            }
+            common::add_resume_tags(&http, &resp.session_id, &args.tag).await?;
             // 恢复不是创建：不读 env（既有会话的 parent 是它出生时的事实）。
             (
                 resp.session_id,

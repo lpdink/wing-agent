@@ -174,17 +174,12 @@ mod tests {
             .unwrap_or_else(|err| panic!("sync_session fixture must decode: {err}\n{value}"))
     }
 
-    /// 回放 + 顺手断言输出帧数。
-    fn replay(cards: &mut ToolCards, event: &WingEvent) -> Vec<SessionUpdate> {
-        replay_updates(cards, event)
-    }
-
     // ---- user ----
 
     #[test]
     fn user_message_maps_to_user_message_chunk() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{"role": "user", "content": "看下这个 bug"}]),
@@ -206,7 +201,7 @@ mod tests {
     #[test]
     fn empty_user_content_produces_no_frame() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(json!([{"role": "user", "content": ""}]), json!([])),
         );
@@ -218,7 +213,7 @@ mod tests {
     #[test]
     fn assistant_maps_thinking_then_text() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{
@@ -248,7 +243,7 @@ mod tests {
     fn assistant_without_text_only_emits_what_exists() {
         let mut cards = ToolCards::default();
         // 仅 reasoning。
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{"role": "assistant", "content": "", "reasoning_content": "嗯"}]),
@@ -260,7 +255,7 @@ mod tests {
 
         // 只有 tool_calls（一段工具驱动的回合）。
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{
@@ -280,7 +275,7 @@ mod tests {
     #[test]
     fn assistant_tool_calls_create_in_progress_cards() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{
@@ -322,7 +317,7 @@ mod tests {
     #[test]
     fn tool_call_without_arguments_omits_raw_input() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{
@@ -346,7 +341,7 @@ mod tests {
     #[test]
     fn tool_calls_with_empty_id_are_dropped() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{
@@ -365,7 +360,7 @@ mod tests {
     #[test]
     fn tool_message_closes_the_card_as_completed() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([
@@ -406,7 +401,7 @@ mod tests {
             json!({"role": "tool", "content": "out", "tool_call_id": null}),
             json!({"role": "tool", "content": "out", "tool_call_id": ""}),
         ] {
-            let updates = replay(&mut cards, &sync_event(json!([message]), json!([])));
+            let updates = replay_updates(&mut cards, &sync_event(json!([message]), json!([])));
             assert!(updates.is_empty(), "无 tool_call_id 的 tool 消息不产帧");
         }
     }
@@ -416,7 +411,7 @@ mod tests {
         // 链被裁剪过（assistant 消息不在快照里）时仍要报状态：与实时
         // `tool_call_result` 的「未见过的卡片也发 update」同口径。
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{"role": "tool", "content": "boom", "tool_call_id": "ghost"}]),
@@ -441,7 +436,7 @@ mod tests {
     #[test]
     fn system_and_unknown_roles_are_skipped() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([
@@ -458,7 +453,7 @@ mod tests {
     #[test]
     fn malformed_history_records_are_skipped_but_neighbours_replay() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([
@@ -478,7 +473,7 @@ mod tests {
     #[test]
     fn events_group_projects_only_anchored_diff_content() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([
@@ -521,7 +516,7 @@ mod tests {
     #[test]
     fn diff_without_an_anchor_is_dropped() {
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([]),
@@ -540,7 +535,7 @@ mod tests {
     fn diff_events_anchor_to_cards_created_by_replay() {
         // 回放建卡 → 后面的 events 组 diff 能锚定（同一份卡片记忆）。
         let mut cards = ToolCards::default();
-        let updates = replay(
+        let updates = replay_updates(
             &mut cards,
             &sync_event(
                 json!([{
@@ -581,7 +576,7 @@ mod tests {
         });
         let event: WingEvent = serde_json::from_value(value).expect("fixture decodes");
         let mut cards = ToolCards::default();
-        let updates = replay(&mut cards, &event);
+        let updates = replay_updates(&mut cards, &event);
         assert_eq!(updates.len(), 1, "只回放 messages/events");
         assert!(matches!(updates[0], SessionUpdate::UserMessageChunk(_)));
     }
@@ -597,7 +592,7 @@ mod tests {
             "request_id": "r",
         }))
         .expect("fixture decodes");
-        assert!(replay(&mut cards, &text).is_empty());
+        assert!(replay_updates(&mut cards, &text).is_empty());
     }
 
     // ---- 与实时映射共享卡片记忆 ----
@@ -605,7 +600,7 @@ mod tests {
     #[test]
     fn replayed_cards_keep_anchoring_live_events() {
         let mut cards = ToolCards::default();
-        replay(
+        replay_updates(
             &mut cards,
             &sync_event(
                 json!([

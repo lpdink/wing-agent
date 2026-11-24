@@ -95,3 +95,12 @@ pub struct RunArgs {
     #[arg(long = "notify-prompt", value_name = "TEXT")]
     pub notify_prompt: Option<String>,
 }
+
+/// Comma-separated tool names, in caller order with empty entries removed.
+pub(crate) fn parse_tool_list(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|tool| !tool.is_empty())
+        .map(str::to_owned)
+        .collect()
+}

@@ -426,6 +426,30 @@ fn test_every_routed_command_is_offered_by_completion() {
 }
 
 #[test]
+fn fetched_commands_keep_wire_defaults_and_local_completions() {
+    use crate::app::intent::{FetchPayload, FetchResult};
+    use crate::ui::popup::command::filter_commands;
+
+    let mut app = test_app();
+    let response = serde_json::from_value(serde_json::json!({
+        "commands": [{"name": "server-command", "future_field": true}],
+    }))
+    .unwrap();
+    app.handle_fetch_result(FetchResult {
+        session_id: app.session_id.clone(),
+        payload: FetchPayload::Commands(response),
+    });
+    let cached: &[crate::protocol::CommandInfo] = &app.popup.cache.commands;
+    assert_eq!(cached.len(), 1);
+    assert!(cached[0].aliases.is_empty());
+    assert!(cached[0].description.is_empty());
+    assert!(cached[0].params.is_empty());
+    let rows = filter_commands(cached, "");
+    assert!(rows.iter().any(|row| row.name == "/server-command"));
+    assert!(rows.iter().any(|row| row.name == "/tips"));
+}
+
+#[test]
 fn test_command_table_names_and_aliases_are_unique() {
     let mut seen = std::collections::BTreeSet::new();
     for route in commands::COMMANDS {

@@ -84,8 +84,6 @@ const MAX_DIFFS_PER_CARD: usize = 64;
 /// 一张工具卡片的记忆。
 #[derive(Debug, Default, Clone)]
 struct Card {
-    /// 是否已向客户端创建过卡片（`tool_call_stream` / `tool_call` 只创建一次）。
-    created: bool,
     /// `tool_call_result` 的文本（已截断的展示副本）。
     result: Option<String>,
     /// `diff_content` 送来的文件改动（按到达顺序，最多 [`MAX_DIFFS_PER_CARD`] 条）。
@@ -122,6 +120,7 @@ impl Card {
 /// 都跨轮次有效（同一会话里前一轮创建的卡片在后一轮仍然算「已创建」）。
 #[derive(Debug, Default)]
 pub struct ToolCards {
+    // Results can establish a card even when its creation event was missed.
     cards: HashMap<String, Card>,
     order: VecDeque<String>,
 }
@@ -168,10 +167,10 @@ impl ToolCards {
             tracing::debug!("acp: tool_call_stream without tool_call_id; dropped");
             return Vec::new();
         }
-        if self.card(tool_call_id).is_some_and(|card| card.created) {
+        if self.cards.contains_key(tool_call_id) {
             return Vec::new();
         }
-        self.card_mut(tool_call_id).created = true;
+        self.card_mut(tool_call_id);
         vec![SessionUpdate::ToolCall(
             ToolCall::new(ToolCallId::new(tool_call_id), tool_name)
                 .name(tool_name)
@@ -210,10 +209,7 @@ impl ToolCards {
         let title = tool_title(tool_name, shape);
         let kind = tool_kind(tool_name);
         let locations = tool_locations(tool_name, shape);
-        let created = self.card(tool_call_id).is_some_and(|card| card.created);
-        self.card_mut(tool_call_id).created = true;
-
-        if created {
+        if self.cards.contains_key(tool_call_id) {
             let mut fields = ToolCallUpdateFields::new()
                 .title(title)
                 .name(tool_name)
@@ -228,6 +224,7 @@ impl ToolCards {
                 fields,
             ))]
         } else {
+            self.card_mut(tool_call_id);
             let mut call = ToolCall::new(ToolCallId::new(tool_call_id), title)
                 .name(tool_name)
                 .kind(kind)
@@ -252,13 +249,12 @@ impl ToolCards {
             return Vec::new();
         }
         let shown = truncate_result(tool_result);
-        if !self.card(tool_call_id).is_some_and(|card| card.created) {
+        if !self.cards.contains_key(tool_call_id) {
             // 客户端没见过这张卡片（订阅晚于轮次开始 / 记忆已被容量淘汰）：仍然发
             // update——状态与内容是主信号，客户端会自行补一张卡片。
             tracing::debug!(tool_call_id, "acp: tool_call_result for an unseen card");
         }
         let card = self.card_mut(tool_call_id);
-        card.created = true;
         card.result = Some(shown.clone());
         let content = card.content();
         let fields = ToolCallUpdateFields::new()
@@ -294,24 +290,15 @@ impl ToolCards {
             );
             return Vec::new();
         }
-        if self.card(tool_call_id).is_none() {
+        let Some(card) = self.cards.get_mut(tool_call_id) else {
             tracing::debug!(
                 path,
                 tool_call_id,
                 "acp: diff_content for an untracked tool call; dropped"
             );
             return Vec::new();
-        }
-        let mut diff = Diff::new(path, new_text);
-        if let Some(old) = old_text {
-            diff = diff.old_text(old);
-        }
-        let card = self.card_mut(tool_call_id);
+        };
         if card.diffs.len() >= MAX_DIFFS_PER_CARD {
-            // 到顶即冻结：列表没变化，不发 update（也不重发列表）。
-            //
-            // warn **一次**：只在首次跨过阈值时报，此后每条被丢弃的 diff
-            // 都是同一件事的重复（曾按帧刷屏，1000 条 diff 出 ≈936 行 warn）。
             if !card.cap_warned {
                 card.cap_warned = true;
                 tracing::warn!(
@@ -322,6 +309,10 @@ impl ToolCards {
             }
             return Vec::new();
         }
+        let mut diff = Diff::new(path, new_text);
+        if let Some(old) = old_text {
+            diff = diff.old_text(old);
+        }
         card.diffs.push(diff);
         let content = card.content();
         vec![SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
@@ -331,10 +322,6 @@ impl ToolCards {
     }
 
     // ---- 容量有界的存取 ----
-
-    fn card(&self, id: &str) -> Option<&Card> {
-        self.cards.get(id)
-    }
 
     /// 取（必要时建）卡片；超过容量时淘汰最旧的条目。
     fn card_mut(&mut self, id: &str) -> &mut Card {
@@ -1280,105 +1267,6 @@ mod tests {
 
     // ---- 容量有界 ----
 
-    /// 到顶 warn（`apply_diff` 里那条）的 callsite 是**进程级共享**的：tracing 的
-    /// interest 缓存全局且不会自愈，而「无订阅者」的线程可能先把该 callsite 注册成
-    /// never。两个会触发它的测试串行执行，让注册时序确定（细节见
-    /// `diff_cap_warns_exactly_once`）。
-    static CAP_WARN_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// 取串行锁；测试失败（panic）会毒化锁，直接取回内层，避免连带影响另一个测试。
-    fn lock_cap_warn_serial() -> std::sync::MutexGuard<'static, ()> {
-        CAP_WARN_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    /// 把一张卡片填到 diff 上限、再送一条溢出（触发一次真实的到顶 warn）。
-    fn fill_card_to_the_cap(cards: &mut ToolCards, id: &str) {
-        cards.apply(&tool_call_stream(id, "Edit"));
-        cards.apply(&tool_call(id, "Edit", json!({"path": "a.rs"})));
-        for i in 0..MAX_DIFFS_PER_CARD {
-            assert_eq!(
-                cards
-                    .apply(&diff_event(id, "a.rs", None, &format!("v{i}")))
-                    .len(),
-                1,
-                "第 {i} 条 diff 应当发 update"
-            );
-        }
-        assert!(
-            cards
-                .apply(&diff_event(id, "a.rs", None, "overflow"))
-                .is_empty(),
-            "超出上限的 diff 必须被丢弃且不产帧"
-        );
-    }
-
-    #[test]
-    fn per_card_diffs_are_capped() {
-        // 与 diff_cap_warns_exactly_once 串行（共享同一条 warn 的 callsite）。
-        let _serial = lock_cap_warn_serial();
-        let mut cards = ToolCards::default();
-        cards.apply(&tool_call_stream("tc1", "Edit"));
-        cards.apply(&tool_call("tc1", "Edit", json!({"path": "a.rs"})));
-
-        for i in 0..MAX_DIFFS_PER_CARD {
-            let updates = cards.apply(&diff_event("tc1", "a.rs", None, &format!("v{i}")));
-            assert_eq!(updates.len(), 1, "第 {i} 条 diff 应当发 update");
-        }
-        // 到顶之后：不再追加、不再发 update（列表冻结，无内容抖动）。
-        let extra = cards.apply(&diff_event("tc1", "a.rs", None, "overflow"));
-        assert!(extra.is_empty(), "超出上限的 diff 必须被丢弃且不产帧");
-
-        // 「到顶」只记一次：warn 一次化靠 `cap_warned` 保证——记的是
-        // 「本条卡片已经报过到顶」，后续被丢弃的 diff 不再刷屏。
-        // 这里只钉标志位；可观测的 warn 次数由 `diff_cap_warns_exactly_once` 断言。
-        let card = cards.cards.get("tc1").expect("卡片仍在");
-        assert!(
-            card.cap_warned,
-            "首次跨过阈值必须置位（否则每条被丢弃的 diff 都会 warn 一次）"
-        );
-        let before = card.diffs.len();
-        for _ in 0..5 {
-            let _ = cards.apply(&diff_event("tc1", "a.rs", None, "overflow"));
-        }
-        assert_eq!(
-            cards.cards.get("tc1").expect("卡片仍在").diffs.len(),
-            before,
-            "到顶后列表不再增长"
-        );
-
-        // 结果行仍会把冻结后的完整列表发一次（整表替换语义不变）。
-        match single(cards.apply(&tool_call_result("tc1", "Edit", "edited", true))) {
-            SessionUpdate::ToolCallUpdate(update) => {
-                let content = update.fields.content.expect("content");
-                assert_eq!(
-                    content.len(),
-                    MAX_DIFFS_PER_CARD + 1,
-                    "64 条 diff + 1 条结果"
-                );
-                assert!(matches!(content[0], ToolCallContent::Diff(_)));
-                assert!(matches!(
-                    content[MAX_DIFFS_PER_CARD],
-                    ToolCallContent::Content(_)
-                ));
-                match &content[MAX_DIFFS_PER_CARD - 1] {
-                    ToolCallContent::Diff(diff) => {
-                        assert_eq!(
-                            diff.new_text,
-                            format!("v{}", MAX_DIFFS_PER_CARD - 1),
-                            "保留的是最早的 64 条"
-                        );
-                    }
-                    other => panic!("expected diff, got {other:?}"),
-                }
-            }
-            other => panic!("expected tool_call_update, got {other:?}"),
-        }
-    }
-
-    /// `cap_warned` 只是「别重复刷屏」的实现手段，断言要落在**可观测的
-    /// warn 次数**上——只查标志位的旧断言放过了「每次都 warn」的回归。
     #[test]
     fn diff_cap_warns_exactly_once() {
         use std::sync::Arc;
@@ -1403,30 +1291,11 @@ mod tests {
             }
         }
 
-        // 两个会触发同一条 warn 的测试串行：tracing 的 interest 缓存是进程级全局的
-        // ——并行注册（注册线程没有订阅者）会把 callsite 粘成 never，时序不定。
-        let _serial = lock_cap_warn_serial();
-
         let counter = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry().with(WarnCounter(Arc::clone(&counter)));
-        // thread-local 作用域：不影响并行跑的其它测试的事件分发。
         let _guard = tracing::subscriber::set_default(subscriber);
-
-        // 该 callsite 可能已被「无订阅者」的线程提前注册（历史运行 / 并行测试），
-        // 缓存里的 never 不会自愈——从本线程显式重建一次（此刻无注册在途，见上锁）。
         tracing::callsite::rebuild_interest_cache();
 
-        // 预热：确认本订阅者确实收得到这条 warn（收不到的话后面的计数只会是
-        // 无意义的 0）。
-        let mut warm = ToolCards::default();
-        fill_card_to_the_cap(&mut warm, "warm");
-        assert!(
-            counter.load(Ordering::SeqCst) > 0,
-            "计数订阅者收不到到顶 warn（interest 缓存异常）"
-        );
-        counter.store(0, Ordering::SeqCst);
-
-        // ---- 被测断言 ----
         let mut cards = ToolCards::default();
         cards.apply(&tool_call_stream("tc1", "Edit"));
         cards.apply(&tool_call("tc1", "Edit", json!({"path": "a.rs"})));
@@ -1446,11 +1315,23 @@ mod tests {
                 "超出上限的 diff 必须被丢弃且不产帧"
             );
         }
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "到顶只 warn 一次；后续被丢弃的 diff 不再刷屏（N1）"
-        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+
+        // The result update replaces the whole list with the frozen prefix and its result.
+        let update = single(cards.apply(&tool_call_result("tc1", "Edit", "edited", true)));
+        let SessionUpdate::ToolCallUpdate(update) = update else {
+            panic!("expected tool_call_update, got {update:?}");
+        };
+        let content = update.fields.content.expect("content");
+        assert_eq!(content.len(), MAX_DIFFS_PER_CARD + 1);
+        let (result, diffs) = content.split_last().expect("result after diffs");
+        for (i, item) in diffs.iter().enumerate() {
+            let ToolCallContent::Diff(diff) = item else {
+                panic!("expected diff, got {item:?}");
+            };
+            assert_eq!(diff.new_text, format!("v{i}"));
+        }
+        assert!(matches!(result, ToolCallContent::Content(_)));
     }
 
     #[test]

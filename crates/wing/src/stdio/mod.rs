@@ -293,61 +293,37 @@ fn resume_override(args: &StdioArgs) -> Option<AgentOverride> {
 // Argument filtering (for stdio mode compatibility with SDK)
 // ============================================================
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use clap::CommandFactory;
 
 use crate::cmd::Cli;
 
-/// Known flags derived from clap's [`Cli`] definition.
-///
-/// Built once at startup. Eliminates the need for hand-maintained
-/// whitelists — adding a new `#[arg]` to [`Cli`] automatically
-/// makes the filter aware.
-struct KnownFlags {
-    /// Long flags that take a value argument (e.g. `--model`, `--max-turns`).
-    long_with_value: HashSet<String>,
-    /// Long boolean flags (e.g. `--yolo`, `--help`, `--version`).
-    long_bool: HashSet<String>,
-    /// Short flags that take a value argument (e.g. `-p`, `-m`, `-r`).
-    short_with_value: HashSet<char>,
-    /// Short boolean flags.
-    short_bool: HashSet<char>,
-}
-
-/// 一组 flag 分类（顶层 / 子命令各自收一份，最后按优先级合并）。
 #[derive(Default)]
-struct FlagSets {
-    long_with_value: HashSet<String>,
-    long_bool: HashSet<String>,
-    short_with_value: HashSet<char>,
-    short_bool: HashSet<char>,
+struct KnownFlags {
+    long: HashMap<String, bool>,
+    short: HashMap<char, bool>,
 }
 
-impl FlagSets {
-    /// 收**当前这一层**的 flag（不下潜）。
+impl KnownFlags {
     fn collect(&mut self, cmd: &clap::Command) {
         for arg in cmd.get_arguments() {
             let takes_value = arg.get_action().takes_values();
             if let Some(long) = arg.get_long() {
-                let flag = format!("--{long}");
-                if takes_value {
-                    self.long_with_value.insert(flag);
-                } else {
-                    self.long_bool.insert(flag);
-                }
+                self.long
+                    .entry(format!("--{long}"))
+                    .and_modify(|existing| *existing |= takes_value)
+                    .or_insert(takes_value);
             }
             if let Some(short) = arg.get_short() {
-                if takes_value {
-                    self.short_with_value.insert(short);
-                } else {
-                    self.short_bool.insert(short);
-                }
+                self.short
+                    .entry(short)
+                    .and_modify(|existing| *existing |= takes_value)
+                    .or_insert(takes_value);
             }
         }
     }
 
-    /// 递归收整棵子命令树（`wing run` / `wing wake` / `wing config get` … 各自的 flag）。
     fn collect_recursive(&mut self, cmd: &clap::Command) {
         self.collect(cmd);
         for subcommand in cmd.get_subcommands() {
@@ -355,62 +331,19 @@ impl FlagSets {
         }
     }
 
-    /// 把 `other` 里**顶层没定义**的名字补进来：同名一律以顶层为准。
-    ///
-    /// 同名跨命令的分类可以不同（`--yolo` 顶层是 bool，`wing update` 上是
-    /// `--yolo <BOOL>`），而过滤器只有一张**按名字**的表——分层优先级是唯一的确定性
-    /// 解法：stdio 调用看到的就是顶层那张表。子命令内部若自己冲突，取"带值"那一侧
-    /// （贪心消费下一个 token；宁可多留一个值，也不把 flag 和值错位）。
-    fn fill_from(&mut self, other: FlagSets) {
-        for name in other.long_with_value {
-            if !self.long_bool.contains(&name) {
-                self.long_with_value.insert(name);
-            }
-        }
-        for name in other.long_bool {
-            if !self.long_with_value.contains(&name) {
-                self.long_bool.insert(name);
-            }
-        }
-        for short in other.short_with_value {
-            if !self.short_bool.contains(&short) {
-                self.short_with_value.insert(short);
-            }
-        }
-        for short in other.short_bool {
-            if !self.short_with_value.contains(&short) {
-                self.short_bool.insert(short);
-            }
-        }
-    }
-}
-
-impl KnownFlags {
-    /// 收集 wing 的**全部** flag：顶层优先，子命令（递归）补缺。
-    ///
-    /// 子命令那一层不能漏：`wing run -p ...` / `wing wake --in 30m -p ...` 同样是
-    /// "argv 里有 `-p`" 的调用形态（stdio 检测是**解析前**按原始 argv 判的），于是
-    /// 过滤器会跑到它们身上。只认顶层 flag 的话，`--in` / `--to` / `--on` /
-    /// `--notify-to` 这类子命令专属 flag 会在过滤器里被当成外部 SDK flag 丢掉——
-    /// 而 clap 只看得到"少了一个 flag 的程序"，静默变成另一次调用。
-    ///
-    /// 收全之后，放错位置的**已知** flag 会走到 clap 面前被**响亮**拒绝（这正是
-    /// `misplaced_*` 系列闸门的口径：宁可报错，也不静默丢弃）。
-    fn from_cli() -> Self {
-        let cmd = Cli::command();
-        let mut top = FlagSets::default();
-        top.collect(&cmd);
-        let mut subs = FlagSets::default();
+    /// Raw `-p` also enables filtering for subcommands such as `wake -p …`.
+    /// On collisions a value wins among subcommands, then the top-level
+    /// classification wins (e.g. `--yolo` vs `update --yolo <BOOL>`).
+    fn from_command(cmd: &clap::Command) -> Self {
+        let mut flags = Self::default();
         for subcommand in cmd.get_subcommands() {
-            subs.collect_recursive(subcommand);
+            flags.collect_recursive(subcommand);
         }
-        top.fill_from(subs);
-        Self {
-            long_with_value: top.long_with_value,
-            long_bool: top.long_bool,
-            short_with_value: top.short_with_value,
-            short_bool: top.short_bool,
-        }
+        let mut top = Self::default();
+        top.collect(cmd);
+        flags.long.extend(top.long);
+        flags.short.extend(top.short);
+        flags
     }
 }
 
@@ -450,7 +383,7 @@ pub fn is_stdio_mode(args: &[String]) -> bool {
 ///
 /// Strategy:
 /// - **Known flags** (from clap, **every subcommand included** — see
-///   [`KnownFlags::from_cli`]): kept with correct value handling.
+///   [`KnownFlags::from_command`]): kept with correct value handling.
 /// - **Unknown `--flag=value`**: dropped (single token).
 /// - **Unknown `--flag value`**: heuristic — if the next token starts with
 ///   `-`, the flag is treated as boolean (dropped, next token preserved).
@@ -461,7 +394,7 @@ pub fn is_stdio_mode(args: &[String]) -> bool {
 /// `--permission-mode bypassPermissions`) without maintaining a manual
 /// whitelist of external flags.
 pub fn filter_unknown_args(args: Vec<String>) -> Vec<String> {
-    let known = KnownFlags::from_cli();
+    let known = KnownFlags::from_command(&Cli::command());
     let mut result = Vec::new();
     let mut i = 0;
 
@@ -475,18 +408,14 @@ pub fn filter_unknown_args(args: Vec<String>) -> Vec<String> {
                 arg.as_str()
             };
 
-            if known.long_with_value.contains(flag_name) {
-                // Known value-carrying flag: keep flag + value.
+            if let Some(&takes_value) = known.long.get(flag_name) {
                 result.push(arg.clone());
-                if !arg.contains('=') {
+                if takes_value && !arg.contains('=') {
                     i += 1;
                     if i < args.len() {
                         result.push(args[i].clone());
                     }
                 }
-            } else if known.long_bool.contains(flag_name) {
-                // Known boolean flag: keep flag only.
-                result.push(arg.clone());
             } else if !arg.contains('=') {
                 // Unknown --flag without =.
                 // Heuristic: if next token starts with '-', this flag is
@@ -502,16 +431,14 @@ pub fn filter_unknown_args(args: Vec<String>) -> Vec<String> {
             // Unknown --flag=value (with =): drop this single token.
         } else if arg.starts_with('-') && !arg.starts_with("--") && arg.len() > 1 {
             let flag_char = arg.chars().nth(1).unwrap_or(' ');
-            if known.short_with_value.contains(&flag_char) {
+            if let Some(&takes_value) = known.short.get(&flag_char) {
                 result.push(arg.clone());
-                if arg.len() == 2 {
+                if takes_value && arg.len() == 2 {
                     i += 1;
                     if i < args.len() {
                         result.push(args[i].clone());
                     }
                 }
-            } else if known.short_bool.contains(&flag_char) {
-                result.push(arg.clone());
             }
             // Unknown short flag: drop.
         } else {
@@ -543,12 +470,7 @@ fn normalize_tools(raw: Option<&str>) -> Option<Vec<String>> {
     if raw.is_empty() || raw == TOOLS_PRESET_DEFAULT {
         return None;
     }
-    Some(
-        raw.split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect(),
-    )
+    Some(crate::cmd::args::parse_tool_list(raw))
 }
 
 // ============================================================
@@ -806,12 +728,7 @@ async fn run_stdio_inner(args: StdioArgs) -> Result<ExitCode> {
             .resume_session_with_override(resume_id, resume_override(&args).as_ref())
             .await
             .map_err(|e| crate::cmd::common::session_error(resume_id, &e))?;
-        // `-r` + `--tag`: add tags to the resumed session before anything is sent.
-        if !args.tag.is_empty() {
-            http.tag_session(&resp.session_id, Some(args.tag.clone()), None)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to tag session: {e}"))?;
-        }
+        crate::cmd::common::add_resume_tags(&http, &resp.session_id, &args.tag).await?;
         tracing::info!(session_id = %resp.session_id, "session resumed");
         // Print session_id to stderr so it doesn't pollute stdout
         // (which carries the Claude Code protocol stream).
@@ -1048,34 +965,41 @@ mod tests {
         assert!(!is_stdio_mode(&args));
     }
 
-    // ---- KnownFlags 的分层合并 ----
-
-    /// 同名跨层时**一律以顶层为准**（过滤器只有一张按名字的表，分层优先级是唯一
-    /// 确定性的解法——`--yolo` 在顶层是 bool、在 `wing update` 上是带值）。
-    /// 子命令里自己冲突的 flag（同一层既有 bool 又有值）取"带值"那一侧。
     #[test]
-    fn fill_from_keeps_the_top_level_classification() {
-        let mut top = FlagSets::default();
-        top.long_bool.insert("--yolo".into());
-        top.short_with_value.insert('p');
-        let mut subs = FlagSets::default();
-        // 与顶层同名、分类不同：顶层赢
-        subs.long_with_value.insert("--yolo".into());
-        subs.short_bool.insert('p');
-        // 顶层没有的：补进来
-        subs.long_with_value.insert("--notify-to".into());
-        subs.long_bool.insert("--all".into());
-        subs.short_bool.insert('w');
-        subs.short_with_value.insert('j');
-        top.fill_from(subs);
-        assert!(top.long_bool.contains("--yolo"));
-        assert!(!top.long_with_value.contains("--yolo"));
-        assert!(top.short_with_value.contains(&'p'));
-        assert!(!top.short_bool.contains(&'p'));
-        assert!(top.long_with_value.contains("--notify-to"));
-        assert!(top.long_bool.contains("--all"));
-        assert!(top.short_bool.contains(&'w'));
-        assert!(top.short_with_value.contains(&'j'));
+    fn known_flags_prefer_top_level_and_then_subcommand_values() {
+        use clap::{Arg, ArgAction, Command};
+
+        let cmd = Command::new("test")
+            .arg(Arg::new("yolo").long("yolo").action(ArgAction::SetTrue))
+            .arg(Arg::new("prompt").short('p'))
+            .subcommand(
+                Command::new("first")
+                    .arg(Arg::new("yolo").long("yolo"))
+                    .arg(Arg::new("other").short('p').action(ArgAction::SetTrue))
+                    .arg(Arg::new("mode").long("mode").action(ArgAction::SetTrue))
+                    .arg(Arg::new("output").short('o')),
+            )
+            .subcommand(
+                Command::new("second").subcommand(
+                    Command::new("nested")
+                        .arg(Arg::new("mode").long("mode"))
+                        .arg(Arg::new("output").short('o').action(ArgAction::SetTrue))
+                        .arg(
+                            Arg::new("all")
+                                .long("all")
+                                .short('a')
+                                .action(ArgAction::SetTrue),
+                        ),
+                ),
+            );
+
+        let flags = KnownFlags::from_command(&cmd);
+        assert_eq!(flags.long.get("--yolo"), Some(&false));
+        assert_eq!(flags.short.get(&'p'), Some(&true));
+        assert_eq!(flags.long.get("--mode"), Some(&true));
+        assert_eq!(flags.short.get(&'o'), Some(&true));
+        assert_eq!(flags.long.get("--all"), Some(&false));
+        assert_eq!(flags.short.get(&'a'), Some(&false));
     }
 
     // ---- filter_unknown_args ----
@@ -1349,6 +1273,11 @@ mod tests {
         assert_eq!(
             normalize_tools(Some(" Read , Bash ")),
             Some(vec!["Read".into(), "Bash".into()])
+        );
+        assert_eq!(normalize_tools(Some(",")), Some(vec![]));
+        assert_eq!(
+            normalize_tools(Some("Read,Bash,Read")),
+            Some(vec!["Read".into(), "Bash".into(), "Read".into()])
         );
         // 只丢弃"整个值就是语义值"的情形，混合值按既有语义处理。
         assert_eq!(

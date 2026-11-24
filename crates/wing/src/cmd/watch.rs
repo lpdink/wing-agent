@@ -119,19 +119,13 @@ async fn run_inner(args: WatchArgs, json: bool) -> Result<()> {
     // 校验全部前置：纯参数错误（含"没有目标会话"）不该先把网关拉起来。
     let mode = validate_mode(&args)?;
     let call = match mode {
-        WakeMode::Create => WakeCall::Create {
-            request: args.request(&resolve_target(args.to.as_deref())?)?,
-            json,
-        },
-        WakeMode::List => WakeCall::List {
-            all: args.all,
-            json,
-        },
-        WakeMode::Cancel(id) => WakeCall::Cancel { id, json },
+        WakeMode::Create => WakeCall::Create(args.request(&resolve_target(args.to.as_deref())?)?),
+        WakeMode::List => WakeCall::List { all: args.all },
+        WakeMode::Cancel(id) => WakeCall::Cancel(id),
     };
     let http = common::connect().await?;
 
-    super::wake_common::dispatch(&http, call).await
+    super::wake_common::dispatch(&http, call, json).await
 }
 
 /// 判定形态并拒绝**放错位置的**参数（静默吞掉参数 = 把这次调用变成另一次调用）。

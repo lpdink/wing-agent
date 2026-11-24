@@ -316,12 +316,12 @@ pub(crate) fn timer_request(
     }
 }
 
-/// Validate the timer triple (spec / prompt / times) before spending a request.
+/// Validate the timer inputs and return the normalized spec for the request.
 pub(crate) fn validate_timer(
     schedule: &Schedule,
     prompt: Option<&str>,
     times: Option<i64>,
-) -> Result<()> {
+) -> Result<String> {
     if prompt
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -347,8 +347,7 @@ pub(crate) fn validate_timer(
         }
         Schedule::At(_) | Schedule::Daily(_) => {}
     }
-    schedule.spec()?;
-    Ok(())
+    schedule.spec()
 }
 
 /// 本次调用有没有给时间参数（四种之一）。
@@ -374,20 +373,19 @@ async fn run_inner(args: WakeArgs, json: bool) -> Result<()> {
     let call = match mode {
         WakeMode::Create => {
             let plan = create_plan(&args)?;
-            WakeCall::Create {
-                request: timer_request(&plan.spec, &plan.prompt, plan.times, &plan.target),
-                json,
-            }
+            WakeCall::Create(timer_request(
+                &plan.spec,
+                &plan.prompt,
+                plan.times,
+                &plan.target,
+            ))
         }
-        WakeMode::List => WakeCall::List {
-            all: args.all,
-            json,
-        },
-        WakeMode::Cancel(id) => WakeCall::Cancel { id, json },
+        WakeMode::List => WakeCall::List { all: args.all },
+        WakeMode::Cancel(id) => WakeCall::Cancel(id),
     };
     let http = common::connect().await?;
 
-    super::wake_common::dispatch(&http, call).await
+    super::wake_common::dispatch(&http, call, json).await
 }
 
 /// 创建路径的**纯**计划（spec / prompt / 目标 / 次数），全部可在起网关之前算完。
@@ -407,9 +405,9 @@ pub(crate) fn create_plan(args: &WakeArgs) -> Result<CreatePlan> {
         args.every.as_deref(),
         args.daily.as_deref(),
     )?;
-    validate_timer(&schedule, args.prompt.as_deref(), args.times)?;
+    let spec = validate_timer(&schedule, args.prompt.as_deref(), args.times)?;
     Ok(CreatePlan {
-        spec: schedule.spec()?,
+        spec,
         prompt: args.prompt.clone().unwrap_or_default(),
         target: resolve_target(args.to.as_deref())?,
         times: args.times,
@@ -698,6 +696,31 @@ mod tests {
         assert!(validate_timer(&every, Some("   "), None).is_err());
         assert!(validate_timer(&every, Some("ping"), None).is_ok());
         assert!(validate_timer(&every, Some("ping"), Some(0)).is_err());
+    }
+
+    #[test]
+    fn timer_validation_reports_errors_in_flag_order() {
+        let invalid = Schedule::At("invalid".into());
+        for (prompt, times, expected) in [
+            (
+                None,
+                Some(0),
+                "a timer wake needs a message: pass -p <TEXT>",
+            ),
+            (Some("ping"), Some(0), "--times must be >= 1 (got 0)"),
+            (
+                Some("ping"),
+                Some(3),
+                "--times only applies to --every / --daily;  fires once",
+            ),
+        ] {
+            assert_eq!(
+                validate_timer(&invalid, prompt, times)
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
     }
 
     #[test]
