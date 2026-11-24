@@ -1641,10 +1641,10 @@ mod tests {
         // cursor, which sits on the last logical line.
         let mut input = InputArea::with_max_lines(String::new(), 2);
         input.set_text("one\ntwo\nthree");
-        let chrome = Chrome::of(Rect::new(0, 0, 16, 2 + chrome::BORDER_ROWS));
+        let drawn_chrome = Chrome::of(Rect::new(0, 0, 16, 2 + chrome::BORDER_ROWS));
         let mut rows = VisualRows::default();
-        let (row, _) = input.visual_cursor(rows.at(&input, chrome));
-        input.update_vertical_scroll(chrome, row);
+        let (row, _) = input.visual_cursor(rows.at(&input, drawn_chrome));
+        input.update_vertical_scroll(drawn_chrome, row);
         assert_eq!(input.vertical_scroll, 1, "window shows logical lines 1..2");
         // The caller (the pointer hit test) adds the window offset, so the
         // row handed in is absolute: window row 1 = visual row 2.

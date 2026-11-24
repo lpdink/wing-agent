@@ -219,7 +219,6 @@ mod tests {
 
     use ratatui::style::Modifier;
     use ratatui::style::Style;
-    use ratatui::text::Line;
 
     use crate::render::markdown::strip_osc8;
     use crate::ui::selection::Selection;
