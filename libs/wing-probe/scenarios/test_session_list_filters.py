@@ -170,12 +170,14 @@ async def test_status_filter_observes_transitions_without_subscription(
 
     async with _observer(probe) as observer:
         # 发第一条消息：物化（落盘）+ 起一轮，未订阅的观察者据此看到 working → idle。
-        with probe.env.provider.hold_first_content(RAIL_MODEL) as reached:
-            await session.send("hi")
-            await asyncio.wait_for(reached.wait(), timeout=5)
-            assert (
-                await _wait_status(observer, session.session_id, "working") == "working"
-            )
+        with probe.provider.hold_first_content(RAIL_MODEL) as reached:
+            async with asyncio.timeout(25):
+                await session.send("hi")
+                await asyncio.wait_for(reached.wait(), timeout=5)
+                assert (
+                    await _wait_status(observer, session.session_id, "working")
+                    == "working"
+                )
 
         result = await session.watch.expect("turn_result", within=20.0)
         assert result.data["subtype"] == "success", result.data

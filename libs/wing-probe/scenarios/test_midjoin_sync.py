@@ -64,18 +64,24 @@ async def test_midjoin_before_first_chunk_reports_working(probe: Probe) -> None:
     probe.register(FIRST_CHUNK_MODEL, Turn.of(text="late answer"))
     session = await probe.session(model=FIRST_CHUNK_MODEL)
 
-    with probe.env.provider.hold_first_content(FIRST_CHUNK_MODEL) as reached:
-        await session.send("hi")
-        await session.watch.expect("turn_started", within=5.0)
-        await asyncio.wait_for(reached.wait(), timeout=5)
+    other = await Driver.connect(probe.env)
+    try:
+        with probe.provider.hold_first_content(FIRST_CHUNK_MODEL) as reached:
+            async with asyncio.timeout(25):
+                await session.send("hi")
+                await session.watch.expect("turn_started", within=5.0)
+                await asyncio.wait_for(reached.wait(), timeout=5)
 
-        async with midjoin(probe, session.session_id) as sync:
-            assert sync.data["status"] == "working", sync.data
-            # wire_dump 剥 null，未提交正文以键缺失表示。
-            assert "uncommitted" not in sync.data, sync.data
-            assert sync.data["uncommitted_tools"] == [], sync.data
-            assert sync.data["turn_started_at"], sync.data
-            sync_at = sync.at
+                joined = await other.attach(session.session_id)
+                sync = await joined.watch.expect("sync_session", within=5.0)
+                assert sync.data["status"] == "working", sync.data
+                # wire_dump 剥 null，未提交正文以键缺失表示。
+                assert "uncommitted" not in sync.data, sync.data
+                assert sync.data["uncommitted_tools"] == [], sync.data
+                assert sync.data["turn_started_at"], sync.data
+                sync_at = sync.at
+    finally:
+        await other.close()
 
     # 确实落在"首个内容块之前"的窗口里：文本流在快照之后才到达。
     text = await session.watch.expect("text", within=15.0)

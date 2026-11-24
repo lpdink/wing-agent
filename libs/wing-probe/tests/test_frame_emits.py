@@ -318,6 +318,37 @@ async def test_first_content_gate_only_holds_one_request() -> None:
                 await first.aclose()
 
 
+@pytest.mark.asyncio
+async def test_disconnected_client_releases_held_request(monkeypatch) -> None:
+    provider = FakeProvider()
+    provider.register(MODEL, Script(Turn.of(text="never written")))
+    finished = asyncio.Event()
+    handle = provider._handle_completion
+
+    async def track_handler(request: web.Request) -> web.StreamResponse:
+        try:
+            return await handle(request)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(provider, "_handle_completion", track_handler)
+    async with (
+        provider,
+        httpx.AsyncClient(
+            base_url=provider.base_url, timeout=5, trust_env=False
+        ) as client,
+    ):
+        with provider.hold_first_content(MODEL) as reached:
+            async with client.stream(
+                "POST", "/chat/completions", json=request_body(MODEL)
+            ) as response:
+                assert response.status_code == 200
+                await asyncio.wait_for(reached.wait(), timeout=5)
+                assert not finished.is_set()
+            await asyncio.wait_for(finished.wait(), timeout=5)
+            assert len(provider.emits_for(0)) == 1
+
+
 # ── 空表、越界与账本生命周期 ────────────────────────────────
 
 

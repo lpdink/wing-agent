@@ -25,9 +25,10 @@ from __future__ import annotations
 import asyncio
 import socket
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from aiohttp import web
@@ -49,6 +50,7 @@ from wing_probe.provider.sse import (
 
 CHAT_PATH = "/v1/chat/completions"
 MESSAGES_PATH = "/v1/messages"
+_FIRST_CONTENT_GATE_TIMEOUT = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +194,7 @@ class FakeProvider:
         """暂停下一次匹配的流式请求，yield 首个正文帧已到写入点的信号。
 
         响应头及正文前的帧照常发送。退出观察块时放行，含断言失败路径。
+        观察的截止时间应早于服务端 30 秒兜底。
         """
         if model in self._first_content_gates:
             raise ValueError(f"first content already held for {model!r}")
@@ -354,12 +357,17 @@ class FakeProvider:
                 completion_id=completion_id,
                 created=created,
             )
+        before_first_content = (
+            partial(self._wait_for_release, request, *first_content_gate)
+            if first_content_gate is not None
+            else None
+        )
         try:
             await self._write_frames(
                 response,
                 frames,
                 request_index=request_index,
-                first_content_gate=first_content_gate,
+                before_first_content=before_first_content,
             )
             await response.write_eof()
         except ConnectionResetError:
@@ -367,24 +375,38 @@ class FakeProvider:
             return response
         return response
 
+    async def _wait_for_release(
+        self, request: web.Request, reached: asyncio.Event, release: asyncio.Event
+    ) -> None:
+        reached.set()
+        async with asyncio.timeout(_FIRST_CONTENT_GATE_TIMEOUT):
+            while not release.is_set():
+                # aiohttp 默认等下一次写入才报告断连，暂停期间需主动看 transport。
+                transport = request.transport
+                if transport is None or transport.is_closing():
+                    raise ConnectionResetError
+                try:
+                    async with asyncio.timeout(0.05):
+                        await release.wait()
+                except TimeoutError:
+                    pass
+
     async def _write_frames(
         self,
         response: web.StreamResponse,
         frames: Sequence[SSEFrame],
         *,
         request_index: int,
-        first_content_gate: tuple[asyncio.Event, asyncio.Event] | None = None,
+        before_first_content: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """逐帧等待 + 写；每写成一帧登记一次发射时刻（``[DONE]`` 不登记）。"""
         frame_index = 0
         for frame in frames:
             if frame.delay:
                 await asyncio.sleep(frame.delay)
-            if first_content_gate is not None and frame.kind == "content":
-                reached, release = first_content_gate
-                reached.set()
-                await asyncio.wait_for(release.wait(), timeout=25)
-                first_content_gate = None
+            if before_first_content is not None and frame.kind == "content":
+                await before_first_content()
+                before_first_content = None
             payload = frame.encode()
             at = time.monotonic()
             await response.write(payload)

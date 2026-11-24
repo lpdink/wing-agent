@@ -139,7 +139,7 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 
 四条要点：
 
-1. `probe.register(model, Turn...)` 支持关键字形式 `Turn.of(text=…, thinking=…, tool_calls=[…], usage=…, chunk=…, delay=…, first_delay=…)`，也支持 `Script(...)`（分片粒度 / 切断点 / 延迟）。两个延迟正交：`delay` 是**分片之间**的节奏（流式场景要多帧才有东西可断），`first_delay` 是**首个内容帧之前**的等待（撑「首帧未到」的窗口，例如中途加入场景要落在首块到达前）。**想只要窗口别用 `delay`**——它是逐帧的，5 帧的 turn 用 `delay=3.0` 会等成 12s；
+1. `probe.register(model, Turn...)` 支持 `Turn.of(...)` 和 `Script(...)`。观察首个正文帧前的状态时，用 `with probe.provider.hold_first_content(model) as reached` 包住发起请求和状态观察，等 `reached.wait()` 后读取 HTTP 状态或 WS 快照，退出时放行正文。用有界的观察窗口，确保先于 Provider 的兜底超时。测逐帧节奏用 `delay`，模拟首个内容帧延迟用 `first_delay`；
 2. 剧本**按序消费**，请求次数超出即返回 5xx（`ScriptExhaustedError` 附可读报告）——"不该发生的额外调用"会立刻变红，这是特性不是噪音；
 3. 失败报告与场景断言并列：teardown 的内置不变量对**场景创建／挂载的全部会话**（含 fork 出来的子会话）自动运行，失败抛 `ProbeInvariantError`，报告标注 `built-in invariants` + session id + 不变量名；
 4. `record_shape` 检查的是**实现写出的记录**（原始形态：null 不写、assistant 不存 `content_blocks` 的派生物）。场景**故意注入**存量旧形态记录时（兼容性场景），断言完成后要把注入行还原成规范形——否则夹具会把测试注入误报成产品缺陷；这也是它与 `assert_chain_invariants` 的唯一使用差别。
@@ -391,7 +391,6 @@ killpg 也 `start_new_session=True`（自成会话），所以**不在**那个�
 ## 已知取舍（与二批范围）
 
 - **env 是 function 级**：每个场景一个新 tmp + 新网关进程 + 新假 Provider，正确性优先；实测每场景的自举 + 收尾约 0.24s（`start` 0.22s + `Driver.connect` 0.013s + `stop` 0.003s——teardown 走快停机，见上一节；`start` 里 200ms 上下是一个新解释器把网关的导入图跑一遍，其中 `fastapi` 一项占一半上下），**这部分开销靠并行摊掉，不靠共享环境**（并行不改变隔离语义，共享会）。场景数量再多一个量级、或并行度吃满之后，下一条路径仍是 spec 记的 session 级共享网关 + 按 model 名分域的剧本，`Probe` 与 `ProbeEnv` 分离就是为了那时只改 fixture 作用域；
-- **场景里的等待要花在窗口上，不要花在节奏上**：`delay` 逐帧、`first_delay` 只压首个内容帧，两者混用会互相放大（`scenarios/test_midjoin_sync.py` 曾用 `delay=3.0` 撑窗口，白烧 9s）。写场景时先想清楚"我在等的是什么"，再选旋钮；
 - **二批**（已收窄）：Anthropic 协议路径、性能/时延断言、全事件类型 × `persist` 矩阵。已补齐：工具执行期中断（`scenarios/test_interrupt_tool_phase.py`）、后台自动压缩 / pending 跨进程重启（`scenarios/test_auto_compact.py`）、远程工具宿主（`scenarios/test_remote_tools.py` + `wing_probe/toolhost.py`）、帧切分与重组（`scenarios/test_frame_chunking.py`）；
 - 兜底：`make test-probe` 传 `--timeout=120`（另有场景级 `@pytest.mark.timeout(120)`），网关进程在 teardown 被 SIGKILL（快停机，见「停机：快路径与优雅路径」）；`shutdown()` 那条路径另有 wait → `terminate` → `kill` 的阶梯；
 - 网关重试在探测配置里显式打开（`max_retries=2` / `max_retry_delay=1s`，`wing_probe/env.py`）——语义重试场景需要它（`scenarios/test_react_invalid_generation.py`）。计数口径：**一次逻辑调用的剧本消费上界 = 1 + max_retries**，超出即 5xx，仍然可数。

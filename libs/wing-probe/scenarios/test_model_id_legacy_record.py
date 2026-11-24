@@ -94,6 +94,12 @@ async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
 
     # ③ resume：恢复链走快照 + identify 反查补 id。
     resumed = await probe.resume(session.session_id)
+    # 逐出后的 subscribe 也会水合，先检查 resume 自己完成了落盘。
+    aligned = probe.history(resumed).metadata() or {}
+    assert aligned.get("model_id") == LEGACY_ID, aligned
+    assert aligned.get("model_name") == LEGACY_NAME, aligned
+    assert aligned.get("provider_name") == "probe", aligned
+
     await http.subscribe(session.session_id, driver.client_id)
 
     info = await http.get_session_info(session.session_id)
@@ -108,12 +114,6 @@ async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
     assert agent["model_id"] == LEGACY_ID, agent
     assert agent["model_name"] == LEGACY_NAME, agent
     assert agent["provider_name"] == "probe", agent
-
-    # ④ 落盘对齐（一次性迁移）：metadata.json 补回 model_id，快照保持原值。
-    aligned = probe.history(resumed).metadata() or {}
-    assert aligned.get("model_id") == LEGACY_ID, aligned
-    assert aligned.get("model_name") == LEGACY_NAME, aligned
-    assert aligned.get("provider_name") == "probe", aligned
 
     # ⑤ 恢复后照常跑：请求打到原调用名（id 不外发）。
     result = await resumed.chat("beta")
