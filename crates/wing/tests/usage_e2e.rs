@@ -18,17 +18,15 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 mod common;
 
-use common::e2e::{read_request, run_wing, start_fake_gateway, wing_command};
+use common::e2e::{RUN_TIMEOUT, read_request, run_wing, start_fake_gateway, wing_command};
 
 const SESSION_ID: &str = "20261023-101500-abcdef01";
 const UNKNOWN_ID: &str = "ghost-session";
-/// 一帧仪表盘的标题行（`usage -w` 每帧都会画，且每帧只画一次）。
-const FRAME_TITLE: &str = "wing usage";
 
 // ============================================================
 // Stub gateway
@@ -247,6 +245,12 @@ fn usage_body(group_by: &str, params: &HashMap<String, String>) -> String {
             false,
             measures(1_700, 15, 4),
         ),
+        "day" if since == until => {
+            let totals = measures(1_200, 10, 3);
+            let mut row = totals.clone();
+            row["key"] = json!(until);
+            (vec![row], false, totals)
+        }
         _ => (
             vec![
                 json!({"key": "2026-10-22", "label": null, "parent_session_id": null,
@@ -526,60 +530,72 @@ async fn info_gains_a_usage_block_and_keeps_its_json_shape() {
     assert!(value.get("usage_block").is_none(), "{stdout}");
 }
 
-/// `-w` 的帧序：**先清屏、再画**。反过来（画完立刻清屏）屏幕上基本永远空白——
-/// 这条只有抓真实字节序才看得出来，单测与快照断言都看不见「什么时候清屏」。
 #[tokio::test]
-async fn watch_clears_the_screen_before_drawing_a_frame() {
+async fn watch_clears_and_redraws_two_frames_for_the_same_day() {
     let stub = Stub::start("watch").await;
-    let mut child = wing_command(&["usage", "-w"], &stub.home)
+    let mut child = wing_command(&["usage", "-w", "--since", "today"], &stub.home)
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
 
-    let mut stdout = child.stdout.take().expect("piped stdout");
-    let mut collected: Vec<u8> = Vec::new();
-    let mut buf = [0u8; 8192];
-    // 读到**第二帧的标题**就收手：断言只用两帧的先后（[清屏][内容][清屏][内容]），
-    // 读第三帧只是干等下一个 2s 刷新。超时即收手，缺了什么由下面的断言说。
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while frames_seen(&collected) < 2 {
-            match stdout.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => collected.extend_from_slice(&buf[..n]),
-            }
+    let stdout = child.stdout.take().expect("piped stdout");
+    let mut lines = BufReader::new(stdout).lines();
+    let mut text = String::new();
+    let mut frames = 0;
+    // 用模型行标记帧末尾，today 行缺失时也能直接断言。
+    tokio::time::timeout(RUN_TIMEOUT, async {
+        while frames < 2 {
+            let line = lines.next_line().await.unwrap().expect("watch output");
+            frames += usize::from(line.contains("DeepSeek-Flash"));
+            text.push_str(&line);
+            text.push('\n');
         }
     })
-    .await;
+    .await
+    .expect("watch drew two frames");
     let _ = child.kill().await;
     let _ = child.wait().await;
-    drop(stdout);
 
-    let text = String::from_utf8_lossy(&collected).to_string();
+    let requests = stub.requests();
+    let requests = requests.get(..6).expect("three usage requests per frame");
+    // 以首条请求为准，避免测试进程再读墙钟时碰上午夜。
+    let first = parse_query(&requests[0].query);
+    let date = &first["until"];
+    assert!(
+        chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok(),
+        "{first:?}"
+    );
+
     let clear = "\u{1b}[2J\u{1b}[H";
-    let head: String = text.chars().take(80).collect();
-    assert!(
-        text.starts_with(clear),
-        "首帧之前必须先清屏（否则上一屏残影留在最上面）：{head:?}"
-    );
-    let first_title = text.find(FRAME_TITLE).expect("a frame was drawn");
-    let second_clear = text[first_title..]
-        .find(clear)
-        .map(|offset| first_title + offset)
-        .expect("a second frame follows");
-    let second_title = text[second_clear..]
-        .find(FRAME_TITLE)
-        .map(|offset| second_clear + offset)
-        .expect("the second frame is drawn after its clear");
-    assert!(
-        first_title < second_clear && second_clear < second_title,
-        "帧序必须是 [清屏][内容][清屏][内容]"
-    );
-}
+    let mut frames = text
+        .strip_prefix(clear)
+        .expect("clear before the first frame")
+        .split(clear);
+    for queries in requests.chunks_exact(3) {
+        let mut dims = Vec::new();
+        for request in queries {
+            assert_eq!(request.path, "/api/usage");
+            let mut params = parse_query(&request.query);
+            assert_eq!(&params["since"], date, "{request:?}");
+            assert_eq!(&params["until"], date, "{request:?}");
+            dims.push(params.remove("group_by").unwrap());
+        }
+        dims.sort_unstable();
+        assert_eq!(dims, ["day", "model", "origin"]);
 
-/// 已经收到的字节里出现过几次帧标题——即「读到了几帧」。
-fn frames_seen(collected: &[u8]) -> usize {
-    collected
-        .windows(FRAME_TITLE.len())
-        .filter(|window| *window == FRAME_TITLE.as_bytes())
-        .count()
+        let frame = frames.next().expect("clear before each frame");
+        let title = frame.lines().next().expect("frame title");
+        assert!(title.starts_with("wing usage"), "{title:?}");
+        assert!(title.contains(&format!("{date} → {date}")), "{title}");
+        assert!(
+            frame.contains("1 active day · streak 1 · longest 1"),
+            "{frame}"
+        );
+        assert!(
+            frame
+                .lines()
+                .any(|line| line.trim_start().starts_with("today   4 messages")),
+            "{frame}"
+        );
+    }
 }

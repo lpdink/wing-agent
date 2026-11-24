@@ -340,7 +340,8 @@ impl Metric {
     }
 }
 
-/// 校验并归一化后的请求（`--since all` 原样发给端点，由它收敛到第一天）。
+/// 一次 CLI 运行的查询参数与仪表盘的本地日期锚点。
+/// `--since all` 原样发给端点，由它收敛到第一天。
 #[derive(Clone, Debug)]
 struct Plan {
     since: String,
@@ -1488,15 +1489,7 @@ mod tests {
             }],
             measures(2_300_000, 85_600, 1_936_000),
         );
-        let plan = Plan::resolve_at(
-            &UsageOpts {
-                since: day.range.since.clone(),
-                until: day.range.until.clone(),
-                ..opts()
-            },
-            date("2026-10-23"),
-        )
-        .unwrap();
+        let plan = Plan::resolve_at(&opts(), date("2026-10-23")).unwrap();
         format_dashboard(
             &day,
             &origin,
@@ -1634,6 +1627,10 @@ mod tests {
             &out(),
         )
         .unwrap();
+        assert!(
+            text.contains("1 active day · streak 1 · longest 1"),
+            "{text}"
+        );
         assert!(text.contains("today   2 messages"), "{text}");
         assert!(text.contains("(99.00% cached)"), "{text}");
 
