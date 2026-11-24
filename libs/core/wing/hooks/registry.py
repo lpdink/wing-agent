@@ -87,7 +87,7 @@ class HookRegistry:
         return True
 
     def invoke(self, point: str, value: Any, **context: Any) -> Any:
-        """同步执行 hook 管道，跳过协程函数并告警。"""
+        """同步执行 hook 管道（规则见模块说明），跳过协程函数并告警。"""
         for fn in self._handlers.get(point, []):
             if inspect.iscoroutinefunction(fn):
                 log.warning(
@@ -109,7 +109,7 @@ class HookRegistry:
         return value
 
     async def invoke_async(self, point: str, value: Any, **context: Any) -> Any:
-        """按注册顺序混合调用同步 handler 和 await 协程函数。"""
+        """按模块说明的管道规则调用同步 handler，并 await 协程函数。"""
         for fn in self._handlers.get(point, []):
             try:
                 if inspect.iscoroutinefunction(fn):

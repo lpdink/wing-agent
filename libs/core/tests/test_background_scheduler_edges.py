@@ -97,18 +97,20 @@ async def test_failing_job_does_not_kill_loop(wing_warnings, is_async):
         await asyncio.sleep(0)
         boom()
 
-    scheduler.add_job("boom", 0.02, await_then_fail if is_async else boom)
-    scheduler.add_job("ok", 0.02, lambda: healthy.append(1))
-    scheduler.start()
-
-    await wait_until_async(
-        lambda: bool(healthy) and any("job 'boom' failed" in m for m in wing_warnings),
-        timeout=5.0,
+    scheduler.add_job(
+        "boom", 0.02, await_then_fail if is_async else boom, initial_delay_seconds=0
     )
-    assert scheduler.running is True
-    await scheduler.stop()
+    scheduler.add_job("ok", 0.02, lambda: healthy.append(1), initial_delay_seconds=0)
+    scheduler.start()
+    try:
+        await wait_until_async(
+            lambda: len(healthy) >= 2,
+            msg="healthy job did not run after the first sweep",
+        )
+        assert scheduler.running is True
+    finally:
+        await scheduler.stop()
 
-    assert healthy  # 健康 job 照常跑
     assert any("job 'boom' failed" in m for m in wing_warnings)
 
 

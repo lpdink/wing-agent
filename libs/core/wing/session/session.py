@@ -49,7 +49,11 @@ from wing.store import (
 )
 from wing.tool_registry import ToolRef
 
-from .model_binding import ModelBinding, resolve_recorded_model
+from .model_binding import (
+    ModelBinding,
+    UnavailableSnapshotProvider,
+    resolve_recorded_model,
+)
 from .override import validate_override_utf8
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .usage import UsageTracker
@@ -1210,13 +1214,16 @@ class Session:
             self._agent.set_max_turns(m.max_turns)
 
     def _restore_persisted_model(self) -> None:
-        """应用记录模型；只有拿到新映射时才对齐 metadata。"""
+        """应用记录模型，仅在解析到 id 且绑定有变化时对齐 metadata。
+
+        解析不到 id 时保留原记录，旧 id 和快照可供配置修复后恢复。
+        """
         m = self._metadata
         recorded = resolve_recorded_model(m, get_config())
-        if isinstance(recorded, ValueError):
+        if isinstance(recorded, UnavailableSnapshotProvider):
             log.warning(
                 f"Session {self._session_id}: cannot restore model "
-                f"'{m.model_name}' on provider '{m.provider_name}' ({recorded}); "
+                f"'{m.model_name}' on provider '{m.provider_name}' ({recorded.detail}); "
                 "falling back to template default (record kept)"
             )
             return
@@ -1225,7 +1232,7 @@ class Session:
 
         self.agent.set_model(recorded.model_name, recorded.provider_name)
         self._model_id = recorded.model_id
-        if recorded.snapshot_provider is None:
+        if recorded.source == "id":
             log.info(
                 f"Session {self._session_id}: restored model id "
                 f"'{recorded.model_id}' → '{recorded.model_name}' "
@@ -1255,7 +1262,6 @@ class Session:
                 )
             )
 
-        # 无匹配时保留旧 id 与快照，供之后配置修复时恢复。
         if self._model_id is not None and (
             self._model_id,
             self.agent.provider_name,

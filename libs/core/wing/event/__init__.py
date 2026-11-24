@@ -119,8 +119,8 @@ def wire_dump(event: WingEvent) -> dict:
     """事件 → WS 直播帧 / SyncSession 载荷的统一 wire dict。
 
     剥除存储专用字段（`_WIRE_EXCLUDE`）与事件顶层值为 null 的字段，保留 uuid。
-    直播帧与 `SyncSession.events` 共用此规则。`SyncSession.uncommitted` 先经
-    `serialize_message` 投影为 Message 字典，事件外层再走此函数。
+    直播事件和 `SyncSession.events` 的条目使用此函数。
+    `SyncSession.uncommitted` 由 `serialize_message` 直接投影为 Message 字典。
     """
     data = event.model_dump(mode="json", exclude=_WIRE_EXCLUDE)
     return {k: v for k, v in data.items() if v is not None}

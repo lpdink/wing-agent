@@ -494,15 +494,18 @@ async def test_run_rg_timeout_kills_process(monkeypatch):
 
 
 async def test_kill_process_group_kills_session_leader():
-    """进程组组长以 SIGKILL 退出。"""
+    """向组长所在进程组发送 SIGKILL，组长按该信号退出。"""
     import signal
+    from unittest.mock import patch
 
     from wing_sdk.tools._proc import kill_process_group
 
     proc = await asyncio.create_subprocess_exec("sleep", "30", start_new_session=True)
     try:
-        kill_process_group(proc)
+        with patch("wing_sdk.tools._proc.os.killpg", wraps=os.killpg) as killpg:
+            kill_process_group(proc)
         assert await proc.wait() == -signal.SIGKILL
+        killpg.assert_called_once_with(proc.pid, signal.SIGKILL)
     finally:
         if proc.returncode is None:  # pragma: no cover - 清理兜底
             proc.kill()

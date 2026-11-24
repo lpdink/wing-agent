@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from wing.config import Config, ProviderConfig, resolve_model_display_name
 from wing.store import SessionMetadata
@@ -41,22 +42,28 @@ class ModelBinding:
 
 @dataclass(frozen=True)
 class RecordedModel:
-    """可恢复的记录绑定；快照路径同时携带已解析的 provider。"""
+    """可恢复的模型及其来源。已解析的 provider 可供展示名投影复用。"""
 
+    source: Literal["id", "snapshot"]
     model_id: str | None
     model_name: str
     provider_name: str
-    snapshot_provider: ProviderConfig | None = None
+    provider_config: ProviderConfig | None = None
+
+
+@dataclass(frozen=True)
+class UnavailableSnapshotProvider:
+    detail: str
 
 
 def resolve_recorded_model(
     metadata: SessionMetadata, config: Config
-) -> RecordedModel | ValueError | None:
-    """取可恢复的记录绑定，或为恢复日志保留不可用快照 provider 的诊断。"""
+) -> RecordedModel | UnavailableSnapshotProvider | None:
+    """解析记录绑定，返回 provider 诊断或以 None 表示缺少完整记录。"""
     if metadata.model_id is not None:
         ref = config.find_model(metadata.model_id)
         if ref is not None:
-            return RecordedModel(ref.id, ref.name, ref.provider_name)
+            return RecordedModel("id", ref.id, ref.name, ref.provider_name)
 
     model, provider = metadata.model_name, metadata.provider_name
     if model is None or provider is None:
@@ -64,9 +71,9 @@ def resolve_recorded_model(
     try:
         provider_cfg = config.get_provider(provider)
     except ValueError as exc:
-        return exc
+        return UnavailableSnapshotProvider(str(exc))
     return RecordedModel(
-        config.identify(provider, model), model, provider, provider_cfg
+        "snapshot", config.identify(provider, model), model, provider, provider_cfg
     )
 
 
@@ -77,19 +84,28 @@ def resolve_model_binding(
 ) -> ModelBinding:
     """为冷列表投影生效绑定，记录不可恢复时使用会话模板。"""
     recorded = resolve_recorded_model(metadata, config)
-    if not isinstance(recorded, RecordedModel):
-        recorded = RecordedModel(
-            template.model_id, template.model, template.provider_name
+    if isinstance(recorded, RecordedModel):
+        model_id, model, provider_name = (
+            recorded.model_id,
+            recorded.model_name,
+            recorded.provider_name,
         )
-    provider = recorded.snapshot_provider
+        provider = recorded.provider_config
+    else:
+        model_id, model, provider_name = (
+            template.model_id,
+            template.model,
+            template.provider_name,
+        )
+        provider = None
     if provider is None:
         try:
-            provider = config.get_provider(recorded.provider_name)
+            provider = config.get_provider(provider_name)
         except ValueError:
             pass
     return ModelBinding(
-        model_id=recorded.model_id,
-        model_name=recorded.model_name,
-        provider_name=recorded.provider_name,
-        model_display_name=resolve_model_display_name(provider, recorded.model_name),
+        model_id=model_id,
+        model_name=model,
+        provider_name=provider_name,
+        model_display_name=resolve_model_display_name(provider, model),
     )
