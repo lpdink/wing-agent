@@ -15,6 +15,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::SinkExt;
 use tokio::net::TcpStream;
@@ -25,8 +26,9 @@ use tokio_tungstenite::tungstenite::Message;
 mod common;
 
 use common::e2e::{
-    RUN_TIMEOUT, header_value, is_websocket_upgrade, read_request, request_path, send_connected,
-    send_json, start_fake_gateway, upgrade_websocket, wait_for_ws_disconnect, wing_command,
+    RUN_TIMEOUT, header_value, is_websocket_upgrade, read_request, request_path, request_target,
+    send_connected, send_json, start_fake_gateway, upgrade_websocket, wait_for_ws_disconnect,
+    wing_command,
 };
 
 /// The client's per-frame receive limit (tungstenite default).
@@ -46,7 +48,7 @@ enum Scenario {
 
 struct WaitGateway {
     scenario: Scenario,
-    subscribed: Notify,
+    subscription_answered: AtomicBool,
     info_sent: Notify,
 }
 
@@ -69,10 +71,17 @@ async fn handle_conn(mut stream: TcpStream, gateway: Arc<WaitGateway>) {
                 let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(request["session_id"], SESSION_ID);
                 assert_eq!(header_value(&head, "x-client-id"), Some("fake"));
-                gateway.subscribed.notify_one();
                 "{}"
             }
             "/api/session/info" => {
+                assert!(
+                    gateway.subscription_answered.load(Ordering::Relaxed),
+                    "session info arrived before the subscription response"
+                );
+                assert_eq!(
+                    request_target(&head).strip_prefix("/api/session/info?session_id="),
+                    Some(SESSION_ID)
+                );
                 // The session stays pending until the WS outcome arrives.
                 r#"{"model":"test","api_url":"http://x","tools":[],"total_tokens":0,"context_window_tokens":1,"thinking":false,"reasoning_effort":null,"yolo":false,"session_name":null,"status":"working","context_stats":{"message_count":0,"total_tokens":0}}"#
             }
@@ -81,8 +90,12 @@ async fn handle_conn(mut stream: TcpStream, gateway: Arc<WaitGateway>) {
         if send_json(&mut stream, payload).await.is_err() {
             return;
         }
-        if path == "/api/session/info" {
-            gateway.info_sent.notify_one();
+        match path {
+            "/api/session/subscribe" => {
+                gateway.subscription_answered.store(true, Ordering::Relaxed)
+            }
+            "/api/session/info" => gateway.info_sent.notify_one(),
+            _ => {}
         }
     }
 }
@@ -91,7 +104,6 @@ async fn drive_ws(mut ws: WebSocketStream<TcpStream>, gateway: Arc<WaitGateway>)
     if send_connected(&mut ws, "fake").await.is_err() {
         return;
     }
-    gateway.subscribed.notified().await;
     gateway.info_sent.notified().await;
 
     let frame = match gateway.scenario {
@@ -111,7 +123,7 @@ async fn drive_ws(mut ws: WebSocketStream<TcpStream>, gateway: Arc<WaitGateway>)
 async fn start_gateway(scenario: Scenario, tag: &str) -> (PathBuf, u16) {
     let gateway = Arc::new(WaitGateway {
         scenario,
-        subscribed: Notify::new(),
+        subscription_answered: AtomicBool::new(false),
         info_sent: Notify::new(),
     });
     start_fake_gateway("wing-e2e", tag, gateway, handle_conn).await

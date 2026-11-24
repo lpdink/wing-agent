@@ -142,7 +142,8 @@ class TestBuildFrames:
         payload = "x" * (SOFT_LIMIT_BYTES + 1)
         frames = build_frames(payload, "sync_session")
         assert len(frames) == 2
-        assert all(frame.size <= SOFT_LIMIT_BYTES for frame in frames)
+        for frame in frames:
+            assert frame.size == len(frame.text.encode("utf-8")) <= SOFT_LIMIT_BYTES
         envelopes = [json.loads(f.text) for f in frames]
         assert [set(e) for e in envelopes] == [
             {"type", "id", "index", "count", "of_type", "data"}

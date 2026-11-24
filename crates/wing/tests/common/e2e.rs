@@ -168,14 +168,15 @@ pub async fn read_head(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<Stri
     }
 }
 
-pub fn request_path(head: &str) -> &str {
+pub fn request_target(head: &str) -> &str {
     head.lines()
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("")
+}
+
+pub fn request_path(head: &str) -> &str {
+    request_target(head).split('?').next().unwrap_or("")
 }
 
 /// Header names are case-insensitive; values such as `Sec-WebSocket-Key` are not.
