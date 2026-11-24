@@ -48,9 +48,9 @@ drain-and-merge 缓解（多半并入同一轮）。这是刻意的：把「只�
 「下一次完成时告诉我」（保留 `id` 与 `fire_count`，配额与 `prompt` 取本次请求的值，清掉
 `last_error`）。理由：一条 active 订阅表达的是**状态**，不是队列——多插一行会让同一个提问 /
 同一个收口被投递多次（`ask` 从不消耗配额，这个放大在整个提问期间都成立）；父会话若照着两条
-信封各答一次，第二次答复已经找不到 waiter，会掉进子会话 inbox 变成一条普通用户消息（凭空多
-起一轮）。同理，`wing run` 在**回答 ask**（带 `--tool-call-id`）时不再登记 notify：派发时那条
-触发器仍在武装，本来就够，输出里会写明 `notify: off (answering an ask: ...)`。
+信封各答一次，第二次答复会因 waiter 已失效被拒（HTTP 400 或 WS `feedback_waiter_inactive`），
+不会另起一轮。`wing run` 在**回答 ask**（带 `--tool-call-id`）时沿用派发时登记的触发器，
+输出里会写明 `notify: off (answering an ask: ...)`。
 
 **done 缺省配额是 1**：`wing watch <SID>` 的语义是「它下次静息时叫我」，叫完这条就完成
 了。要盯多次用 `--times N`（N 次静息）；只盯提问用 `--on ask`（配额永远不被消耗，等于

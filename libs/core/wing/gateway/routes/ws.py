@@ -26,6 +26,7 @@ import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from wing.agent import InactiveFeedbackWaiterError
 from wing.common.logger import log
 from wing.common.utils import validate_request_id
 from wing.event import ErrorEvent, wire_dump
@@ -36,6 +37,7 @@ from wing.request_context import (
 )
 
 from wing.gateway.auth import ROLE_TOOL_RUNTIME, extract_key_from_ws
+from wing.gateway.frames import build_frames
 from wing.gateway.protocol import ClientRequest, ConnectResponse, ToolCallResult
 from wing.tool_registry import DEFAULT_NAMESPACE
 
@@ -161,17 +163,16 @@ async def handle_ws(ws: WebSocket) -> None:
                 # 以及非法 request_id 都不绑上下文 → 两字段为 None / 新 uuid，剥除 null 后
                 # 与历史形状一致。
                 ctx = get_request_context()
-                await ws.send_text(
-                    json.dumps(
-                        wire_dump(
-                            ErrorEvent(
-                                message=str(e),
-                                session_id=ctx.session_id,
-                                request_id=ctx.request_id or uuid.uuid4().hex,
-                            )
-                        )
-                    )
+                rejected_feedback = isinstance(e, InactiveFeedbackWaiterError)
+                error = ErrorEvent(
+                    message=str(e),
+                    session_id=ctx.session_id,
+                    request_id=ctx.request_id or uuid.uuid4().hex,
+                    status_code=400 if rejected_feedback else 500,
+                    error_code=e.code if rejected_feedback else None,
                 )
+                for frame in build_frames(json.dumps(wire_dump(error)), error.type):
+                    await ws.send_text(frame.text)
             finally:
                 # 恢复必须在 except 之后：失败日志本身也要带归属。
                 if token is not None:

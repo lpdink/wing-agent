@@ -148,7 +148,8 @@ ACP 会话全生命周期与流式映射：`initialize`（固定回 v1 + 能力�
 `session/update`：文本 / 思考分片、工具卡片、diff、标题、用量）、`session/cancel`（→
 `/api/session/interrupt`，在途轮次回 `stopReason: cancelled`）、`session/list`、
 `session/load`（历史回放）/ `session/resume`、`session/close`、`session/set_config_option`
-（模型热切换）。Ask 走 permission / elicitation / 回退三径（`ask.rs`）。映射规则与并发/收尾
+（模型热切换）。Ask 走 permission / elicitation / 回退三径（`ask.rs`）。网关拒绝定向答复时，
+ACP 在日志记录会话及答复请求 ID，`session/prompt` 继续等待当前轮次的终态。映射规则与并发/收尾
 语义见 `crates/wing/src/acp/`（`translate.rs` 纯函数映射 + 单测，`session.rs` 的 SessionHub）。
 
 ### 编排 CLI（`wing run` / `wait` / `ps` …，PR #64）
@@ -339,7 +340,7 @@ provider 实例是**无状态**的（配置 + 连接池），生命周期归 `wi
 
 **没有"回落推断"这条路径**：`status` 必填且取值严格（Python 必填字段 + 两端解码期 fail-fast）——CLI 与网关同版本升级，字段缺失 / 取值未知即协议错误，不在前端猜。两端也不读 `turn_started_at` 判状态（它是耗时锚点，不是生命周期标志）。
 
-**pending ask 重放**：`AskEvent` 落盘，但已答的 ask 不再是关于当下的事实（重放会渲染活的 Ask 卡，回答找不到 waiter 进虚空）。后端用 `Inbox._feedback_waiters` 的键集合（`pending_ask_ids()`）作权威待答集合，`get_active_events()` 据此只下发仍挂起的 ask；前端重放渲染 Ask cell 并注册可答状态（归一化入口 `AskPanel::from_ask` 产出的唯一模型），用户回答走既有通道 resolve waiter。
+**pending ask 重放**：`AskEvent` 落盘。后端用 `Inbox._feedback_waiters` 的键集合（`pending_ask_ids()`）作权威待答集合，`get_active_events()` 据此只下发仍挂起的 ask。前端用 `AskPanel::from_ask` 渲染 Ask cell 并注册可答状态，定向答复交给对应的活跃 waiter。答复到达时 waiter 若已失效，网关返回 HTTP 400 或带 `feedback_waiter_inactive` 的 WS `error` 帧。
 
 **前端重放**：`replay.rs` 两段式——先 replay_messages（建 ToolCall/thinking/text cell），再 replay_events（**能力分发**：diff 按 tool_call_id 锚定插入对应 ToolCall cell 后、ask 渲染为可答卡片，无渲染器的类型跳过以保持前向容忍；未知锚点 fallback append，与直播路径同款兜底）。前端**不再编码"孪生事件不得渲染"这类策略**——过滤已在后端 `FACT_EVENTS` 完成，前端只做能力分发。
 

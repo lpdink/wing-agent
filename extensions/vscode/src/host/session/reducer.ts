@@ -260,9 +260,15 @@ function applyKnown(record: SessionRecord, event: KnownWingEvent, effects: Reduc
       return;
     }
     case 'error': {
-      finishTurn(record);
+      const rejectedFeedback = event.error_code === 'feedback_waiter_inactive';
+      if (!rejectedFeedback) {
+        finishTurn(record);
+      }
       const text = event.message === '' ? 'Agent error' : event.message;
       pushSystem(record, 'error', text);
+      if (rejectedFeedback) {
+        return;
+      }
       record.setLastError(text);
       effects.push({ kind: 'attention', level: 'error' });
       return;

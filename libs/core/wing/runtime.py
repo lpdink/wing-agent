@@ -748,9 +748,8 @@ class WingRuntime:
 
         委托给 ContextManager.rewind()，发射事件。
 
-        手动压缩在飞时拒绝：压缩是会话级独占操作，它拿的是压缩开始时的窗口快照，
-        收口时会 `set_tip` 到快照的链末——期间的 rewind 会被它静默覆盖（用户以为
-        回退生效了、实际上从链上消失了，而摘要里还带着想丢弃的内容）。
+        手动压缩持有窗口快照，压缩期间禁止 rewind。实际改链也需要 worker
+        空闲且收件箱没有待处理输入。准入与改链之间没有挂起点。
 
         Returns:
             draft 文本，或 None
@@ -758,18 +757,28 @@ class WingRuntime:
         Raises:
             LookupError: session 不存在
             ValueError: target_uuid 无效
-            SessionBusyError: 会话正在压缩或准备提交用户输入
+            SessionBusyError: 会话正在压缩、处理轮次或有等待处理的输入
         """
         session = self._require_session(session_id)
-        if session.agent.compacting:
+        agent = session.agent
+        if agent.compacting:
             raise SessionBusyError(
                 "session is compacting; wait for it to finish before rewinding"
             )
-        if target_uuid != "current" and session.agent.preparing_input:
-            raise SessionBusyError(
-                "session is preparing user input; wait or interrupt before rewinding"
-            )
-        cm = session.agent.context_manager
+        if target_uuid != "current":
+            if agent.preparing_input:
+                raise SessionBusyError(
+                    "session is preparing user input; wait or interrupt before rewinding"
+                )
+            if session.status in BUSY_STATES:
+                raise SessionBusyError(
+                    "session has a running turn; wait or interrupt before rewinding"
+                )
+            if agent.has_pending_input:
+                raise SessionBusyError(
+                    "session has queued input; wait or interrupt before rewinding"
+                )
+        cm = agent.context_manager
 
         draft = cm.rewind(target_uuid)
         self._emit_context_stats(session)

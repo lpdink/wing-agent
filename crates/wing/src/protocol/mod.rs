@@ -29,3 +29,5 @@ pub use wing_api_client::models::MediaRef;
 pub fn generate_request_id() -> String {
     format!("wing_{}", uuid::Uuid::new_v4().simple())
 }
+
+pub(crate) const FEEDBACK_WAITER_INACTIVE: &str = "feedback_waiter_inactive";

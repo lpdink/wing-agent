@@ -1330,7 +1330,7 @@ class Session:
         """投递用户消息。
 
         先写入第一条消息 metadata（标题）与最后互动时间，再转发给 agent。
-        tool_call_id 非空时表示这是对某个 Ask 事件的定向回复。
+        tool_call_id 非 None 时表示这是对某个 Ask 事件的定向回复。
         media 非空时消息携带媒体引用（字节在会话媒体目录；引用已由
         ``SessionManager._post`` 闸门校验可兑现）。
 
@@ -1343,6 +1343,8 @@ class Session:
             ValueError: 正文不可编码为 UTF-8（它在首条消息时会成为标题，也会进
                 LLM 请求体——两处都在 ``encode("utf-8")`` 处炸）
         """
+        # SessionManager._post 的 waiter 准入与 Inbox.resolve 必须在同一事件循环轮次。
+        # 期间若挂起，waiter 可能先失效，导致被拒的答复已修改 metadata 或物化草稿。
         require_utf8(content, field="message content")
         previous_title = self._metadata.session_name
         self._check_first_message_metadata(content)

@@ -17,6 +17,7 @@ use super::replay;
 use super::title;
 use super::turn_state;
 use crate::protocol::EventMeta;
+use crate::protocol::FEEDBACK_WAITER_INACTIVE;
 use crate::protocol::SessionSnapshot;
 use crate::protocol::WingEvent;
 use crate::shared::constants::TOOL_TODO;
@@ -251,6 +252,13 @@ impl App {
                 }
             }
 
+            WingEvent::Error {
+                message,
+                error_code,
+                ..
+            } if error_code.as_deref() == Some(FEEDBACK_WAITER_INACTIVE) => {
+                self.chat.push(ChatCell::ErrorMessage(message));
+            }
             WingEvent::Error { message, meta, .. } => {
                 // A frame rejection is scoped to its submission. A turn error
                 // may arrive through the same event with an unrelated request ID.

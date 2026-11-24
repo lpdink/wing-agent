@@ -10,8 +10,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from wing.agent import SessionBusyError
 from wing.event import SessionStateChangedEvent
 from wing.event_bus import event_bus
+from wing.schema import Message
 
 
 @pytest.fixture
@@ -334,3 +336,27 @@ class TestReloadProviderPool:
         assert old._client.is_closed is True
         assert session.agent.model_provider is not old
         assert session.agent.model_provider._client.is_closed is False
+
+
+@pytest.mark.asyncio
+async def test_rewind_refused_when_idle_with_queued_input(runtime):
+    session = runtime.create_session()
+    agent = session.agent
+    try:
+        await runtime.post(
+            "queued", request_id="queued-input", session_id=session.session_id
+        )
+        # post does not suspend between enqueuing and returning to the caller.
+        assert agent.status == "idle"
+        assert agent.has_pending_input
+        seed = Message(role="user", content="seed")
+        agent.context_manager.add_message(seed)
+        assert seed.uuid is not None
+
+        assert runtime.rewind_session(session.session_id, "current") is None
+        with pytest.raises(SessionBusyError, match="queued input"):
+            runtime.rewind_session(session.session_id, seed.uuid)
+        assert agent.context_manager.get_context_window() == [seed]
+        assert [item.content for item in agent.pending_user_messages()] == ["queued"]
+    finally:
+        await agent.shutdown()

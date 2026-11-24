@@ -53,7 +53,7 @@ pub struct RunArgs {
     ///
     /// Find the id with `wing asks <sid>` (the pending-ask query): a pending
     /// ask's tool call is not on the chain yet, so `wing tail` cannot see it.
-    /// A stale id (no live waiter) falls back to a normal message.
+    /// The gateway rejects the answer if no active waiter matches the id.
     #[arg(long = "tool-call-id")]
     pub tool_call_id: Option<String>,
 

@@ -261,6 +261,43 @@ describe('bash approval asks', () => {
     expect(askCell(fixture).answers[0]?.selected).toEqual(['n']);
   });
 
+  it('keeps the other ask and the turn active when a late answer is rejected', async () => {
+    const fixture = await bootWithAsk(legacyAsk);
+    const { harness, sessionId } = fixture;
+    harness.gateway.emit({ type: 'turn_started', session_id: sessionId });
+    harness.gateway.emit({ ...legacyAsk, tool_call_id: 'second-ask', session_id: sessionId });
+    await flushMicrotasks();
+    await harness.intent({
+      type: 'approveTool',
+      sessionId,
+      requestId: 'ask-bash',
+      decision: 'approve',
+    });
+    const answer = harness.clientFrames().find((frame) => frame['tool_call_id'] === 'ask-bash');
+    expect(answer?.['request_id']).toEqual(expect.any(String));
+    harness.gateway.emit({
+      type: 'error',
+      session_id: sessionId,
+      request_id: answer?.['request_id'],
+      error_code: 'feedback_waiter_inactive',
+      status_code: 400,
+      message: 'no active feedback waiter for this tool_call_id',
+    });
+    await flushMicrotasks();
+
+    const record = harness.host.sessionManager.record(sessionId);
+    expect(record?.cells.filter((cell) => cell.kind === 'ask').map((cell) => cell.state)).toEqual([
+      'answered',
+      'awaiting',
+    ]);
+    expect(record?.status).toBe('waiting-for-input');
+    expect(record?.turn.active).toBe(true);
+    expect(record?.cells.at(-1)).toMatchObject({
+      kind: 'system',
+      text: 'no active feedback waiter for this tool_call_id',
+    });
+  });
+
   it('keeps the ask awaiting when the answer cannot be sent', async () => {
     const fixture = await bootWithAsk(legacyAsk);
     // Kill the socket behind the client's back: `send` throws.

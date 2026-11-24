@@ -8,10 +8,12 @@
 """
 
 from .core import SessionBusyError, WingAgent
+from .inbox import InactiveFeedbackWaiterError
 from .tool_context import ToolContext
 from .tool_executor import current_tool_call_id
 
 __all__ = [
+    "InactiveFeedbackWaiterError",
     "SessionBusyError",
     "WingAgent",
     "ToolContext",

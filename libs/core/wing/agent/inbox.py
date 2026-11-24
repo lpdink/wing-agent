@@ -20,6 +20,13 @@ from wing.event import PendingUserMessage
 from wing.schema import MediaRef, Message
 
 
+class InactiveFeedbackWaiterError(InvalidInputError):
+    code = "feedback_waiter_inactive"
+
+    def __init__(self) -> None:
+        super().__init__("no active feedback waiter for this tool_call_id")
+
+
 @dataclass
 class Inbound:
     """进入 agent 的请求，携带消息和上下文元数据。
@@ -191,22 +198,20 @@ class Inbox:
         """移除 waiter（超时或完成后清理）。"""
         self._feedback_waiters.pop(tool_call_id, None)
 
-    def resolve(self, tool_call_id: str, content: str) -> bool:
-        """尝试按 tool_call_id 定向 resolve feedback waiter。
-
-        Returns:
-            True 如果成功 resolve，False 如果无对应 waiter。
-        """
+    def require_feedback_waiter(self, tool_call_id: str) -> asyncio.Future[str]:
         future = self._feedback_waiters.get(tool_call_id)
-        if future is not None and not future.done():
-            log.info(
-                "inbox.resolve: resolving feedback waiter tool_call_id=%s with '%s'",
-                tool_call_id,
-                log_excerpt(content, 40),
-            )
-            future.set_result(content)
-            return True
-        return False
+        if future is None or future.done():
+            raise InactiveFeedbackWaiterError()
+        return future
+
+    def resolve(self, tool_call_id: str, content: str) -> None:
+        future = self.require_feedback_waiter(tool_call_id)
+        log.info(
+            "inbox.resolve: resolving feedback waiter tool_call_id=%s with '%s'",
+            tool_call_id,
+            log_excerpt(content, 40),
+        )
+        future.set_result(content)
 
     def cancel_all_waiters(self) -> None:
         """取消并清空所有 feedback waiter（interrupt/shutdown 时调用）。"""
@@ -226,27 +231,18 @@ class Inbox:
     ) -> Inbound | None:
         """接收用户消息或 feedback。返回实际入队的输入。
 
-        Feedback 严格寻址：只有携带 tool_call_id 且命中 waiter 的消息才会
-        resolve 对应 Future；无 id 或 id 已失效的消息一律进队列。
-
-        media 进 ``Message(media=...)``（空列表由 Message 归一为 None）。**定向
-        答复只承载文本**：命中 waiter 时 media 无处安放（Ask 答复通道是纯文本），
-        记 WARN 后按文本 resolve——不发明新语义，也不静默吞掉调用方的意图。
+        定向答复只承载文本，且要求 tool_call_id 对应仍在等待的 Future。
         """
         self.input_request_ids.require_available(request_id)
         if tool_call_id is not None:
-            if self.resolve(tool_call_id, content):
-                if media:
-                    log.warning(
-                        f"inbox.post: feedback answer for tool_call_id="
-                        f"{tool_call_id} carries {len(media)} media ref(s); "
-                        "directed answers are text-only, media ignored"
-                    )
-                return None
-            log.info(
-                f"inbox.post: no live feedback waiter for tool_call_id="
-                f"{tool_call_id}, falling through to queue"
-            )
+            self.resolve(tool_call_id, content)
+            if media:
+                log.warning(
+                    f"inbox.post: feedback answer for tool_call_id="
+                    f"{tool_call_id} carries {len(media)} media ref(s); "
+                    "directed answers are text-only, media ignored"
+                )
+            return None
 
         if role == "user" and not (content or media):
             raise InvalidInputError("message content or media is required")

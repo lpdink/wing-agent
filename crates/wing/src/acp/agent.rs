@@ -831,10 +831,8 @@ async fn run_turn(
         if let WingEvent::Ask { tool_call_id, .. } = &event {
             // 三路收口：客户端作答 / 事件流已死（默认答案）/ **本会话已请求取消**。
             //
-            // 取消路：网关 interrupt 已经（或正在）清掉后端的 feedback waiter——迟到的
-            // 客户端应答不能再回写：网关对无 waiter 的定向消息会 fallthrough 成普通用户
-            // 消息（幽灵轮次 + 持久化历史污染）。丢弃它，放行事件循环去消费随后到达的
-            // `interrupted`，本轮以 `cancelled` 收口（客户端不关权限卡/表单也不再悬挂）。
+            // 取消请求让事件循环立即恢复消费 `interrupted`，即使客户端仍打开权限卡
+            // 或表单，`session/prompt` 也会以 `cancelled` 收口。
             let reply = tokio::select! {
                 // `biased` + 取消臂在前：取消已置位时优先走取消路——取消后丢弃应答永远
                 // 安全（轮次本来要以 `cancelled` 收口），随机挑臂没有语义收益。
