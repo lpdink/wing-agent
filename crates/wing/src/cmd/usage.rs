@@ -12,6 +12,9 @@
 //! wing usage --json                   # 端点响应原样（无 --by 时是 group_by=day）
 //! ```
 //!
+//! `--watch` 在启动时用本地日期解析相对窗口，并以同一天为各帧计算 `today` 和 `streak`。
+//! 每帧重新查询，`--since all` 的实际起点由网关确定。要切换到新一天，重新运行命令。
+//!
 //! 三条口径：
 //!
 //! - **参数闸门在连网关之前**（非法值不拉起守护进程）；
@@ -337,11 +340,13 @@ impl Metric {
     }
 }
 
-/// 校验并归一化后的请求（`--since all` 原样发给端点，由它收敛到第一天）。
+/// 一次 CLI 运行的查询参数与仪表盘的本地日期锚点。
+/// `--since all` 原样发给端点，由它收敛到第一天。
 #[derive(Clone, Debug)]
 struct Plan {
     since: String,
     until: String,
+    today: NaiveDate,
     by: Option<Dim>,
     metric: Metric,
     session: Option<String>,
@@ -403,6 +408,7 @@ impl Plan {
                 When::Day(day) => day.format("%Y-%m-%d").to_string(),
             },
             until: until.format("%Y-%m-%d").to_string(),
+            today,
             by,
             metric,
             session: opts.session.clone(),
@@ -487,21 +493,14 @@ async fn render_dashboard(
             Err(error) => return Err(diagnose(http, plan, Some(dim), limit, *error).await),
         }
     }
-    format_dashboard(
-        &reports[0],
-        &reports[1],
-        &reports[2],
-        plan.metric,
-        palette,
-        out,
-    )
+    format_dashboard(&reports[0], &reports[1], &reports[2], plan, palette, out)
 }
 
 fn format_dashboard(
     day: &UsageResponse,
     origin: &UsageResponse,
     model: &UsageResponse,
-    metric: Metric,
+    plan: &Plan,
     palette: &ThemePalette,
     out: &TableOutput,
 ) -> Result<String> {
@@ -515,7 +514,7 @@ fn format_dashboard(
         .iter()
         .filter_map(|row| {
             let date = parse_day(&row.key).ok()?;
-            Some((date, metric.value(&row.measures)))
+            Some((date, plan.metric.value(&row.measures)))
         })
         .collect();
     let heat = Heatmap {
@@ -573,7 +572,8 @@ fn format_dashboard(
         })
         .collect();
     flags.sort_by_key(|(date, _)| *date);
-    let (active_days, streak, longest) = streak_stats(&flags, Local::now().date_naive());
+    let today = plan.today;
+    let (active_days, streak, longest) = streak_stats(&flags, today);
     out_text.push('\n');
     out_text.push_str(&format!(
         "{INDENT}{} active {} · streak {streak} · longest {longest}\n",
@@ -594,7 +594,6 @@ fn format_dashboard(
     }
 
     // today：只打今天真的干活了的那一天（全 0 的一天不打一排 0）。
-    let today = Local::now().date_naive();
     if today >= since
         && today <= until
         && let Some(row) = day.row(&today.format("%Y-%m-%d").to_string())
@@ -1490,11 +1489,12 @@ mod tests {
             }],
             measures(2_300_000, 85_600, 1_936_000),
         );
+        let plan = Plan::resolve_at(&opts(), date("2026-10-23")).unwrap();
         format_dashboard(
             &day,
             &origin,
             &model,
-            Metric::Tokens,
+            &plan,
             &ThemePalette::default(),
             &out(),
         )
@@ -1512,7 +1512,14 @@ mod tests {
         assert_eq!(title.chars().count(), common::PIPE_WIDTH, "右对齐");
         // 2) 热力图（含图例）与 3) 统计行。
         assert!(text.contains("less · ░ ▒ ▓ █ more"), "{text}");
-        assert!(text.contains("2 active days · streak"), "{text}");
+        assert!(
+            text.contains("2 active days · streak 2 · longest 2"),
+            "{text}"
+        );
+        assert!(
+            text.contains("today   2 messages · 1 session · ↑ 1.20M in"),
+            "{text}"
+        );
         // 4) 审计起点提示（data_since == since → 不打印）。
         assert!(!text.contains("audit starts"), "{text}");
         // 5) 两张表：who 有 total 行，model 用展示名（表头一律小写）。
@@ -1526,6 +1533,7 @@ mod tests {
 
     #[test]
     fn the_audit_start_hint_only_shows_when_the_flow_starts_after_the_range() {
+        let plan = Plan::resolve_at(&opts(), date("2026-10-25")).unwrap();
         let mut day = report("day", vec![], measures(0, 0, 0));
         day.range.data_since = Some("2026-10-20".into());
         let origin = report("origin", vec![], measures(0, 0, 0));
@@ -1534,7 +1542,7 @@ mod tests {
             &day,
             &origin,
             &model,
-            Metric::Tokens,
+            &plan,
             &ThemePalette::default(),
             &out(),
         )
@@ -1551,7 +1559,7 @@ mod tests {
             &day,
             &origin,
             &model,
-            Metric::Tokens,
+            &plan,
             &ThemePalette::default(),
             &out(),
         )
@@ -1561,6 +1569,7 @@ mod tests {
 
     #[test]
     fn an_empty_report_says_which_kind_of_empty_it_is() {
+        let plan = Plan::resolve_at(&opts(), date("2026-10-25")).unwrap();
         let empty = report("day", vec![], UsageMeasures::default());
         assert_eq!(
             empty_note(&empty),
@@ -1580,7 +1589,7 @@ mod tests {
             &virgin,
             &virgin,
             &virgin,
-            Metric::Tokens,
+            &plan,
             &ThemePalette::default(),
             &out(),
         )
@@ -1591,14 +1600,21 @@ mod tests {
 
     #[test]
     fn today_is_printed_only_when_it_has_something_to_report() {
-        let today = Local::now().date_naive();
-        let key = today.format("%Y-%m-%d").to_string();
+        let plan = Plan::resolve_at(
+            &UsageOpts {
+                since: "today".into(),
+                ..opts()
+            },
+            date("2026-10-23"),
+        )
+        .unwrap();
+        let key = &plan.until;
         let mut day = report(
             "day",
-            vec![row(&key, measures(1_000, 10, 990))],
+            vec![row(key, measures(1_000, 10, 990))],
             measures(1_000, 10, 990),
         );
-        day.range.since = key.clone();
+        day.range.since = plan.since.clone();
         day.range.until = key.clone();
         let origin = report("origin", vec![], measures(1_000, 10, 990));
         let model = report("model", vec![], measures(1_000, 10, 990));
@@ -1606,23 +1622,25 @@ mod tests {
             &day,
             &origin,
             &model,
-            Metric::Tokens,
+            &plan,
             &ThemePalette::default(),
             &out(),
         )
         .unwrap();
-        assert!(text.contains("today"), "{text}");
-        assert!(text.contains("2 messages"), "{text}");
+        assert!(
+            text.contains("1 active day · streak 1 · longest 1"),
+            "{text}"
+        );
+        assert!(text.contains("today   2 messages"), "{text}");
         assert!(text.contains("(99.00% cached)"), "{text}");
 
         // 今天在窗口内但一行流水都没有 → 不打印这一行。
-        day.rows = vec![row(&key, UsageMeasures::default())];
-        day.totals = measures(1_000, 10, 990);
+        day.rows = vec![row(key, UsageMeasures::default())];
         let text = format_dashboard(
             &day,
             &origin,
             &model,
-            Metric::Tokens,
+            &plan,
             &ThemePalette::default(),
             &out(),
         )
@@ -1724,11 +1742,12 @@ mod tests {
             width: 60,
             color: false,
         };
+        let plan = Plan::resolve_at(&opts(), date("2026-10-25")).unwrap();
         let text = format_dashboard(
             &day,
             &origin,
             &model,
-            Metric::Tokens,
+            &plan,
             &ThemePalette::default(),
             &narrow,
         )

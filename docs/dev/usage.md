@@ -211,7 +211,7 @@ UTC 与 CST 下每天差几十行），且两种写法都不可索引。代价�
 | 与服务端 `info` 的 usage 对不上 | 见 §6 第三行（两条账本，口径不同） |
 | `wing usage` 说 `does not serve /api/usage` | 运行中的网关是本特性之前构建的：`wing stop && wing start` |
 | `wing usage` 的热力图几乎全是 `·`，但明明有会话 | 审计流水从 `wing.db` 建库那天起——看输出的 `token / call / message audit starts …` 那一行；`--since all` 会拉长窗口但补不出更早的读数 |
-| `wing usage` 的 `today` 行不见了 | 今天在窗口内**且有活动**时才打（全 0 的一天不打一排 0） |
+| `wing usage` 的 `today` 行不见了 | 命令启动时的 CLI 本地日期在响应窗口内**且有活动**时才显示。若 `-w` 跨过午夜，重新运行命令可切换到新一天 |
 | `wing usage --by session` 的 `title` / `who` 是 `—` | 那个会话不在 `/api/session/list` 里（已归档 / 已删除 / 还没物化）：id 仍可拷贝，展示素材不猜 |
 | `wing usage --session` 报 `session not found` | 404 = 目录与审计表都没有这个 id；若是老网关（路由都没有），文案会改说 `does not serve /api/usage` |
 
@@ -237,15 +237,16 @@ wing usage [--since WHEN] [--until WHEN] [--by DIM] [--metric M]
 | `--session` | 会话 id | 把每个数字收敛到该会话；未知 id → `session not found` + exit 1 |
 | `--tree` | 开关 | 含全部子孙（必须配 `--session`，否则参数闸门 exit 1） |
 | `--limit` | `1..=200` | 只作用于排行类维度（`day` / `origin` 不受影响） |
-| `-w` / `--watch` | 开关 | 每 2s 清屏重绘（与 `wing ps -w` 同形），Ctrl-C 退出；`--json` 照刷 |
+| `-w` / `--watch` | 开关 | 每 2s 用启动时解析的查询边界重新查询并清屏重绘，Ctrl-C 退出；`--json` 照刷 |
 
-**时间的解释方**：时长写法相对**本地今天**往回减（`7d` = 今天往前 7 天），天数换算
-`w=7` / `m=30` / `y=365`；CLI 把人类写法翻成网关本地日期后再发请求，服务端只认
-`YYYY-MM-DD` 与字面量 `all`。**参数闸门在连网关之前**（非法值不拉起守护进程）。
+CLI 在命令启动时采样一次**客户端本地日期**。`today`、`yesterday` 和 `7d` 等相对写法都以这一天为准，
+其中 `7d` 往前数 7 天，`w=7` / `m=30` / `y=365`。CLI 发送 `YYYY-MM-DD` 或 `since=all`，
+网关按自身的日期口径统计，并在每次收到 `since=all` 时解析实际起点。`--watch` 跨过午夜后继续使用
+启动日及已解析的查询边界。重新运行命令即可按新一天解析。**参数闸门在连网关之前**（非法值不拉起守护进程）。
 
 **仪表盘** = 三次并发请求（`group_by=day` / `origin` / `model&limit=5`）拼五段：
-标题（范围 + 周数）、热力图、`active days · streak · longest`、`today`（仅当今天在窗口内
-**且**今天有活动）、`who`（`me` / `agents` + `total`）与 `model` 两张表。
+标题（范围 + 周数）、热力图、`active days · streak · longest`、`today`、`who`（`me` / `agents` + `total`）与 `model` 两张表。
+`streak` 以 CLI 启动日为基准。`today` 行仅在同一天位于响应窗口内**且**有活动时显示。
 `range.data_since` 晚于 `range.since` 时打一行
 `token / call / message audit starts …; earlier days have no readings`（字段缺席 = 老网关，不打印）。
 
