@@ -1,25 +1,39 @@
-"""帧切分的重试轮：每轮必须重新装帧（信封预留变了，上一轮的帧作废）。
-
-`build_frames` 的帧数是**先估后校**的：先用 `count_hint`（按原始字节估算）预留
-信封宽度，切完拿到真实帧数就重算预留、必要时重切一轮。转义膨胀（引号 / 反斜杠
-各 +1 字节）会让真实帧数远大于这个估算——位数跨过 10 / 100 时预留变宽，于是必然
-进入第二轮。
-
-一旦第二轮把上一轮的帧继续 append 进同一个列表，返回的帧数就与信封里的 `count`
-不符，索引也不再是从 0 开始的连续序列。客户端（`chunk` 合并）据此判
-"chunk index out of sequence" 并断连——所以这条必须由测试钉住。
-
-用 monkeypatch 把 `SOFT_LIMIT_BYTES` 缩小来复现，避免真造 40 MiB 载荷。
-"""
+"""转义膨胀跨 count 位宽时重切，返回最终轮的连续信封。"""
 
 from __future__ import annotations
 
 import json
+from unittest.mock import patch
 
 import pytest
 
 from wing.gateway import frames as frames_mod
 from wing.gateway.frames import build_frames
+
+
+@pytest.mark.parametrize("length", [5_000, 52_000])
+def test_retry_only_packs_the_final_round(length, monkeypatch):
+    monkeypatch.setattr(frames_mod, "SOFT_LIMIT_BYTES", 1_000)
+    with (
+        patch.object(frames_mod, "_split_raw", wraps=frames_mod._split_raw) as split,
+        patch.object(frames_mod, "_frame", wraps=frames_mod._frame) as pack,
+    ):
+        frames = build_frames('"' * length, "sync_session")
+
+    assert split.call_count == 2
+    assert pack.call_count == len(frames)
+    assert len(str(len(frames))) == len(str(length // 1_000 + 2)) + 1
+
+
+def test_last_round_keeps_unavoidable_oversize_fragments(monkeypatch):
+    monkeypatch.setattr(frames_mod, "SOFT_LIMIT_BYTES", 1)
+    with patch.object(frames_mod, "_split_raw", wraps=frames_mod._split_raw) as split:
+        frames = build_frames("中🙂", "sync_session")
+
+    assert split.call_count == 4
+    assert [json.loads(frame.text)["data"] for frame in frames] == ["中", "🙂"]
+    assert all(frame.size == len(frame.text.encode()) > 1 for frame in frames)
+
 
 #: 转义密度高的载荷（引号 / 反斜杠各膨胀 1 字节，切片按转义后长度算），
 #: 真实帧数因此可以远超按原始字节估出来的 ``count_hint``。
