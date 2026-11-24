@@ -12,7 +12,7 @@
 //! - 轮中消息：turn 未结束时再投 `user` → 转发到 `POST /api/session/send`；
 //! - 退出码：最后一轮结果说了算（先失败后成功 = 0；最后一轮失败 ≠ 0）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -423,12 +423,12 @@ struct WingProcess {
 
 impl WingProcess {
     /// 常驻 stdio（stream-json in + out）形态。
-    async fn spawn(home: &PathBuf) -> Self {
+    async fn spawn(home: &Path) -> Self {
         Self::spawn_with(home, &[]).await
     }
 
     /// 额外 CLI 参数（如 `-p`）叠加在常驻形态之上。
-    async fn spawn_with(home: &PathBuf, extra: &[&str]) -> Self {
+    async fn spawn_with(home: &Path, extra: &[&str]) -> Self {
         let mut args = vec![
             "--input-format",
             "stream-json",

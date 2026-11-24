@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -219,7 +220,7 @@ class TestBuildFrames:
         event = SyncSessionEvent(
             session_id="wire-fixture",
             status="idle",
-            created_at="2026-09-13T00:00:00+00:00",
+            created_at=datetime(2026, 9, 13, tzinfo=UTC),
             request_id="wire-req",
             uuid="wire-uuid",
             messages=[{"role": "assistant", "content": '中🙂 "quote" \\ path'}],
