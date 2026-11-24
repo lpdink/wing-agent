@@ -30,7 +30,8 @@ jobs:
     name: Python Check
     runs-on: ubuntu-latest
     env:
-      UV_NO_SYNC: "1"  # 后续 uv run 复用跳过 wing-cli 的显式安装。
+      # uv run 默认会重新同步并安装显式同步跳过的 wing-cli。
+      UV_NO_SYNC: "1"
 
     steps:
       # fetch-depth: 0 —— 增量覆盖率门禁要算与目标分支的 merge-base（非 PR 没用上，
@@ -102,6 +103,7 @@ jobs:
     name: Probe Check
     runs-on: ubuntu-latest
     env:
+      # uv run 默认会重新同步并安装显式同步跳过的 wing-cli。
       UV_NO_SYNC: "1"
 
     steps:

@@ -239,7 +239,15 @@ PATCH_BASE ?= origin/develop
 export-cov-python:
 	uv run coverage json -o coverage-python.json --fail-under=0
 
+.PHONY: require-python-coverage-json
+require-python-coverage-json:
+	@test -f coverage-python.json || { \
+		printf '%s\n' 'coverage-python.json is missing. Run make export-cov-python first.' >&2; \
+		exit 1; \
+	}
+
 patch-cov-python: export-cov-python
+patch-cov-python-json: require-python-coverage-json
 patch-cov-python patch-cov-python-json:
 	python3 scripts/ci/patch_coverage.py --lang python \
 		--coverage coverage-python.json --base $(PATCH_BASE) \
