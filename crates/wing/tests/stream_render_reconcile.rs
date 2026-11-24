@@ -553,6 +553,8 @@ fn reconcile_with_palette(
 
 const CHUNK_SIZES: &[usize] = &[1, 16, 256];
 const WIDTHS: &[u16] = &[40, 80, 120];
+// The general matrix relies on the math sweep to reconcile matching shapes,
+// profiles, width, and fixed chunk sizes.
 const MATH_SWEEP_WIDTH: u16 = 80;
 const MATH_SWEEP_CHUNKS: std::ops::RangeInclusive<usize> = 1..=64;
 const PROFILES: &[Profile] = &[Profile::Thinking, Profile::Content];
@@ -567,7 +569,6 @@ fn reconcile_matrix_shapes() {
         for &profile in PROFILES {
             for &chunk in CHUNK_SIZES {
                 for &width in WIDTHS {
-                    // The dedicated math sweep reconciles this same input.
                     if is_math_shape(name)
                         && width == MATH_SWEEP_WIDTH
                         && MATH_SWEEP_CHUNKS.contains(&chunk)

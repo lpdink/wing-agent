@@ -468,7 +468,7 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 
 **OSC8 注入方式**。每个字素头的 `Cell::symbol` 都包含 `ESC]8;;URL ST`、字素和 `ESC]8;; ST`，宽字尾单元保留给终端占位。diff 只写部分格子时，每个重绘字素都带完整的链接序列。每帧 ratatui 重置 Buffer，同一 URL 的序列逐字节稳定。
 
-`CellDiffOption::ForcedWidth` 按可见字素宽度设置（常见窄字 1、宽字 2）。`BufferDiff` 用它跳过宽字的尾单元，`CrosstermBackend::draw` 对 `last_x + 1` 的相邻格省略 `MoveTo`。把宽字固定成 1 会让下一次局部重绘时光标比 Buffer 预期多推进一列。`a_wide_linked_grapheme_moving_one_column_keeps_the_wire_in_step` 核对真实 diff 字节和终端光标，`scrolling_linked_cjk_keeps_the_terminal_in_step` 核对整帧字符列宽。
+**`CellDiffOption::ForcedWidth` 必须等于终端实际渲染的字素列宽**。缺少这一宽度覆盖时，OSC8 的 URL 会参与 `Cell::symbol` 的宽度测量，`BufferDiff` 可能把链接到行尾的后续格当成同一宽字符的尾单元跳过，留下旧内容。`CrosstermBackend::draw` 对 `last_x + 1` 的相邻格省略 `MoveTo`。若将实际占两列的字素标成一列，局部重绘就可能省略必要的定位，后续格在终端上向右偏一列。`a_wide_linked_grapheme_moving_one_column_keeps_the_wire_in_step` 核对真实 diff 字节和终端光标，`scrolling_linked_cjk_keeps_the_terminal_in_step` 核对整帧字符列宽。
 
 **链接区间链路**：`MarkdownSegment.link_target`（解析层已产出）→ `line_link_spans()`（列 = 前序段 `unicode-width` 累加）→ 与渲染行平行的 `Vec<Vec<LinkSpan>>`（`ComposedLines`；流式路径在 `compose_into` 里加 2 列前缀偏移，`ChatCell::render_lines` 的重放路径同理）→ `ChatViewWidget::render` 逐行映射成**屏幕绝对列**，落到两个消费者：① 本帧 Buffer 注入 OSC8；② `ChatView::frame_links` 快照（`link_at(column, row)`）。
 

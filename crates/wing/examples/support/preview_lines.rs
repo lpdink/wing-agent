@@ -90,3 +90,36 @@ fn sgr(color: Option<Color>) -> Option<String> {
     };
     Some(index.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::style::Style;
+    use ratatui::text::Span;
+
+    #[test]
+    fn preserves_preview_line_bytes() {
+        let line = Line::from(vec![
+            Span::styled(
+                "▀中▄",
+                Style::default()
+                    .fg(Color::Rgb(1, 2, 3))
+                    .bg(Color::Rgb(4, 5, 6))
+                    .add_modifier(Modifier::BOLD | Modifier::DIM),
+            ),
+            Span::styled("xyz", Style::default().fg(Color::Indexed(42))),
+        ]);
+        let width = 6;
+
+        assert_eq!(render_line(&line, width, true, Preview::Welcome), " █中█x");
+        assert_eq!(render_line(&line, width, true, Preview::Thinking), "▀中▄xy");
+        assert_eq!(
+            render_line(&line, width, false, Preview::Welcome),
+            " \x1b[0m\x1b[1m\x1b[38;2;1;2;3m\x1b[48;2;4;5;6m▀中▄\x1b[0m\x1b[38;7mx\x1b[0m",
+        );
+        assert_eq!(
+            render_line(&line, width, false, Preview::Thinking),
+            "\x1b[0m\x1b[1m\x1b[2m\x1b[38;2;1;2;3m▀中▄\x1b[0m\x1b[38;7mxy\x1b[0m",
+        );
+    }
+}
