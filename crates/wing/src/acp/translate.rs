@@ -1294,6 +1294,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let subscriber = tracing_subscriber::registry().with(WarnCounter(Arc::clone(&counter)));
         let _guard = tracing::subscriber::set_default(subscriber);
+        // callsite 的 interest 缓存由进程共享，安装线程局部订阅者后重建以刷新其他测试留下的值。
         tracing::callsite::rebuild_interest_cache();
 
         let mut cards = ToolCards::default();

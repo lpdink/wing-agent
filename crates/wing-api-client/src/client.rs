@@ -594,16 +594,10 @@ impl GatewayClient {
 
     /// 极简健康判定（启动路径的预检：`valid=false` ⇒ 网关处于 setup mode，走修复流程）。
     pub async fn settings_status(&self) -> Result<SettingsStatusResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
-            .get(format!("{}{}", self.base_url, "/api/settings/status"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .get(format!("{}{}", self.base_url, "/api/settings/status"));
+        Self::send_json(request).await
     }
 
     /// 保存配置（全文档替换 + 乐观并发指纹）。
@@ -966,6 +960,27 @@ mod tests {
             409 => "Conflict",
             503 => "Service Unavailable",
             _ => "Error",
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_status_preserves_preflight_error_classification() {
+        for (status, body) in [
+            (404, r#"{"error":"not_found"}"#),
+            (503, r#"{"error":"setup_mode"}"#),
+            (200, "{}"),
+        ] {
+            let server = MockGateway::start(vec![("/api/settings/status", status, body)]).await;
+            let client = GatewayClient::new(&server.url, None).unwrap();
+            let error = client.settings_status().await.unwrap_err();
+            match status {
+                404 => assert!(error.is_not_found(), "unexpected error: {error:?}"),
+                503 => assert!(error.is_setup_mode(), "unexpected error: {error:?}"),
+                _ => assert!(
+                    matches!(&error, ApiClientError::Transport(error) if error.is_decode()),
+                    "unexpected error: {error:?}"
+                ),
+            }
         }
     }
 

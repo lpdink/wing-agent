@@ -2279,7 +2279,8 @@ async fn run_notify_registration_and_its_four_opt_outs() {
     assert_eq!(code, 0, "stderr: {stderr}");
     assert_eq!(
         body_of(&stub, "/api/session/create")["agent"]["tools"],
-        json!([])
+        json!([]),
+        "wing run --tools '' must send an explicit empty agent.tools array"
     );
     assert!(
         stdout.contains("notify:      #7 → parent-1 (on ask)"),
