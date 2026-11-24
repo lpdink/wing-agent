@@ -196,11 +196,6 @@ class ContextManager:
 
     # ── 工具声明集管理 ─────────────────────────────
 
-    @property
-    def declared_tools(self) -> list[Tool]:
-        """当前 LLM 可见工具集（冻结视图）。"""
-        return list(self._declared_tools)
-
     def reset_declared_tools(self) -> None:
         """把声明集复位为「未初始化」——resume / fork 重建 agent 专用。
 

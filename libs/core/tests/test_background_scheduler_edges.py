@@ -66,8 +66,13 @@ async def test_job_not_due_is_skipped():
 async def test_due_job_runs_and_reschedules():
     scheduler = BackgroundScheduler()
     ran: list[int] = []
-    scheduler.add_job("tick", 0.02, lambda: ran.append(1))
+
+    async def tick() -> None:
+        ran.append(1)
+
+    scheduler.add_job("tick", 0.02, tick)
     scheduler.start()
+    assert scheduler.running is True
 
     await wait_until_async(
         lambda: len(ran) >= 2, msg="按 interval 多轮触发（跑完先排下一次）"
@@ -75,9 +80,12 @@ async def test_due_job_runs_and_reschedules():
     await scheduler.stop()
 
     assert scheduler.jobs == ["tick"]
+    assert scheduler.running is False
+    await scheduler.stop()
 
 
-async def test_failing_job_does_not_kill_loop(wing_warnings):
+@pytest.mark.parametrize("is_async", [False, True], ids=["sync", "async"])
+async def test_failing_job_does_not_kill_loop(wing_warnings, is_async):
     """job 抛异常只记日志：循环继续，其它 job 不受影响。"""
     scheduler = BackgroundScheduler()
     healthy: list[int] = []
@@ -85,7 +93,11 @@ async def test_failing_job_does_not_kill_loop(wing_warnings):
     def boom() -> None:
         raise RuntimeError("job exploded")
 
-    scheduler.add_job("boom", 0.02, boom)
+    async def await_then_fail() -> None:
+        await asyncio.sleep(0)
+        boom()
+
+    scheduler.add_job("boom", 0.02, await_then_fail if is_async else boom)
     scheduler.add_job("ok", 0.02, lambda: healthy.append(1))
     scheduler.start()
 
@@ -93,6 +105,7 @@ async def test_failing_job_does_not_kill_loop(wing_warnings):
         lambda: bool(healthy) and any("job 'boom' failed" in m for m in wing_warnings),
         timeout=5.0,
     )
+    assert scheduler.running is True
     await scheduler.stop()
 
     assert healthy  # 健康 job 照常跑
@@ -125,6 +138,36 @@ async def test_stop_waits_for_running_job():
     assert finished == ["done"]
 
 
+async def test_slow_job_does_not_block_stop():
+    """回调完成时已越过下个周期，stop 仍能观察到停止信号。"""
+    now = 0.0
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def slow() -> None:
+        entered.set()
+        await release.wait()
+        finished.set()
+
+    scheduler = BackgroundScheduler(clock=lambda: now)
+    scheduler.add_job("slow", 1, slow, initial_delay_seconds=0)
+    scheduler.start()
+    await asyncio.wait_for(entered.wait(), timeout=5.0)
+    now = 2.0
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=5.0)
+
+    # wait_for 会取消 stop，掩盖调度循环没有自行退出。
+    stop_task = asyncio.create_task(scheduler.stop())
+    done, _ = await asyncio.wait({stop_task}, timeout=3.0)
+    if stop_task not in done:
+        stop_task.cancel()
+    await stop_task
+    assert stop_task in done
+    assert scheduler.running is False
+
+
 async def test_stop_swallows_loop_cancellation(wing_warnings):
     """循环自身被取消（事件循环收尾）→ stop 吞掉，不算错误。"""
     scheduler = BackgroundScheduler()
@@ -139,15 +182,28 @@ async def test_stop_swallows_loop_cancellation(wing_warnings):
 
 async def test_stop_swallows_outer_cancellation_when_loop_cancelled():
     """外层取消（含 wait_for 超时）会同时取消循环任务——两者都收，不向上抛。"""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def running_job() -> None:
+        entered.set()
+        await release.wait()
+
     scheduler = BackgroundScheduler()
+    scheduler.add_job("running", 3600, running_job, initial_delay_seconds=0)
     scheduler.start()
+    loop_task = scheduler._task
+    assert loop_task is not None
+    await asyncio.wait_for(entered.wait(), timeout=5.0)
+
     stop_task = asyncio.create_task(scheduler.stop())
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
+    assert not loop_task.done()
+    assert not stop_task.done()
+    assert stop_task.cancel()
 
-    stop_task.cancel()
-
-    # 循环任务确实被取消（不是"循环还在跑"），因此 stop 吸收这个取消
-    await stop_task
+    assert await stop_task is None
+    assert loop_task.cancelled()
     assert scheduler.running is False
 
 

@@ -458,14 +458,12 @@ async def test_run_rg_without_ripgrep(monkeypatch):
 
 async def test_run_rg_timeout_kills_process(monkeypatch):
     """超时必须杀进程组，否则 `rg` 会以孤儿身份留在进程表里。"""
-    import asyncio
-
     import wing_sdk.tools.search as search_mod
-    from wing_sdk.tools._proc import kill_process_group
 
     class _FakeProc:
         pid = 2_147_483_646  # 必然不存在的 pid：走 kill() 兜底分支
         killed = False
+        waited = False
 
         async def communicate(self):
             return (b"", b"")
@@ -474,6 +472,8 @@ async def test_run_rg_timeout_kills_process(monkeypatch):
             self.killed = True
 
         async def wait(self) -> int:
+            assert self.killed
+            self.waited = True
             return 0
 
     proc = _FakeProc()
@@ -490,14 +490,11 @@ async def test_run_rg_timeout_kills_process(monkeypatch):
 
     assert await search_mod._run_rg(["--version"], cwd=".") == ("grep: timeout", 1)
     assert proc.killed is True
-    # 兜底分支之外，真正的进程组击杀由 kill_process_group 自己的测试覆盖
-    assert kill_process_group is not None
+    assert proc.waited is True
 
 
-@needs_rg
-async def test_kill_process_group_kills_real_tree(tmp_path):
-    """真进程：killpg 后整个进程组消失（rg/bash 派生的子进程不会变孤儿）。"""
-    import asyncio
+async def test_kill_process_group_kills_session_leader():
+    """进程组组长以 SIGKILL 退出。"""
     import signal
 
     from wing_sdk.tools._proc import kill_process_group

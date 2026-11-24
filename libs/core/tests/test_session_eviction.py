@@ -7,7 +7,6 @@
 - touch（会话状态变化重置空闲计时器）与 reaper 的 EventBus 触摸通道；
 - 逐出 → ``ensure_loaded`` 水合（链完整、磁盘状态不动、provider 已关闭）；
 - ``release_session`` 的语义（幂等 / 钉住拒绝 / 未知会话）；
-- ``BackgroundScheduler``（周期触发 / 异常隔离 / 幂等启停）。
 
 时钟全部注入（``now=`` 参数与假时钟），不依赖真实等待时长。
 """
@@ -19,9 +18,8 @@ import time
 
 import pytest
 
-from _support import materialize, wait_until_async
+from _support import materialize
 from wing.agent.inbox import Inbound
-from wing.background import BackgroundScheduler
 from wing.event import DeliveredEvent
 from wing.event_bus import event_bus
 from wing.runtime import WingRuntime
@@ -380,85 +378,3 @@ class TestHydration:
             assert runtime.sm.get_session(sid) is not None
         finally:
             runtime.unsubscribe("client-x", sid)
-
-
-class TestBackgroundScheduler:
-    """周期任务宿主：触发 / 异常隔离 / 幂等启停。"""
-
-    @pytest.mark.asyncio
-    async def test_job_runs_periodically(self):
-        calls: list[int] = []
-
-        async def job() -> None:
-            calls.append(1)
-
-        scheduler = BackgroundScheduler()
-        scheduler.add_job("tick", 0.01, job)
-        scheduler.start()
-        await wait_until_async(lambda: bool(calls), timeout=5.0)
-        await scheduler.stop()
-        assert len(calls) >= 1
-        assert scheduler.jobs == ["tick"]
-        assert scheduler.running is False
-        await scheduler.stop()  # 幂等
-
-    @pytest.mark.asyncio
-    async def test_slow_job_does_not_block_stop(self):
-        """job 时长 > interval 时 stop() 必须能返回。
-
-        回归：deadline 已过 → `wait = 0` → `asyncio.wait_for(timeout=0)` 立即
-        超时且**不观察已 set 的停止事件** → 循环永远进不了返回分支，
-        `stop()` 里的 `await task` 永久挂住（gateway lifespan shutdown 失效）。
-        """
-        job_done = asyncio.Event()
-
-        async def slow_job() -> None:
-            await asyncio.sleep(0.02)  # 远大于 interval：跑完时 deadline 已过
-            job_done.set()
-
-        scheduler = BackgroundScheduler()
-        scheduler.add_job("slow", 0.01, slow_job)
-        scheduler.start()
-        await asyncio.wait_for(job_done.wait(), timeout=5.0)  # 至少跑完一轮 job
-
-        # 用 asyncio.wait 而非 wait_for 判定：wait_for 超时会**取消** stop()，
-        # 而取消会掩盖"循环没停"这一事实（stop 的取消分支吞掉 CancelledError
-        # 后，wait_for 甚至可能"正常返回"）——那样测试就骗过了自己。
-        stop_task = asyncio.create_task(scheduler.stop())
-        done, _ = await asyncio.wait({stop_task}, timeout=3.0)
-        if stop_task not in done:
-            stop_task.cancel()
-        assert stop_task in done, (
-            "stop() 未在 3s 内返回——wait=0 忙循环会忽略停止信号（回归）"
-        )
-        assert scheduler.running is False
-
-    @pytest.mark.asyncio
-    async def test_job_failure_is_isolated(self):
-        calls: list[str] = []
-
-        async def boom() -> None:
-            calls.append("boom")
-            raise RuntimeError("job exploded")
-
-        def ok() -> None:
-            calls.append("ok")
-
-        scheduler = BackgroundScheduler()
-        scheduler.add_job("boom", 0.01, boom)
-        scheduler.add_job("ok", 0.01, ok)
-        scheduler.start()
-        await wait_until_async(lambda: "boom" in calls and "ok" in calls, timeout=5.0)
-        assert scheduler.running is True  # 循环没被 job 异常带崩
-        await scheduler.stop()
-        assert "boom" in calls and "ok" in calls
-
-    def test_add_job_validates(self):
-        scheduler = BackgroundScheduler()
-        scheduler.add_job("a", 1.0, lambda: None)
-        with pytest.raises(ValueError, match="already registered"):
-            scheduler.add_job("a", 1.0, lambda: None)
-        with pytest.raises(ValueError, match="interval"):
-            scheduler.add_job("b", 0.0, lambda: None)
-        scheduler.remove_job("a")
-        assert scheduler.jobs == []

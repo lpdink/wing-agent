@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from typing import AsyncIterator
 
 import pytest
@@ -271,35 +272,22 @@ class TestDoCompact:
         assert body_end < ins < wrap < critical
 
     @pytest.mark.asyncio
-    async def test_no_instruction_prompt_byte_identical(self):
-        """无指令 → prompt 与 COMPACT_PROMPT 逐字节一致。
-        自动压缩与裸手动压缩（高频、经过大量验证的路径）零影响。"""
+    @pytest.mark.parametrize(
+        "kwargs", [{}, {"instruction": "   "}], ids=["omitted", "blank"]
+    )
+    async def test_default_prompt_bytes(self, kwargs):
         c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
         full = [Message(role="system", content="sys")]
         prov, state = _capturing_provider()
 
-        await c.do_compact(full, DEFAULT_MODEL, prov)
-        assert state["messages"][-1].content == c.COMPACT_PROMPT
+        await c.do_compact(full, DEFAULT_MODEL, prov, **kwargs)
 
-    def test_compact_prompt_split_identity(self):
-        """拆分恒等式：BODY + FORMAT == COMPACT_PROMPT（原始提示词未被改动，
-        只做了条件性增加）。防止后续直接改动其一，导致带指令/不带指令
-        两条路径的 prompt 漂移。"""
-        assert (
-            Compactor._COMPACT_PROMPT_BODY + Compactor._COMPACT_PROMPT_FORMAT
-            == Compactor.COMPACT_PROMPT
+        content = state["messages"][-1].content
+        assert content is not None
+        # 原始压缩提示词 UTF-8 字节的摘要，独立于实现中的两个片段。
+        assert sha256(content.encode("utf-8")).hexdigest() == (
+            "d1cafca72799971c37fe4b9cd5e48bd5b6ac8f847023afb8b93e3c1e39e548b9"
         )
-
-    @pytest.mark.asyncio
-    async def test_blank_instruction_ignored(self):
-        """空白指令视同未提供——prompt 与默认逐字节一致。"""
-        c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
-        full = [Message(role="system", content="sys")]
-        prov, state = _capturing_provider()
-
-        await c.do_compact(full, DEFAULT_MODEL, prov, instruction="   ")
-        content = state["messages"][-1].content or ""
-        assert content == c.COMPACT_PROMPT
 
     @pytest.mark.asyncio
     async def test_tool_calls_silently_ignored(self):
@@ -327,7 +315,7 @@ class TestDoCompact:
         c = Compactor(context_window_tokens=100_000, keep_recent_tokens=20_000)
         prov, state = _capturing_provider()
         await c.do_compact([], DEFAULT_MODEL, prov)
-        assert len(state["messages"]) == 1  # only COMPACT_PROMPT
+        assert len(state["messages"]) == 1  # only the compact prompt
 
     @pytest.mark.asyncio
     async def test_appends_compact_prompt_after_full_history(self):

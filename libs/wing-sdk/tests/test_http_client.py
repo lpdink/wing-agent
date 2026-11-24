@@ -198,25 +198,6 @@ async def test_interrupt_and_compact(client: GatewayClient):
     ]
 
 
-async def test_update_session_sends_model_id_only():
-    client = GatewayClient("http://127.0.0.1:32523")
-    fake = _RecordingClient()
-    setattr(client, "_client", fake)
-
-    await client.update_session("S-1", model_id="ds-flash", title="renamed")
-
-    assert fake.calls == [
-        {
-            "method": "POST",
-            "path": "/api/session/update",
-            "json": {"session_id": "S-1", "model_id": "ds-flash", "title": "renamed"},
-            "headers": {},
-        }
-    ]
-    body = fake.calls[0]["json"]
-    assert "model" not in body and "provider" not in body
-
-
 async def test_update_session_omits_none_valued_fields(client: GatewayClient):
     await client.update_session("S-1", thinking=False, yolo=True)
     # False 是「显式关闭」的合法值，不能被 is not None 之外的判断吞掉
@@ -238,16 +219,23 @@ async def test_update_session_sends_all_optional_fields(client: GatewayClient):
         yolo=False,
         workspace="/ws",
     )
-    assert _calls(client)[0]["json"] == {
-        "session_id": "S-1",
-        "model_id": "m",
-        "agent": "a",
-        "title": "t",
-        "thinking": True,
-        "reasoning_effort": "high",
-        "yolo": False,
-        "workspace": "/ws",
-    }
+    assert _calls(client) == [
+        {
+            "method": "POST",
+            "path": "/api/session/update",
+            "headers": {},
+            "json": {
+                "session_id": "S-1",
+                "model_id": "m",
+                "agent": "a",
+                "title": "t",
+                "thinking": True,
+                "reasoning_effort": "high",
+                "yolo": False,
+                "workspace": "/ws",
+            },
+        }
+    ]
 
 
 # ── 查询与系统 ────────────────────────────────────────────────
