@@ -30,6 +30,7 @@ from wing.provider.openai.serialize import _SerializeMixin
 from wing.provider.openai.stream import _OAIStreamState, _StreamMixin
 from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
+    await_post,
     lines_with_idle_timeout,
     make_http_limits,
     make_http_timeout,
@@ -283,15 +284,10 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         self, body: dict, model: str
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
-        try:
-            resp = await asyncio.wait_for(
-                self._client.post("/chat/completions", json=body),
-                timeout=self.timeout_total,
-            )
-            await raise_with_body(resp)
-        except asyncio.TimeoutError:
-            log.error(f"LLM request timeout after {self.timeout_total}s")
-            raise TimeoutError(f"LLM request timeout after {self.timeout_total}s")
+        resp = await await_post(
+            lambda: self._client.post("/chat/completions", json=body),
+            self.timeout_total,
+        )
 
         request_id = resp.headers.get("x-request-id", "")
         data = resp.json()
