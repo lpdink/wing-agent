@@ -541,7 +541,9 @@ class TestTinyBudgetBoundaryFallback:
 
         raw = b'"' * 40
         budget = 30
-        pieces = _split_raw(raw, budget, lambda start, end: 2 * (end - start))
+        fragments = _split_raw(raw, budget, lambda start, end: 2 * (end - start))
+        assert all(size == 2 * len(piece) for piece, size in fragments)
+        pieces = [piece for piece, _ in fragments]
 
-        assert b"".join(piece for piece, _ in pieces) == raw
-        assert all(size == 2 * len(piece) <= budget for piece, size in pieces)
+        assert b"".join(pieces) == raw
+        assert all(2 * len(p) <= budget for p in pieces)
