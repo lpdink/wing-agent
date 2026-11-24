@@ -481,6 +481,7 @@ mod tests {
 
     #[test]
     fn gateway_wire_fixture_reassembles_before_the_live_event() {
+        // The Python frame test owns and regenerates these gateway wire bytes.
         let mut lines = include_str!("../../tests/fixtures/sync_session_chunked.jsonl").lines();
         let payload = lines.next().unwrap();
         let expected: WingEvent = serde_json::from_str(payload).unwrap();
@@ -499,12 +500,18 @@ mod tests {
             assert!(is_pending(&r.on_text(frame)));
         }
         let events = delivered(r.on_text(last));
-        let [snapshot, WingEvent::Text { content, .. }] = events.as_slice() else {
-            panic!("expected a complete snapshot followed by live text, got {events:?}");
-        };
-        assert_eq!(snapshot.session_id(), expected.session_id());
-        assert_eq!(sync_content(snapshot), sync_content(&expected));
-        assert_eq!(content, "next delta");
+        assert_eq!(
+            events.len(),
+            2,
+            "expected a snapshot followed by live text: {events:?}"
+        );
+        assert_eq!(events[0].session_id(), expected.session_id());
+        assert_eq!(sync_content(&events[0]), sync_content(&expected));
+        assert!(
+            matches!(&events[1], WingEvent::Text { content, .. } if content == "next delta"),
+            "expected buffered live text: {:?}",
+            events[1]
+        );
         assert!(!r.is_assembling());
     }
 

@@ -42,6 +42,10 @@ from wing.gateway.frames import (
 )
 
 SESSION = "test-session"
+_SYNC_SESSION_WIRE_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "crates/wing/tests/fixtures/sync_session_chunked.jsonl"
+)
 
 
 def _as_ws(obj: object) -> WebSocket:
@@ -117,6 +121,34 @@ def _notice(message: str) -> NoticeEvent:
 
 def _payload_of(message: str) -> str:
     return json.dumps(wire_dump(_notice(message)))
+
+
+def _sync_session_wire_sample() -> bytes:
+    """生成 Rust 重组测试消费的 JSONL：首行为事件原文，其余为分片原文。
+
+    网关出口用 `json.dumps(wire_dump(event))` 和 `build_frames`。这里将软限缩到
+    240 B，使小样本也触发该出口的切分逻辑。8/16 MiB 真实边界由专门用例验证。
+    从仓库根目录运行 `uv run python libs/core/tests/test_gateway_frame_chunking.py`
+    可用同一路径再生成样本。
+    """
+    event = SyncSessionEvent(
+        session_id="wire-fixture",
+        status="idle",
+        created_at=datetime(2026, 9, 13, tzinfo=UTC),
+        request_id="wire-req",
+        uuid="wire-uuid",
+        messages=[{"role": "assistant", "content": '中🙂 "quote" \\ path'}],
+    )
+    payload = json.dumps(wire_dump(event))
+    with (
+        patch("wing.gateway.frames.SOFT_LIMIT_BYTES", 240),
+        patch("wing.gateway.frames._chunk_ids", iter((42,))),
+    ):
+        frames = build_frames(payload, event.type)
+    assert len(frames) > 1
+    return ("\n".join([payload, *(frame.text for frame in frames)]) + "\n").encode(
+        "utf-8"
+    )
 
 
 # ============================================================
@@ -215,26 +247,8 @@ class TestBuildFrames:
         assert len(first) == len(second) == 1
         assert first.isdisjoint(second)
 
-    def test_sync_session_wire_fixture(self, monkeypatch):
-        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", 240)
-        monkeypatch.setattr("wing.gateway.frames._chunk_ids", iter((42,)))
-        event = SyncSessionEvent(
-            session_id="wire-fixture",
-            status="idle",
-            created_at=datetime(2026, 9, 13, tzinfo=UTC),
-            request_id="wire-req",
-            uuid="wire-uuid",
-            messages=[{"role": "assistant", "content": '中🙂 "quote" \\ path'}],
-        )
-        payload = json.dumps(wire_dump(event))
-        frames = build_frames(payload, event.type)
-        fixture = (
-            Path(__file__).resolve().parents[3]
-            / "crates/wing/tests/fixtures/sync_session_chunked.jsonl"
-        )
-        actual = "\n".join([payload, *(frame.text for frame in frames)]) + "\n"
-        assert len(frames) > 1
-        assert fixture.read_bytes() == actual.encode("utf-8")
+    def test_sync_session_wire_fixture(self):
+        assert _SYNC_SESSION_WIRE_FIXTURE.read_bytes() == _sync_session_wire_sample()
 
     def test_limits_are_constants(self):
         assert SOFT_LIMIT_BYTES == 8 * 1024 * 1024
@@ -526,3 +540,7 @@ class TestTinyBudgetBoundaryFallback:
 
         assert b"".join(pieces) == raw
         assert all(2 * len(p) <= budget for p in pieces)
+
+
+if __name__ == "__main__":
+    _SYNC_SESSION_WIRE_FIXTURE.write_bytes(_sync_session_wire_sample())

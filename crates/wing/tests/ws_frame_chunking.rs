@@ -4,8 +4,8 @@
 //! 背景（2026-09-13 实测）：`sync_session` 载荷 22,151,988 B 作为单帧投递时，
 //! 客户端读任务死于 `Message too long: 22151988 > 16777216`，会话在 TUI 里
 //! 永久打不开。本变更让网关把超限载荷切成信封帧（`type == "_chunk"`）、客户端
-//! 在读任务内合并还原——应用层零感知。
-//!
+//! 在读任务内合并还原——应用层零感知。对应单帧超限诊断见
+//! `ws_close_reason::oversized_frame_is_reported_as_frame_too_large`。
 use std::time::Duration;
 use wing::protocol::SessionSnapshot;
 

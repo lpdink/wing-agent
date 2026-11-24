@@ -78,10 +78,11 @@ async fn handle_conn(mut stream: TcpStream, gateway: Arc<WaitGateway>) {
                     gateway.subscription_answered.load(Ordering::Relaxed),
                     "session info arrived before the subscription response"
                 );
-                assert_eq!(
-                    request_target(&head).strip_prefix("/api/session/info?session_id="),
-                    Some(SESSION_ID)
-                );
+                let (_, query) = request_target(&head).split_once('?').unwrap_or_default();
+                let session_ids: Vec<_> = url::form_urlencoded::parse(query.as_bytes())
+                    .filter_map(|(key, value)| (key == "session_id").then_some(value))
+                    .collect();
+                assert_eq!(session_ids, [SESSION_ID], "{head}");
                 // The session stays pending until the WS outcome arrives.
                 r#"{"model":"test","api_url":"http://x","tools":[],"total_tokens":0,"context_window_tokens":1,"thinking":false,"reasoning_effort":null,"yolo":false,"session_name":null,"status":"working","context_stats":{"message_count":0,"total_tokens":0}}"#
             }

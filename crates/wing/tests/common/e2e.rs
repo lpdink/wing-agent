@@ -3,8 +3,11 @@
 //! 每个 `*_e2e.rs` 自己决定假网关怎么答（`handler` / 状态机），但「绑端口 → 写
 //! `core/config.yaml` → 起 accept 循环 → 用 `WING_HOME` 跑 `wing <subcmd>`」这套脚手架
 //! 只有一份：WING_HOME 隔离、超时、杀子进程这三件事各写一遍就只会修到一半。
+//!
+//! The WS-only tests import this module directly to avoid loading the render harness.
 
 use std::future::Future;
+use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,6 +23,8 @@ use tokio_tungstenite::tungstenite::protocol::Role;
 
 /// 一次 CLI 调用的超时（超时即 panic：挂死与失败必须可区分）。
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub const WS_TEST_CLIENT_ID: &str = "test";
 
 /// 一枚测试独占的 `WING_HOME`（`prefix` 让失败时的临时目录名可辨认）。
 pub fn scratch_home(prefix: &str, tag: &str) -> PathBuf {
@@ -196,7 +201,8 @@ pub async fn upgrade_websocket(
     mut stream: TcpStream,
     head: &str,
 ) -> std::io::Result<WebSocketStream<TcpStream>> {
-    let key = header_value(head, "sec-websocket-key").expect("WebSocket request key");
+    let key = header_value(head, "sec-websocket-key")
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Sec-WebSocket-Key"))?;
     let response = format!(
         "HTTP/1.1 101 Switching Protocols\r\n\
          Upgrade: websocket\r\n\
@@ -236,7 +242,7 @@ where
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
         let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-        send_connected(&mut ws, "test").await.unwrap();
+        send_connected(&mut ws, WS_TEST_CLIENT_ID).await.unwrap();
         handler(ws).await;
     });
     (format!("ws://{addr}/ws"), server)
