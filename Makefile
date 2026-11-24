@@ -139,29 +139,8 @@ test-python-html:
 # 确定性集成测试（假 Provider + 临时 WING_HOME，离线、无外部 API key）。
 # 场景见 libs/wing-probe/scenarios/，说明见 docs/dev/probe-testing.md。
 #
-# 两件事定在这里，依据见 docs/dev/probe-testing.md「为什么敢并行」：
-#
-# ① `--dist loadfile`（xdist 默认是 `load`＝按**单条用例**派发）。这一组的时长是
-#    straggler 决定的（worker 之间不偷活，队列约 9s 就发空，剩下的墙钟由最慢那个
-#    worker 手里的用例堆决定），而 `load` 的逐条派发会让同一个 worker 攒到整族慢用例
-#    （安静窗口实测：`test_wake_restart` 6.3s + `test_wake_timer` 3.8s 落在同一个
-#    worker 上）。按**文件**派发把慢族的累积上限压到"一个文件"（1~3 例）：
-#    同窗口交错 3 轮中位数  load -n 12/20 = 22.8 / 20.2s → loadfile 19.2 / 17.3s
-#    （`loadscope` 在 n=12 是 18.2s，与 loadfile 同侧 ⇒ 起作用的确实是"模块/文件"
-#    这一级粒度，不是别的）。代价：同一 worker 里会连续跑多个文件，跨文件状态泄漏的
-#    风险因此靠"每个用例自带 tmp WING_HOME + 网关子进程 + 假 Provider"来兜（实测
-#    串行 589 例全绿＝一个进程里跑完所有文件）。
-#
-# ② worker 数 = **1.5×核数**（`n + n/2`）。快停机之后每例只剩一次网关启动
-#    （~0.22s：新解释器把导入图跑一遍，CPU 密集），曲线就在 1.5× 附近拐平：
-#    12 核实测（同窗口 3 轮中位数）n=12/14/16/18/20/24 → 19.2/18.3/17.7/17.4/17.3/18.0s，
-#    CPU 104/114/121/127/129/136s。18 与 20 的墙钟差 0.04s（在噪声内），CPU 差 2s，
-#    所以取 1.5× 而不是 2×——`make test` 里四组共用同一批核，多拿的线程是从别的组
-#    预算里扣的。
-#
-# 上限 32：每 worker 约 0.1~0.2GB（pytest worker ~120MB + 网关 RSS 45~72MB），
-# 不封顶的话 64 核机器上会要 ~16GB 常驻，而且每个 worker 都起一个真网关。要更大/更小
-# 用 PROBE_WORKERS 覆盖。
+# xdist 按文件派发（--dist loadfile），worker 默认取 1.5×核数且上限 32。
+# 依据见 docs/dev/probe-testing.md「为什么敢并行」。用 PROBE_WORKERS 覆盖。
 # WING_TEST_SERIAL=1（排查并发干扰的逃生舱）也归串行——只关组间并行等于没关。
 # 解析成 1 时不传 -n/--dist：逃生舱要的是原样的串行，不是"xdist 里只开一个 worker"。
 PROBE_WORKERS ?= $(shell if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; else n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); w=$$((n + n / 2)); [ "$$w" -gt 32 ] && w=32; echo $$w; fi)

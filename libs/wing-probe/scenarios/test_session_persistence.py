@@ -26,6 +26,7 @@ import asyncio
 import time
 
 import pytest
+from _session_helpers import evict
 
 from wing_probe import (
     Driver,
@@ -61,16 +62,6 @@ def _install_hook(probe: Probe) -> None:
     hook_dir = probe.env.root / "hooks"
     hook_dir.mkdir(parents=True, exist_ok=True)
     (hook_dir / "probe_inject.py").write_text(HOOK_SOURCE, encoding="utf-8")
-
-
-async def _evict(probe: Probe, session_id: str) -> None:
-    """显式逐出：断开订阅 → ``POST /api/session/release``（幂等断言 released）。"""
-    driver = probe.driver_required
-    await driver.http.unsubscribe(session_id, driver.client_id)
-    payload = await driver.http.request(
-        "POST", "/api/session/release", body={"session_id": session_id}
-    )
-    assert payload == {"ok": True, "released": True, "detail": "released"}, payload
 
 
 async def _hydrate(probe: Probe, session_id: str) -> Session:
@@ -201,7 +192,7 @@ async def test_hook_injected_append_survives_fork_and_rehydrate(probe: Probe) ->
     assert HOOK_MARKER in child_system, child_system
 
     # 逐出水合（resume 重建 agent）：同一会话的下一轮请求仍同前缀
-    await _evict(probe, child.session_id)
+    await evict(probe, child.session_id)
     await _wait_inactive(probe, child.session_id)
     hydrated = await _hydrate(probe, child.session_id)
     await hydrated.chat("after-hydrate")
@@ -245,7 +236,7 @@ async def test_dynamic_state_and_overrides_survive_rehydrate(probe: Probe) -> No
     assert before_req.body.get("enable_thinking") is False
 
     # 重启语义：逐出（丢内存态）→ 按需水合（resume 重建 agent）
-    await _evict(probe, session.session_id)
+    await evict(probe, session.session_id)
     await _wait_inactive(probe, session.session_id)
     hydrated = await _hydrate(probe, session.session_id)
 

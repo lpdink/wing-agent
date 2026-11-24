@@ -11,7 +11,7 @@
 - **active / inactive 给同一个答案**：同一个会话在内存时取 live agent、逐出后按
   resume 链解析盘上记录，两次列表的模型四件套必须逐字段相同（并且与 resume 之后
   ``/api/session/info`` 相同——列表说 A、resume 真跑 B 是同一件事的两种说法）；
-- **旧记录**（无 ``model_id``）：快照兜底 + ``Config.identify`` 反查补 id；
+- **旧记录**（无 ``model_id``）：反查补 id 见 ``test_model_id_legacy_record.py``；
 - **解析不出的降级**：id 与调用名都不在声明里 → ``model_id`` 为 null、调用名照旧
   下发（旧 id 与快照是恢复线索，不能被展示层当"没有模型"）；记录整体缺失 →
   模板默认（与 resume 同一条出口）。
@@ -28,8 +28,9 @@ import time
 from pathlib import Path
 
 import pytest
+from _session_helpers import evict
 
-from wing_probe import Probe, Session, Turn
+from wing_probe import Probe, Turn
 
 #: 逐出观察预算（release 是显式动作，留足轮询余量）。
 POLL_DEADLINE = 20.0
@@ -100,27 +101,15 @@ def _info_quartet(info: dict) -> tuple:
     )
 
 
-async def _evict(probe: Probe, session: Session) -> None:
-    """退订 → release → 等 ``inactive``（磁盘成为唯一事实来源）。"""
-    driver = probe.driver_required
-    await driver.http.unsubscribe(session.session_id, driver.client_id)
-    payload = await driver.http.request(
-        "POST", "/api/session/release", body={"session_id": session.session_id}
-    )
-    assert payload == {"ok": True, "released": True, "detail": "released"}, payload
+async def _wait_inactive(probe: Probe, session_id: str) -> None:
     deadline = time.monotonic() + POLL_DEADLINE
     observed: str | None = None
     while time.monotonic() < deadline:
-        observed = (await _entry(probe, session.session_id)).get("status")
+        observed = (await _entry(probe, session_id)).get("status")
         if observed == "inactive":
             return
         await asyncio.sleep(POLL_INTERVAL)
-    raise AssertionError(f"session {session.session_id} stayed in status {observed!r}")
-
-
-async def _resubscribe(probe: Probe, session_id: str) -> None:
-    driver = probe.driver_required
-    await driver.http.subscribe(session_id, driver.client_id)
+    raise AssertionError(f"session {session_id} stayed in status {observed!r}")
 
 
 @pytest.mark.probe_env(models=[MODEL_SPEC])
@@ -129,7 +118,8 @@ async def _resubscribe(probe: Probe, session_id: str) -> None:
 async def test_list_model_survives_eviction_and_matches_info(probe: Probe) -> None:
     """active 与 inactive 两种形态给同一个答案，且等于 info / resume 的口径。"""
     probe.register(MODEL_NAME, Turn.of(text="reply one"), Turn.of(text="reply two"))
-    http = probe.driver_required.http
+    driver = probe.driver_required
+    http = driver.http
 
     session = await probe.session(model=MODEL_ID)
     await session.chat("alpha")
@@ -151,7 +141,8 @@ async def test_list_model_survives_eviction_and_matches_info(probe: Probe) -> No
     ) == (MODEL_ID, MODEL_NAME, "probe"), recorded
 
     # ③ inactive：逐出后同一个答案（按 resume 链解析盘上记录）。
-    await _evict(probe, session)
+    await evict(probe, session.session_id)
+    await _wait_inactive(probe, session.session_id)
     inactive = await _entry(probe, session.session_id)
     assert inactive.get("status") == "inactive", inactive
     assert _quartet(inactive) == _quartet(active), (active, inactive)
@@ -159,7 +150,7 @@ async def test_list_model_survives_eviction_and_matches_info(probe: Probe) -> No
     # ④ resume 之后照旧：列表说的模型就是真跑起来的模型（不存在"看一眼是 A、
     #    接着干变成 B"）。
     resumed = await probe.resume(session.session_id)
-    await _resubscribe(probe, session.session_id)
+    await http.subscribe(session.session_id, driver.client_id)
     assert _quartet(await _entry(probe, session.session_id)) == _quartet(active)
     assert _info_quartet(await http.get_session_info(session.session_id)) == _quartet(
         active
@@ -172,32 +163,6 @@ async def test_list_model_survives_eviction_and_matches_info(probe: Probe) -> No
 @pytest.mark.probe_env(models=[MODEL_SPEC])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
-async def test_legacy_record_backfills_the_id_in_the_list(probe: Probe) -> None:
-    """旧记录（无 ``model_id``）：列表与 resume 一样经反查补出引用词。"""
-    probe.register(MODEL_NAME, Turn.of(text="reply"))
-    http = probe.driver_required.http
-
-    session = await probe.session(model=MODEL_ID)
-    await session.chat("alpha")
-    await _evict(probe, session)
-
-    # 构造"引入 id 之前"的记录：删掉 model_id，快照留原样。
-    stripped = _rewrite_metadata(probe, session.session_id, model_id=None)
-    assert "model_id" not in stripped, stripped
-
-    entry = await _entry(probe, session.session_id)
-    assert _quartet(entry) == (MODEL_ID, MODEL_NAME, "probe", "List Model"), entry
-
-    # 与 resume 的口径对账（resume 也走同一条反查补 id）。
-    await probe.resume(session.session_id)
-    assert _info_quartet(await http.get_session_info(session.session_id)) == _quartet(
-        entry
-    )
-
-
-@pytest.mark.probe_env(models=[MODEL_SPEC])
-@pytest.mark.timeout(120)
-@pytest.mark.asyncio
 async def test_missing_record_falls_back_to_the_template(probe: Probe) -> None:
     """记录整体缺失：列表落模板默认——并与 resume 真跑的模型一致。"""
     probe.register(MODEL_NAME, Turn.of(text="reply"))
@@ -205,7 +170,8 @@ async def test_missing_record_falls_back_to_the_template(probe: Probe) -> None:
 
     session = await probe.session(model=MODEL_ID)
     await session.chat("alpha")
-    await _evict(probe, session)
+    await evict(probe, session.session_id)
+    await _wait_inactive(probe, session.session_id)
 
     stripped = _rewrite_metadata(
         probe, session.session_id, model_id=None, model_name=None, provider_name=None
@@ -235,7 +201,8 @@ async def test_unresolvable_record_degrades_the_id_slot_only(probe: Probe) -> No
 
     session = await probe.session(model=MODEL_ID)
     await session.chat("alpha")
-    await _evict(probe, session)
+    await evict(probe, session.session_id)
+    await _wait_inactive(probe, session.session_id)
 
     ghost = _rewrite_metadata(
         probe,
@@ -270,7 +237,8 @@ async def test_blank_snapshot_keeps_list_and_resume_in_step(probe: Probe) -> Non
 
     session = await probe.session(model=MODEL_ID)
     await session.chat("alpha")
-    await _evict(probe, session)
+    await evict(probe, session.session_id)
+    await _wait_inactive(probe, session.session_id)
 
     broken = _rewrite_metadata(
         probe, session.session_id, model_id=None, model_name="", provider_name="probe"

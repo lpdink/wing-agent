@@ -18,23 +18,18 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+from _session_helpers import evict_and_wait_inactive
 
 from wing_probe import Probe, ToolCall, Turn
 from wing_probe.history import HistoryView, derive_flat_fields
 
 #: 场景私有 model 名（剧本按 model 名路由，场景之间不共享）。
 SHAPE_MODEL = "probe/record-shape"
-
-#: 逐出观察预算（release 是显式动作，不需要 TTL 倒计时）。
-POLL_DEADLINE = 20.0
-POLL_INTERVAL = 0.2
 
 #: 剧本：thinking + text + 一次 Bash（覆盖三类块），随后收尾。
 THINKING = "think about the file first"
@@ -51,33 +46,6 @@ def _records(probe: Probe, session_id: str) -> list[dict[str, Any]]:
 def _raw_lines(probe: Probe, session_id: str) -> list[str]:
     path: Path = probe.env.session_dir(session_id) / "history.jsonl"
     return [line for line in path.read_text(encoding="utf-8").splitlines() if line]
-
-
-async def _evict(probe: Probe, session_id: str) -> None:
-    """退订 → release → 等 ``inactive``（磁盘成为唯一事实来源）。"""
-    driver = probe.driver_required
-    await driver.http.unsubscribe(session_id, driver.client_id)
-    payload = await driver.http.request(
-        "POST", "/api/session/release", body={"session_id": session_id}
-    )
-    assert payload == {"ok": True, "released": True, "detail": "released"}, payload
-    deadline = time.monotonic() + POLL_DEADLINE
-    observed: str | None = None
-    while time.monotonic() < deadline:
-        listing = await driver.http.request("GET", "/api/session/list")
-        for entry in listing.get("sessions", []):
-            if entry.get("id") == session_id:
-                observed = entry.get("status")
-        if observed == "inactive":
-            return
-        await asyncio.sleep(POLL_INTERVAL)
-    raise AssertionError(f"session {session_id} stayed in status {observed!r}")
-
-
-async def _resubscribe(probe: Probe, session_id: str) -> None:
-    """补订阅（``resume`` 复用已挂载句柄且不重复订阅，退订过的必须显式补）。"""
-    driver = probe.driver_required
-    await driver.http.subscribe(session_id, driver.client_id)
 
 
 def _rewrite_as_legacy_shape(probe: Probe, session_id: str) -> list[str]:
@@ -157,10 +125,6 @@ async def test_records_store_content_blocks_only(probe: Probe) -> None:
     context = probe.context(SHAPE_MODEL, 1)
     assert context.messages[1].content == TEXT, context.describe()
 
-    view.assert_record_shape()
-    view.assert_chain_invariants()
-    view.assert_tool_pairing()
-
 
 @pytest.mark.probe_env(models=[SHAPE_MODEL])
 @pytest.mark.timeout(120)
@@ -190,7 +154,7 @@ async def test_legacy_records_still_load_and_stay_untouched(probe: Probe) -> Non
     assert first.data["result"] == "legacy reply", first.data
     session_id = session.session_id
     before = await session.get()
-    await _evict(probe, session_id)
+    await evict_and_wait_inactive(probe, session_id)
 
     legacy_lines = _rewrite_as_legacy_shape(probe, session_id)
     # 旧形态确实带上了派生字段（否则本场景没有验证到兼容路径）
@@ -199,7 +163,8 @@ async def test_legacy_records_still_load_and_stay_untouched(probe: Probe) -> Non
 
     try:
         resumed = await probe.resume(session_id)
-        await _resubscribe(probe, session_id)
+        driver = probe.driver_required
+        await driver.http.subscribe(session_id, driver.client_id)
         after = await resumed.get()
         assert [m["role"] for m in after["messages"]] == [
             m["role"] for m in before["messages"]

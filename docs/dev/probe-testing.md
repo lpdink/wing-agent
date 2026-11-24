@@ -316,7 +316,8 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 1. `chain_topology`（`assert_chain_invariants`）：链拓扑自洽——uuid 存在且唯一、记录种类可识别（Message 或 `role="event"` + 非空 `type`）、每条 `parent_uuid` 都在记录集中、活跃链自 tip 回溯可达根且逐节点衔接（无环）、活跃链末端 == tip == 末条记录；
 2. `tool_pairing`（`assert_tool_pairing`）：每个带 `tool_calls` 的 assistant 消息，其每个 `call_id` 都有配对 tool 消息（未终结的半截参数块一律剔除）；
-3. `no_transient_records`（`assert_no_transient_records`）：流式 delta / 瞬态事件不得出现在 `history.jsonl`。
+3. `no_transient_records`（`assert_no_transient_records`）：流式 delta / 瞬态事件不得出现在 `history.jsonl`；
+4. `record_shape`（`assert_record_shape`）：assistant 记录只存 `content_blocks` 和链上事实，禁止派生扁平字段及顶层 null。
 
 **既有场景不许改**——除非**产品行为被刻意变更**、且 scheduler 在任务裁定里显式豁免（豁免只覆盖"期望值跟着新事实走"，不覆盖为了让实现过关而放松断言）。已发生的两例：
 
@@ -401,7 +402,7 @@ killpg 也 `start_new_session=True`（自成会话），所以**不在**那个�
 
 | 变异 | 改动点 | 期望变红 |
 |------|--------|----------|
-| transient 落盘 | `libs/core/wing/event/react.py`：`TextEvent.persist = True` | `scenarios/test_react_basics.py::test_text_turn_event_order_and_persistence`（场景内断言 + teardown 不变量 `no_transient_records`） |
+| transient 落盘 | `libs/core/wing/event/react.py`：`TextEvent.persist = True` | `scenarios/test_react_basics.py::test_text_turn_event_order_and_persistence`（teardown 不变量 `no_transient_records`） |
 | rewind 跳过事件节点 | `libs/core/wing/context/manager.py::rewind` 中沿链回溯跳过事件节点的 `while` 循环 | `scenarios/test_rewind.py::test_rewind_skips_event_ancestors` |
 | fork metadata 快照 | `libs/core/wing/session/manager.py::fork_session` 的 `save_metadata(..., forked_from=session_id)` | `scenarios/test_fork.py::test_fork_metadata_snapshot`（`assert_fork_of` 连带 `test_fork_chain_integrity_and_uuid_remap`） |
 

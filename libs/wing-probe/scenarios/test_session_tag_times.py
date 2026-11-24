@@ -19,6 +19,7 @@ import json
 from datetime import datetime
 
 import pytest
+from _session_helpers import evict
 
 from wing_probe import Probe, Session, Turn
 from wing_probe.history import read_metadata
@@ -56,15 +57,6 @@ async def _list_entry(probe: Probe, session_id: str) -> dict:
     entries = {e["id"]: e for e in payload.get("sessions", [])}
     assert session_id in entries, sorted(entries)
     return entries[session_id]
-
-
-async def _evict(probe: Probe, session_id: str) -> None:
-    driver = probe.driver_required
-    await driver.http.unsubscribe(session_id, driver.client_id)
-    payload = await driver.http.request(
-        "POST", "/api/session/release", body={"session_id": session_id}
-    )
-    assert payload == {"ok": True, "released": True, "detail": "released"}, payload
 
 
 def _assert_recorded(entry: dict, tag: str) -> str:
@@ -142,7 +134,7 @@ async def test_evicted_tagging_records_time_without_hydration(probe: Probe) -> N
     sid = session.session_id
     await session.chat(HELLO)
 
-    await _evict(probe, sid)
+    await evict(probe, sid)
     assert (await _list_entry(probe, sid))["status"] == "inactive"
 
     tagged = await _tag(probe, sid, add=["pin"])
@@ -173,7 +165,7 @@ async def test_legacy_metadata_without_records_projects_empty(probe: Probe) -> N
     session = await _create(probe)
     sid = session.session_id
     await session.chat(HELLO)
-    await _evict(probe, sid)
+    await evict(probe, sid)
 
     # 模拟老版本 / 手改数据：有标签，没有任何记录。
     meta_path = probe.env.session_dir(sid) / "metadata.json"
