@@ -738,41 +738,33 @@ fn default_notice_level() -> String {
 impl WingEvent {
     /// Decode one session-history event payload (a chain event record).
     ///
-    /// Same rules as the live wire decode, plus the tolerance replay needs:
-    /// chain payloads always carry the event meta (`created_at` /
-    /// `request_id` — `wire_dump` guarantees it) and a `tool_call_id` on the
-    /// types that have one, but replay never reads meta, and its renderers
-    /// treat a null `tool_call_id` exactly like an absent one (the decoders
-    /// this replaced declared these fields `Option<String>`). Absent or null
-    /// meta / `tool_call_id` keys are therefore backfilled with empty strings
-    /// — which is also the value `#[serde(default)]` would have produced for
-    /// a missing key. Unknown `type`s still fall back to
-    /// [`WingEvent::Unknown`]; a known `type` whose payload is otherwise
-    /// malformed is an error (the caller skips that node).
+    /// Replay accepts absent or null metadata and tool call ids as empty strings.
+    /// Decode by reference when the payload already satisfies those rules.
     pub fn from_history_value(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
-        /// 要补的键：缺席与显式 null 同价。
-        fn missing(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> bool {
-            obj.get(key).is_none_or(serde_json::Value::is_null)
-        }
-        const BACKFILLED: [&str; 3] = ["created_at", "request_id", "tool_call_id"];
-
-        // 常态零拷贝：`wire_dump` 保证三个键在场，只有手写夹具（payload-only 记录）
-        // 才需要补——补的时候才复制整棵树。
-        let needs_backfill = value
-            .as_object()
-            .is_some_and(|obj| BACKFILLED.iter().any(|key| missing(obj, key)));
-        if !needs_backfill {
-            return WingEvent::deserialize(value);
-        }
-        let mut value = value.clone();
-        if let Some(obj) = value.as_object_mut() {
-            for key in BACKFILLED {
-                if missing(obj, key) {
-                    obj.insert(key.to_string(), serde_json::Value::String(String::new()));
-                }
+        const META: [&str; 2] = ["created_at", "request_id"];
+        const TOOL_CALL_ID: &str = "tool_call_id";
+        let Some(obj) = value.as_object() else {
+            return Self::deserialize(value);
+        };
+        let missing = |key| obj.get(key).is_none_or(serde_json::Value::is_null);
+        if !META.into_iter().any(missing) {
+            let decoded = Self::deserialize(value);
+            if decoded.is_ok() || !missing(TOOL_CALL_ID) {
+                return decoded;
             }
         }
-        WingEvent::deserialize(&value)
+
+        // Re-decode the normalized payload even for errors: filling a key can
+        // change which invalid field serde reports first.
+        let mut normalized = value.clone();
+        for key in META
+            .into_iter()
+            .chain([TOOL_CALL_ID])
+            .filter(|&key| missing(key))
+        {
+            normalized[key] = serde_json::Value::String(String::new());
+        }
+        Self::deserialize(&normalized)
     }
 
     /// Returns the `type` discriminator string for this event.
