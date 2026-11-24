@@ -17,8 +17,7 @@ workspace crates）——只有面内文件的改动行参与判定。面外的�
 （配置错误必须可见，不能静默关掉门禁）。
 
 判定与数字都写进 ``--out-json``：CI 评论按它渲染——展示的数字就是门禁用的数字。
-阈值不在本文件声明：CI 经 ``make patch-cov-python / patch-cov-rust`` 传入
-Makefile 的 ``PATCH_COV_MIN``（唯一事实来源）。
+CI 的门禁目标传入 Makefile 的 ``PATCH_COV_MIN``（阈值的唯一来源）。
 
     python3 scripts/ci/patch_coverage.py --lang python \
         --coverage coverage-python.json --base origin/develop \

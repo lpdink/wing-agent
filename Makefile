@@ -1,4 +1,4 @@
-.PHONY: check check-python check-rust check-ts test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe fmt fmt-python fmt-rust fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts test-ts patch-cov-python patch-cov-rust run install gateway demo capacity capacity-selftest
+.PHONY: check check-python check-rust check-ts test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe fmt fmt-python fmt-rust fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts test-ts export-cov-python patch-cov-python patch-cov-python-json patch-cov-rust run install gateway demo capacity capacity-selftest
 
 # ── Unified commands (Python + Rust) ─────────────────────────
 
@@ -222,7 +222,7 @@ fmt-check-rust:
 
 # ── 增量（patch）覆盖率门禁 ──────────────────────────────────────
 # PR 的**改动行**必须有测试覆盖（行级：Python 语句行 / Rust 行）。门禁在 CI 的
-# python-check / rust-check 两个 job 里跑 patch-cov-python / patch-cov-rust；
+# python-check / rust-check 两个 job 里跑 patch-cov-python-json / patch-cov-rust；
 # 阈值与基线在此声明，被门禁与 PR 评论共同读取（scripts/ci/*.py 按变量名解析）。
 #
 # 依据（2026-10）：总量行级 ~92%（Rust）/ 合并语句+分支 96%（Python），增量门禁
@@ -235,11 +235,20 @@ fmt-check-rust:
 PATCH_COV_MIN ?= 90.0
 PATCH_BASE ?= origin/develop
 
-# 增量覆盖率门禁（Python）：先由既有 .coverage 导出 JSON（不重跑测试），再判定。
-# 判定脚本是纯 stdlib——用 python3 直跑而不是 uv run：rust-check job 里没有 uv
-# （也不该为它拉一套 venv），两侧门禁共用同一个脚本、同一种调用方式。
-patch-cov-python:
+# Python CI 复用本次导出的 JSON，本地入口先由 .coverage 导出。
+export-cov-python:
 	uv run coverage json -o coverage-python.json --fail-under=0
+
+.PHONY: require-python-coverage-json
+require-python-coverage-json:
+	@test -f coverage-python.json || { \
+		printf '%s\n' 'coverage-python.json is missing. Run make export-cov-python first.' >&2; \
+		exit 1; \
+	}
+
+patch-cov-python: export-cov-python
+patch-cov-python-json: require-python-coverage-json
+patch-cov-python patch-cov-python-json:
 	python3 scripts/ci/patch_coverage.py --lang python \
 		--coverage coverage-python.json --base $(PATCH_BASE) \
 		--min $(PATCH_COV_MIN) --out-json patch-python.json

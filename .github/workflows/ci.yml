@@ -29,6 +29,9 @@ jobs:
   python-check:
     name: Python Check
     runs-on: ubuntu-latest
+    env:
+      # uv run 默认会重新同步并安装显式同步跳过的 wing-cli。
+      UV_NO_SYNC: "1"
 
     steps:
       # fetch-depth: 0 —— 增量覆盖率门禁要算与目标分支的 merge-base（非 PR 没用上，
@@ -47,7 +50,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked --no-install-package wing-cli
 
       # 与本地**同一条命令**：ruff 覆盖 libs/ + scripts/、vulture 走 60 档 + 白名单
       # （判据在 pyproject.toml 与 docs/dev/coverage.md）。分步调用会让两侧口径再次漂移，
@@ -64,7 +67,9 @@ jobs:
       # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：测试挂掉时也要导 ——
       # 评论要能展示「低在哪」。--fail-under=0 关掉 coverage 自带的阈值检查
       # （PR 门禁是下面的增量覆盖率；这里只是导出既有 .coverage 数据，不重跑测试）。
+      # workflow_dispatch 可以检出历史 ref，导出命令需兼容旧 Makefile。
       - name: Export coverage JSON
+        id: python_coverage
         if: always()
         run: uv run coverage json -o coverage-python.json --fail-under=0
 
@@ -75,12 +80,12 @@ jobs:
 
       # 增量覆盖率门禁：本 PR 的改动行必须被测试覆盖（基线 = 与目标分支的
       # merge-base；阈值在 Makefile）。非 PR（push / dispatch）没有基线，跳过。
-      # 测试挂了也跑：patch-python.json 要供评论渲染（评论里会注明 job 结果）。
+      # 测试失败后，只要本次导出成功，仍写出 patch-python.json 供评论渲染。
       - name: Patch coverage gate (Python)
-        if: always() && github.event_name == 'pull_request'
+        if: always() && github.event_name == 'pull_request' && steps.python_coverage.outcome == 'success'
         env:
           PATCH_BASE: origin/${{ github.base_ref }}
-        run: make patch-cov-python
+        run: make patch-cov-python-json
 
       - name: Upload coverage data
         if: always()
@@ -97,6 +102,9 @@ jobs:
   probe-check:
     name: Probe Check
     runs-on: ubuntu-latest
+    env:
+      # uv run 默认会重新同步并安装显式同步跳过的 wing-cli。
+      UV_NO_SYNC: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +117,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --locked --no-install-package wing-cli
 
       - name: Probe scenarios
         run: make test-probe

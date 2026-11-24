@@ -21,9 +21,10 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
   （`unmeasured`）——测试文件按约定剔除（新测试行不判定是设计，不是盲区）。
 - 90% 的定位是防倒退：给代码搬家（重构）、平台分支留出余量，同时挡住整块新代码
   裸奔。演练失败路径：`PATCH_COV_MIN=99 make patch-cov-python`。
-- 判定边界：无改动可执行行（纯文档 / 配置 PR）→ 判过并在评论注明；coverage
-  产物缺失 → 不判（`skipped` 写进评论，测试已经红着）；git 基线解析失败 → **硬
-  失败**（配置错误必须可见，不能静默关掉门禁）。
+- 无改动可执行行（纯文档 / 配置 PR）时门禁通过，评论注明该结果。直接调用判定脚本时，
+  缺少覆盖率产物会写 `skipped`。`make patch-cov-python-json` 要求已有 `coverage-python.json`，
+  缺少文件时直接失败。Python CI 导出失败时作业失败并跳过门禁，同仓且未取消的 PR
+  会在评论中看到缺少 patch 产物的提示。git 基线解析失败会使门禁失败。
 - **已知边界（增量口径天生看不见的东西）**：删除行不进判定——净删除测试行的文件
   会被点名（`removed_tests`，评论里提示人工确认），但**没有任何门禁会拦持续的
   总量劣化**。若要堵死这条演化路径，加一个明显宽松的总量下限即可（例如
@@ -36,9 +37,9 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
   就是它——**展示的数字 = 门禁的数字**）；同时点名统计面外的改动与净删除的测试行
   （不判定，供评论展示）。`--selftest` 离线自检（diff 状态机、引号路径、两种覆盖率
   格式解析、判定边界、临时 git 仓库端到端），CI 在 python-check 里每次跑。
-- `make patch-cov-python` / `make patch-cov-rust`：本地 = CI 同一条命令——先由
-  既有 `.coverage` / profraw 导出（不重跑测试），再判定；CI 用 env 覆盖
-  `PATCH_BASE` 到目标分支。
+- `make patch-cov-python` / `make patch-cov-rust` 由既有 `.coverage` / profraw
+  导出后判定。Python CI 导出 JSON 供评论和 `make patch-cov-python-json` 共用，
+  Rust CI 直接跑 `make patch-cov-rust`。CI 通过 `PATCH_BASE` 指定目标分支。
 - 为什么门禁放 check job：失败面贴在语言对应的检查项上（Python Check / Rust
   Check 红），评论 job 只负责渲染。
 
@@ -72,6 +73,16 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
   是门禁原样写下的判定。
 
 ## 本地复现
+
+Python Check 和 Probe Check 依赖已提交的 `uv.lock`，安装时以 `--locked` 检查。
+修改依赖声明时，运行 `uv lock` 并一起提交更新后的 `uv.lock`。`uv run` 默认会同步
+环境，重新安装作为元包依赖的 `wing-cli`。本地复现这套 CI 环境时，先显式安装，
+再为后续命令设置 `UV_NO_SYNC=1`。该变量也作用于 Make 配方里的 `uv run`。
+
+```bash
+uv sync --locked --no-install-package wing-cli
+UV_NO_SYNC=1 make test-python-cov && UV_NO_SYNC=1 make patch-cov-python
+```
 
 ```bash
 make test-python-cov    # Python 测试 + 覆盖率（本地日常的 make test-python 不带 --cov）
