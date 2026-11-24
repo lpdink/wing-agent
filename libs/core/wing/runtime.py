@@ -42,11 +42,9 @@ from wing.context import CacheLedger, empty_report
 from wing.metrics import usage_report as build_usage_report
 from wing.event_bus import event_bus
 from wing.config import (
-    Config,
     ConfigProblem,
     ModelGroup,
     build_catalog,
-    cross_field_problems,
     emit_config_yaml,
     get_config,
     get_config_path,
@@ -57,8 +55,7 @@ from wing.config.document import (
     PositionalSecret,
     SparseDocument,
     changed_paths,
-    locate_problems,
-    merge_with_defaults,
+    problems_of,
     read_document,
     resolve_secrets,
     restart_required_paths,
@@ -933,7 +930,7 @@ class WingRuntime:
         # ① 现读磁盘（服务端不缓存文档：文件只有几 KB，现读就没有失效问题）。
         warnings: list[str] = []
         try:
-            current_doc, current_fp = read_document()
+            current_doc, current_fp = read_document(catalog=catalog)
         except ConfigDocumentError as exc:
             # 文件存在但读不出文档（YAML 语法错 / 顶层不是映射）。**事务照常继续**：
             # 这正是「配置写坏 ⇒ 开设置面板修」在语法错这条分支上的兑现——
@@ -968,10 +965,7 @@ class WingRuntime:
         )
 
         # ④ 校验（字段级 + 跨字段）：有 problem 就到此为止——全有或全无。
-        raw = merge_with_defaults(incoming, catalog)
-        problems = locate_problems(raw) + cross_field_problems(
-            Config.model_construct(**raw)
-        )
+        problems = problems_of(incoming, catalog=catalog)
         if problems:
             return SettingsApplyResult(
                 ok=False,
