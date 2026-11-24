@@ -1,4 +1,4 @@
-"""逐出场景的公共 HTTP 准备。"""
+"""会话场景的公共 HTTP 准备与断言。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,16 @@ import asyncio
 import time
 
 from wing_probe import Probe
+
+
+def require_session_row(listing: dict, session_id: str) -> dict:
+    """在这一次列表响应中定位会话，缺行时保留原始响应。"""
+    rows = listing.get("sessions")
+    assert isinstance(rows, list), listing
+    for row in rows:
+        if row.get("id") == session_id:
+            return row
+    raise AssertionError(f"session {session_id} not in list: {listing}")
 
 
 async def evict(probe: Probe, session_id: str) -> None:

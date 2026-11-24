@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from _session_helpers import evict_and_wait_inactive
+from _session_helpers import evict_and_wait_inactive, require_session_row
 
 from wing_probe import Probe, Turn
 
@@ -84,8 +84,7 @@ async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
 
     metadata = _metadata_path(probe, session.session_id)
     before_list = metadata.read_bytes()
-    listing = await http.list_sessions()
-    cold = next(row for row in listing["sessions"] if row["id"] == session.session_id)
+    cold = require_session_row(await http.list_sessions(), session.session_id)
     assert cold["status"] == "inactive", cold
     fields = ("model_id", "model_name", "provider_name", "model_display_name")
     expected = (LEGACY_ID, LEGACY_NAME, "probe", "Legacy Upstream")
@@ -105,8 +104,7 @@ async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
     info = await http.get_session_info(session.session_id)
     info_fields = ("model_id", "model", "provider_name", "model_display_name")
     assert tuple(info[key] for key in info_fields) == expected, info
-    listing = await http.list_sessions()
-    active = next(row for row in listing["sessions"] if row["id"] == session.session_id)
+    active = require_session_row(await http.list_sessions(), session.session_id)
     assert tuple(active[key] for key in fields) == expected, active
 
     sync = await resumed.watch.expect("sync_session", within=5.0)
@@ -115,7 +113,7 @@ async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
     assert agent["model_name"] == LEGACY_NAME, agent
     assert agent["provider_name"] == "probe", agent
 
-    # ⑤ 恢复后照常跑：请求打到原调用名（id 不外发）。
+    # ④ 恢复后照常跑：请求打到原调用名（id 不外发）。
     result = await resumed.chat("beta")
     assert result.data["subtype"] == "success", result.data
     assert probe.requests.count(LEGACY_NAME) == 2, probe.requests.summary()

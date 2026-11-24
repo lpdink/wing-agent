@@ -191,10 +191,10 @@ class FakeProvider:
 
     @contextmanager
     def hold_first_content(self, model: str) -> Iterator[asyncio.Event]:
-        """暂停下一次匹配的流式请求，yield 首个正文帧已到写入点的信号。
+        """暂停同模型下一条有正文的流式请求，yield 首个正文帧到达写入点的信号。
 
-        响应头及正文前的帧照常发送。退出观察块时放行，含断言失败路径。
-        观察的截止时间应早于服务端 30 秒兜底。
+        同模型只接受一个待领取的闸门。响应头和正文前的帧照常发送。
+        退出观察块时放行，观察的截止时间应早于服务端 30 秒兜底。
         """
         if model in self._first_content_gates:
             raise ValueError(f"first content already held for {model!r}")
@@ -332,7 +332,10 @@ class FakeProvider:
         headers: dict[str, str],
         request_index: int,
     ) -> web.StreamResponse:
-        first_content_gate = self._first_content_gates.pop(model, None)
+        # 两种编码器都用 Turn.content_chunks，空文本不生成正文帧。
+        first_content_gate = (
+            self._first_content_gates.pop(model, None) if turn.text else None
+        )
         response = web.StreamResponse(
             status=200,
             headers={
@@ -358,7 +361,13 @@ class FakeProvider:
                 created=created,
             )
         before_first_content = (
-            partial(self._wait_for_release, request, *first_content_gate)
+            partial(
+                self._wait_for_release,
+                request,
+                *first_content_gate,
+                model=model,
+                request_index=request_index,
+            )
             if first_content_gate is not None
             else None
         )
@@ -376,20 +385,32 @@ class FakeProvider:
         return response
 
     async def _wait_for_release(
-        self, request: web.Request, reached: asyncio.Event, release: asyncio.Event
+        self,
+        request: web.Request,
+        reached: asyncio.Event,
+        release: asyncio.Event,
+        *,
+        model: str,
+        request_index: int,
     ) -> None:
         reached.set()
-        async with asyncio.timeout(_FIRST_CONTENT_GATE_TIMEOUT):
-            while not release.is_set():
-                # aiohttp 默认等下一次写入才报告断连，暂停期间需主动看 transport。
-                transport = request.transport
-                if transport is None or transport.is_closing():
-                    raise ConnectionResetError
-                try:
-                    async with asyncio.timeout(0.05):
-                        await release.wait()
-                except TimeoutError:
-                    pass
+        try:
+            async with asyncio.timeout(_FIRST_CONTENT_GATE_TIMEOUT):
+                while not release.is_set():
+                    # aiohttp 默认等下一次写入才报告断连，暂停期间需主动看 transport。
+                    transport = request.transport
+                    if transport is None or transport.is_closing():
+                        raise ConnectionResetError
+                    try:
+                        async with asyncio.timeout(0.05):
+                            await release.wait()
+                    except TimeoutError:
+                        pass
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"first-content gate for model {model!r}, request probe-{request_index} "
+                f"timed out after {_FIRST_CONTENT_GATE_TIMEOUT:g}s without release"
+            ) from exc
 
     async def _write_frames(
         self,

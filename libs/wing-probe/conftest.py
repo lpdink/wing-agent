@@ -13,8 +13,8 @@ controller 不做收集** —— 它只为 `args` 调这个函数。所以 `pyte
 `pytest libs/wing-probe/scenarios/`、单文件参数三种形态 controller 都能加载到
 （本层是它们的 args 或 args 的祖先）。`tests/test_conftest_layout.py` 守这条约定。
 
-本文件是 ``scenarios/`` 唯一的公共 fixture 定义处（场景文件只
-import ``wing_probe`` 与 pytest）。
+本文件是 ``scenarios/`` 唯一的公共 fixture 定义处。场景通过 ``wing_probe``
+驱动公开协议，可共用 ``scenarios/`` 下的测试辅助函数。
 
 ``probe`` fixture（function 级）提供：
 

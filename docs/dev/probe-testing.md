@@ -35,7 +35,7 @@
 
 **机制不是「用例跑得更快」**，三条实测把它排除掉：两种派发下 worker 的忙碌总时间相同（159.5s vs 163.0s）、用例之间的空闲≈0（0.02~0.07s/worker，所以不是逐条派发的往返延迟）、首个用例都在 0.2~0.5s 开跑（所以不是收集阶段），而墙钟在两个模式下都 ≈ 最慢 worker 的忙碌时间 + 0.5s。
 
-**② worker 数 = 1.5×核数。** 快停机之后每例只剩一次网关启动（~0.22s：新解释器把导入图跑一遍，CPU 密集），曲线在 1.5× 附近拐平——同窗口 3 轮中位数：`-n 12/14/16/18/20/24` → **19.2 / 18.3 / 17.7 / 17.4 / 17.3 / 18.0s**，CPU（user+sys）**104 / 114 / 121 / 127 / 129 / 136s**。`-n 18`（1.5×）与 `-n 20` 的墙钟差 0.04s（在噪声内）而 CPU 差 2s，2× 反而回退 0.7s，所以取 1.5×。
+**② worker 数 = 1.5×核数。** 快停机之后每例只剩一次网关启动（~0.22s：新解释器把导入图跑一遍，CPU 密集），曲线在 1.5× 附近拐平——同窗口 3 轮中位数：`-n 12/14/16/18/20/24` → **19.2 / 18.3 / 17.7 / 17.4 / 17.3 / 18.0s**，CPU（user+sys）**104 / 114 / 121 / 127 / 129 / 136s**。`-n 18`（1.5×）与 `-n 20` 的墙钟差 0.04s（在噪声内）而 CPU 差 2s，2× 反而回退 0.7s，所以取 1.5×。默认最多 32 个 worker。每个 worker 连同真网关约用 0.1～0.2 GB，64 核机器若按 1.5× 启动 96 个 worker，内存常驻可达约 16 GB。
 
 **③ 跨文件状态**：`loadfile` 会让同一个 worker **连续**跑多个文件，所以「用例之间零共享」必须真的成立（而不是靠"每条用例都可能落到不同 worker"）。约束是本包的设计本身：每个用例自带 tmp `WING_HOME` + 网关子进程 + 假 Provider，没有任何用例改 `os.environ` / `cwd` / 模块级全局（改了也走 `monkeypatch` 自动还原）。实测两遍：串行 589 例（**一个进程**跑完全部文件）全绿；**逆序文件顺序**（改变所有"前一个文件"的配对）全绿。
 
@@ -139,7 +139,7 @@ async def test_bash_write_then_history(probe: Probe) -> None:
 
 四条要点：
 
-1. `probe.register(model, Turn...)` 支持 `Turn.of(...)` 和 `Script(...)`。观察首个正文帧前的状态时，用 `with probe.provider.hold_first_content(model) as reached` 包住发起请求和状态观察，等 `reached.wait()` 后读取 HTTP 状态或 WS 快照，退出时放行正文。用有界的观察窗口，确保先于 Provider 的兜底超时。测逐帧节奏用 `delay`，模拟首个内容帧延迟用 `first_delay`；
+1. 用 `probe.register(model, Turn...)` 按顺序注册剧本。`Turn.of(...)` 支持 `text`、`thinking`、`tool_calls`、`usage`、`chunk`、`delay` 和 `first_delay`，也可用 `Script(...)` 编排多轮。`chunk` 控制正文和推理分片，`ToolCall(..., cut=...)` 控制参数切断，`delay` 控制逐帧节奏，`first_delay` 单独控制前导帧后的第一次等待。观察首个正文帧前的状态时，在发请求前进入 `with probe.provider.hold_first_content(model) as reached`。同模型只允许一个待领取的闸门，下一条带正文的流式请求领取它。空正文、纯工具流和非流式请求照常完成。收到 `reached.wait()` 后观察 HTTP 状态或 WS 快照。退出 `with` 时放行，观察截止应早于 Provider 30 秒兜底。兜底会记录模型和请求号并截断流。
 2. 剧本**按序消费**，请求次数超出即返回 5xx（`ScriptExhaustedError` 附可读报告）——"不该发生的额外调用"会立刻变红，这是特性不是噪音；
 3. 失败报告与场景断言并列：teardown 的内置不变量对**场景创建／挂载的全部会话**（含 fork 出来的子会话）自动运行，失败抛 `ProbeInvariantError`，报告标注 `built-in invariants` + session id + 不变量名；
 4. `record_shape` 检查的是**实现写出的记录**（原始形态：null 不写、assistant 不存 `content_blocks` 的派生物）。场景**故意注入**存量旧形态记录时（兼容性场景），断言完成后要把注入行还原成规范形——否则夹具会把测试注入误报成产品缺陷；这也是它与 `assert_chain_invariants` 的唯一使用差别。
@@ -319,10 +319,12 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 3. `no_transient_records`（`assert_no_transient_records`）：流式 delta / 瞬态事件不得出现在 `history.jsonl`；
 4. `record_shape`（`assert_record_shape`）：assistant 记录只存 `content_blocks` 和链上事实，禁止派生扁平字段及顶层 null。
 
-**既有场景不许改**——除非**产品行为被刻意变更**、且 scheduler 在任务裁定里显式豁免（豁免只覆盖"期望值跟着新事实走"，不覆盖为了让实现过关而放松断言）。已发生的两例：
+既有场景的断言守护产品契约。变更期望值须先获明确授权，并只覆盖产品行为中刻意变更的部分。以下场景曾随产品契约更新：
 
 - `test_system_reload.py` 的 `EXPECTED_ITEMS`：`reload_system` 追加第六项 `log level`（列表末尾），严格相等的整表断言必然要跟着从五项改成六项（既有五项逐字保留）；
 - `test_model_id_cross_provider.py`：`..._fails_config_load` 断言"重复 model id ⇒ 网关**拒绝启动**"，与 setup mode（配置非法也要活着）正面互斥 → 改写为"降级启动 + `/api/settings/status` 精确报出问题"（场景名 / docstring 一并改），并**持有 env 以便 teardown**（原先 `ProbeEnv.start` 抛异常路径会漏网关子进程；`ProbeEnv` 也补了 start 中途失败的兜底 terminate + 基础设施自测）。
+
+经明确授权，可等价迁移断言并保留原有故障信号。`test_model_id_legacy_record.py` 在一条旅程中检查旧记录的冷列表四字段和原始 metadata 字节，显式恢复后检查回写、WS 快照和上游请求名。`test_react_basics.py` 和 `test_record_shape.py` 的同会话终态红线由 fixture teardown 检查，场景内继续验证事件顺序、导出内容和阶段性红线。`test_session_list_filters.py` 和 `test_midjoin_sync.py` 用首正文闸门建立工作相位，仍以真实 HTTP 状态和第二订阅者的 WS 快照为证据。
 
 **红线过渡断言**（场景里显式调用）：`assert_compact_transition`（手动/后台压缩的链形状）、`assert_rewind_transition`（复制行 / 事件节点跳过 / 回退到根）、`assert_fork_of`（子记录 = 源**记录前缀**（append 顺序）+ uuid 全量重映射 + 引用全部落在子记录集内部 + 活跃链 = 记录 tip 回溯（reload 口径自洽；内存态 vs 文件由场景的 `/api/session/get` 与请求体断言承担）+ metadata 快照；被压缩区间随行但不入链）。会话逐出（`scenarios/test_session_eviction.py`）不需要专用 helper——它断言的是"什么都不该变"（逐出/水合前后记录集指纹一致），红线直接由场景内的指纹对比 + 内置不变量承担。
 

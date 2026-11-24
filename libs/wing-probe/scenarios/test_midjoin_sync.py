@@ -70,7 +70,13 @@ async def test_midjoin_before_first_chunk_reports_working(probe: Probe) -> None:
             async with asyncio.timeout(25):
                 await session.send("hi")
                 await session.watch.expect("turn_started", within=5.0)
-                await asyncio.wait_for(reached.wait(), timeout=5)
+                try:
+                    await asyncio.wait_for(reached.wait(), timeout=5)
+                except TimeoutError as exc:
+                    raise AssertionError(
+                        f"session {session.session_id}, model {FIRST_CHUNK_MODEL!r}: "
+                        f"timed out waiting for first content ({probe.requests.summary()})"
+                    ) from exc
 
                 joined = await other.attach(session.session_id)
                 sync = await joined.watch.expect("sync_session", within=5.0)

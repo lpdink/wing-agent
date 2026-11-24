@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 
 import pytest
-from _session_helpers import evict
+from _session_helpers import evict, require_session_row
 
 from wing_probe import Probe, Turn
 
@@ -67,18 +67,9 @@ def _rewrite_metadata(probe: Probe, session_id: str, **changes: object) -> dict:
     return record
 
 
-async def _entries(probe: Probe) -> list[dict]:
-    payload = await probe.driver_required.http.request("GET", "/api/session/list")
-    rows = payload.get("sessions")
-    assert isinstance(rows, list), payload
-    return rows
-
-
 async def _entry(probe: Probe, session_id: str) -> dict:
-    for row in await _entries(probe):
-        if row.get("id") == session_id:
-            return row
-    raise AssertionError(f"session {session_id} not in list: {await _entries(probe)}")
+    listing = await probe.driver_required.http.list_sessions()
+    return require_session_row(listing, session_id)
 
 
 def _quartet(entry: dict) -> tuple:
@@ -102,6 +93,7 @@ def _info_quartet(info: dict) -> tuple:
 
 
 async def _wait_inactive(probe: Probe, session_id: str) -> None:
+    """允许状态稍后转为 inactive，要求已落盘的会话在每次列表中都可见。"""
     deadline = time.monotonic() + POLL_DEADLINE
     observed: str | None = None
     while time.monotonic() < deadline:
