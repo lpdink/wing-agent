@@ -21,8 +21,6 @@ use wing_api_client::models::SessionUsage;
 // Shared / nested types
 // ============================================================
 
-pub(crate) const FEEDBACK_WAITER_INACTIVE: &str = "feedback_waiter_inactive";
-
 /// Common metadata present on every event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMeta {
