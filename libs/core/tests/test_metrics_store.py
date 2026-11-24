@@ -17,6 +17,7 @@ from dataclasses import fields
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
@@ -935,7 +936,11 @@ class TestBackfill:
             assert f"Corrupted metadata.json for session '{unknown}'" in str(
                 logger.warning.call_args
             )
-        assert {entry.id for entry in store.list_archived()} == {shared, unknown, fallback}
+        assert {entry.id for entry in store.list_archived()} == {
+            shared,
+            unknown,
+            fallback,
+        }
 
     def test_archived_metadata_api(self, tmp_path: Path) -> None:
         """归档 metadata 只读口：live 区 / 归档区互不可见，不存在返回 None。"""

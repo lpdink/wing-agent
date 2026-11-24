@@ -180,8 +180,11 @@ async def test_archive_roundtrip_is_a_pure_move_and_freezes(probe: Probe) -> Non
     assert session_id not in await _live_ids(probe)
     index = archived_dir.parent / "index.json"
     index.unlink()
+    await probe.restart_gateway()
+    async with asyncio.timeout(POLL_DEADLINE):
+        while not index.is_file():
+            await asyncio.sleep(POLL_INTERVAL)
     entries = await _archived_entries(probe)
-    assert index.is_file()
     assert [entry["id"] for entry in entries] == [session_id]
     assert (archived_dir / "history.jsonl").read_bytes() == live_bytes
     assert entries[0]["name"] == "hello"
