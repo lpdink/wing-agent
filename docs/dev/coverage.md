@@ -21,9 +21,9 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
   （`unmeasured`）——测试文件按约定剔除（新测试行不判定是设计，不是盲区）。
 - 90% 的定位是防倒退：给代码搬家（重构）、平台分支留出余量，同时挡住整块新代码
   裸奔。演练失败路径：`PATCH_COV_MIN=99 make patch-cov-python`。
-- 判定边界：无改动可执行行（纯文档 / 配置 PR）→ 判过并在评论注明；coverage
-  产物缺失 → 不判（`skipped` 写进评论，测试已经红着）；git 基线解析失败 → **硬
-  失败**（配置错误必须可见，不能静默关掉门禁）。
+- 判定边界：无改动可执行行（纯文档 / 配置 PR）→ 判过并在评论注明；门禁读不到
+  产物时写 `skipped`，由评论说明。Python CI 导出失败时作业失败，跳过门禁，评论
+  提示缺少 patch 产物。git 基线解析失败 → **硬失败**。
 - **已知边界（增量口径天生看不见的东西）**：删除行不进判定——净删除测试行的文件
   会被点名（`removed_tests`，评论里提示人工确认），但**没有任何门禁会拦持续的
   总量劣化**。若要堵死这条演化路径，加一个明显宽松的总量下限即可（例如
@@ -37,9 +37,8 @@ PR 的 CI 把「增量覆盖率（门禁）」与「总量覆盖率（参考）�
   （不判定，供评论展示）。`--selftest` 离线自检（diff 状态机、引号路径、两种覆盖率
   格式解析、判定边界、临时 git 仓库端到端），CI 在 python-check 里每次跑。
 - `make patch-cov-python` / `make patch-cov-rust` 由既有 `.coverage` / profraw
-  导出后判定。Python CI 用 `make export-cov-python` 导出 JSON 供评论和
-  `make patch-cov-python-json` 共用，Rust CI 直接跑 `make patch-cov-rust`。
-  CI 通过 `PATCH_BASE` 指定目标分支。
+  导出后判定。Python CI 导出 JSON 供评论和 `make patch-cov-python-json` 共用，
+  Rust CI 直接跑 `make patch-cov-rust`。CI 通过 `PATCH_BASE` 指定目标分支。
 - 为什么门禁放 check job：失败面贴在语言对应的检查项上（Python Check / Rust
   Check 红），评论 job 只负责渲染。
 

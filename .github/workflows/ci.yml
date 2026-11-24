@@ -66,10 +66,11 @@ jobs:
       # 覆盖率产物（供 coverage-report job 渲染 PR 评论）：测试挂掉时也要导 ——
       # 评论要能展示「低在哪」。--fail-under=0 关掉 coverage 自带的阈值检查
       # （PR 门禁是下面的增量覆盖率；这里只是导出既有 .coverage 数据，不重跑测试）。
+      # workflow_dispatch 可以检出历史 ref，导出命令需兼容旧 Makefile。
       - name: Export coverage JSON
         id: python_coverage
         if: always()
-        run: make export-cov-python
+        run: uv run coverage json -o coverage-python.json --fail-under=0
 
       # 增量覆盖率脚本的自检（离线、不依赖仓库状态）：门禁的正确性不该只靠 review。
       # python3 直跑（脚本纯 stdlib）：rust-check job 里没有 uv，两侧同一种调用方式。
