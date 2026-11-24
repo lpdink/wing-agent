@@ -38,13 +38,14 @@ pub mod model;
 pub mod session;
 pub mod translate;
 
+use std::ops::ControlFlow;
 use std::process::ExitCode;
 
 use anyhow::Context;
 use anyhow::Result;
 
+use crate::cmd::common::{HeadlessGateway, ensure_gateway, prepare_headless_gateway};
 use crate::gateway::GatewayClient;
-use wing_api_client::GatewayClient as GatewayApiClient;
 
 use self::session::SessionHub;
 
@@ -72,38 +73,27 @@ pub async fn run_acp(args: AcpArgs) -> ExitCode {
 }
 
 async fn run_acp_inner(args: AcpArgs) -> Result<ExitCode> {
-    // 1. 网关（复用 stdio 前端的 ensure 流程：健康检查 → 必要时拉起守护进程）。
-    let (host, port) = crate::stdio::ensure_gateway_running().await?;
-    let ws_url = format!("ws://{host}:{port}/ws");
-    let http_base = format!("http://{host}:{port}");
+    let (host, port) = ensure_gateway().await?;
+    let HeadlessGateway {
+        http,
+        ws_url,
+        api_key,
+    } = match prepare_headless_gateway(&host, port, |e| {
+        anyhow::Error::new(e).context("failed to create HTTP client")
+    })
+    .await?
+    {
+        ControlFlow::Continue(gateway) => gateway,
+        ControlFlow::Break(code) => return Ok(code),
+    };
 
-    // 2. API key 与 TUI 同源（`$WING_HOME/tui/config.yaml`）。
-    let api_key = crate::config::AppConfig::load()
-        .api_key
-        .filter(|k| !k.is_empty());
-
-    // 3. HTTP client。构造提前到 WS 之前：预检必须先于握手（setup mode 下网关
-    //    一律拒绝 WS，先连只会得到一句误导的"网关没起来"）。
-    let http = GatewayApiClient::new(http_base.clone(), api_key.as_deref())
-        .context("failed to create HTTP client")?;
-
-    // 4. 配置预检：不可用 → problems 走 **stderr** + EX_CONFIG（78）。
-    //    stdout 此刻还没交给 ACP 传输，且这条路径只写 stderr —— 协议帧通道零污染。
-    if let Some(code) = crate::cmd::setup::preflight_or_report(&http, &http_base).await {
-        return Ok(code);
-    }
-
-    // 5. WS 连接：拿 client_id；连接本体移交给 hub 的事件泵（见 session.rs 的
-    //    模块文档：WS 客户端不可 Clone，收/发共用一条连接）。
     let gateway = GatewayClient::connect(&ws_url, api_key.as_deref())
         .await
         .with_context(|| format!("failed to connect to gateway at {ws_url}"))?;
     let client_id = gateway.client_id().to_string();
 
-    // 6. hub：会话表 + 事件分流 + 出站队列（内部 spawn WS 事件泵）。
     let hub = SessionHub::start(gateway, http, client_id);
 
-    // 7. ACP 服务循环（stdout 归它）。
     agent::serve(hub, args).await.context("ACP serve failed")?;
     Ok(ExitCode::SUCCESS)
 }
