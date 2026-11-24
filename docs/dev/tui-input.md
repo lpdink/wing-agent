@@ -476,7 +476,7 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 
 **复制仍然干净**：`buffer_row_graphemes` 读 symbol 前先 `strip_osc8`，所以选区快照的宽度不被 URL 撑大、复制文本不含控制字符——**任何从 Buffer 反读文本/宽度的地方都必须先剥序列**。
 
-**点击与拖动**。`chat_selection_press` 在开始选择时记录按下帧的原始链接目标。松开时须同时满足没有拖动记录、释放点存在且等于按下锚点，才发出 `AppIntent::OpenLink`。比较锚点覆盖终端丢失 motion 事件的情况。取消选区会清除记录。toast 与设置卡片调用 `ChatView::mask_links` 裁去其覆盖的命中区间。滚动条由鼠标路由优先消费，静态 gutter 把它留在 chat 内容矩形外。
+**点击与拖动**。`chat_selection_press` 在开始选择时记录按下帧的原始链接目标。松开时须同时满足没有拖动记录、释放点存在且等于按下锚点，才发出 `AppIntent::OpenLink`。比较锚点覆盖终端丢失 motion 事件的情况。取消选区会清除记录。toast 与设置卡片调用 `ChatView::mask_links` 删除与遮挡区域相交的整个命中框。滚动条由鼠标路由优先消费，静态 gutter 把它留在 chat 内容矩形外。
 
 **目标解析与打开方式**（`util/open.rs`）：带 scheme（`http` / `https` / `mailto` / `file` …；单个字母 + `:` 视为 Windows 盘符不算 scheme）= URL → 平台默认启动器（macOS `open` / Windows `cmd /c start ""` / Linux `xdg-open`）。其余按本地路径处理：`~` 展开为 `$HOME`、`file://`（含可选 `localhost`）剥离、**相对路径锚定 `current_dir()`（wing CLI 启动目录，不是会话 workspace）**、`#L10` / `#L10C5` / `:10` / `:10:5` 后缀剥离并解析成行（列）；路径先 `canonicalize`（失败则退化为绝对路径）再 `exists()` 检查——不存在就**不启动任何进程**。有行号时先按白名单找支持行跳转的编辑器 CLI（`code -g` / `subl` / `zed`，PATH 探测不用 `which` 子进程），都没有才退回默认程序（文件仍会打开，行号降级——这是「尽量」的诚实边界；`open` / `xdg-open` 都不接受 `path:line`）。
 
