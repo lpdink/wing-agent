@@ -102,11 +102,8 @@ impl ChatView {
     /// Drop the link hit boxes covered by `area` (an overlay painted on top of
     /// the chat after this frame's links were recorded).
     ///
-    /// A hit box whose text is no longer visible would open a link the user
-    /// cannot see. Today the only overlay over the chat band is the toast; the
-    /// scrollbar column (`tui-scrollbar`) will be the next one — when it lands,
-    /// its column must be masked here too (it paints over the last columns of
-    /// every row, including link text), or clicks on it will open links.
+    /// Toasts and the settings card mask their covered links. The scrollbar's
+    /// gutter is outside the chat content area.
     pub fn mask_links(&mut self, area: Rect) {
         self.frame_links.mask(area);
     }
