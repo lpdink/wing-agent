@@ -571,7 +571,8 @@ async fn watch_clears_and_redraws_two_frames_for_the_same_day() {
         .strip_prefix(clear)
         .expect("clear before the first frame")
         .split(clear);
-    for queries in requests.chunks_exact(3) {
+    let (frame_requests, _) = requests.as_chunks::<3>();
+    for queries in frame_requests {
         let mut dims = Vec::new();
         for request in queries {
             assert_eq!(request.path, "/api/usage");
