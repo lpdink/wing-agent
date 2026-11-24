@@ -330,7 +330,7 @@ provider 实例是**无状态**的（配置 + 连接池），生命周期归 `wi
 
 **error 与 notice 的语义边界**：`error` = 真错误（前端终结 turn、渲染错误单元、未聚焦时 OSC 9 通知）；`notice` = 提醒（`level` + `message`，不终结 turn、不发通知、不落盘）。重试通知走 `notice`——重试中的 turn 并没有结束，而 `error` 在前端是「这一轮结束了」的**终结信号**（曾把「会自愈的失败」误报成真错误：spinner 停、耗时停、状态错位）。
 
-**三个序列化边界**（磁盘记录、WS 直播帧、SyncSession 载荷）共用两套规则。`Message.dump_for_history()` 供 typed Message 落盘使用。assistant 已有 `content_blocks` 时，直接省去派生的 `content`、`reasoning_content` 和 `tool_calls`。无块时沿用扁平字段的兼容序列化，非 assistant 保留自身扁平字段。`TrackedList._to_record` 汇合 typed Message 与事件的磁盘投影，剥除 `target` 和 `disk_exclude` 字段，经 `canonical_record` 确保规范形，再追加 `ts`。raw fork 也用 `canonical_record`，保留存量无块记录的扁平字段。WS 直播帧与 SyncSession 载荷共用 `event/__init__.py::wire_dump`，剥除 null、`parent_uuid`、`unzip_last_uuid`、`role`、`target`，保留 `uuid`。
+**三个序列化边界**分别处理磁盘记录、事件字典和快照内的消息投影。`Message.dump_for_history()` 供 typed Message 落盘使用。assistant 已有 `content_blocks` 时，直接省去派生的 `content`、`reasoning_content` 和 `tool_calls`。无块时沿用扁平字段的兼容序列化，非 assistant 保留自身扁平字段。`TrackedList._to_record` 汇合 typed Message 与事件的磁盘投影，剥除 `target` 和 `disk_exclude` 字段，经 `canonical_record` 确保规范形，再追加 `ts`。raw fork 也用 `canonical_record`，保留存量无块记录的扁平字段。`event/__init__.py::wire_dump` 处理 WS 直播事件、SyncSession 外层和 `events` 中的每条事实事件，剥除各事件字典顶层的 null、`parent_uuid`、`unzip_last_uuid`、`role`、`target`，保留非空的 `uuid`。快照内的 `messages` 和 `uncommitted` 由 `serialize_message` 投影，保留 `role` 和兼容用的扁平字段，也可包含 `uuid: null`、媒体名或工具参数中的 null。
 
 **rewind/fork/compact 凭链序免费工作**：事件是链节点——set_tip 后边界外事件移出活跃链；fork 拷贝混合链前缀（事件随行）；compact 后被压缩区间的事件与消息一并离开活跃链（被压缩的 diff 自然不再重放，无孤儿处理）。
 
