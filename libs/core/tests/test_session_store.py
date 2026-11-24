@@ -242,7 +242,7 @@ class TestFileLogStreaming:
         log.append([{"content": "later"}])
         assert [record["content"] for record in log.iter_all()] == ["keep", "later"]
 
-    def test_uncertain_append_is_repaired_before_read_or_write(
+    def test_uncertain_append_limits_shared_reads_until_retry(
         self, tmp_path, monkeypatch
     ):
         import os
@@ -289,46 +289,14 @@ class TestFileLogStreaming:
                 log.append([{"role": "user", "content": "later"}])
             assert b"later" not in history.read_bytes()
 
-        reopened = FileSessionStore(tmp_path).open_log(sid)
+        assert list(log.path.iterdir()) == [history]
+        reopened = store.open_log(sid)
         assert [m["content"] for m in reopened.iter_all()] == ["keep"]
         assert b"uncertain" in history.read_bytes()
-        with monkeypatch.context() as patch:
-
-            def fail_directory_sync():
-                raise OSError("directory sync failed")
-
-            patch.setattr(reopened, "_sync_directory", fail_directory_sync)
-            with pytest.raises(HistoryWriteUncertain, match="requires tail recovery"):
-                reopened.append([{"role": "user", "content": "later"}])
-        assert history.read_bytes() == before
         reopened.append([{"role": "user", "content": "later"}])
         assert history.read_bytes().startswith(before)
         assert b"uncertain" not in history.read_bytes()
-        assert [m["content"] for m in reopened.iter_all()] == ["keep", "later"]
-
-    def test_double_failure_can_leave_restart_boundary_unknown(
-        self, tmp_path, monkeypatch
-    ):
-        import os
-
-        from wing.store import HistoryWriteUncertain
-        from wing.store.file import FileMessageLog
-
-        log = FileMessageLog(tmp_path)
-        log.append([{"content": "keep"}])
-
-        def fail(*args):
-            raise OSError("filesystem cannot confirm writes")
-
-        with monkeypatch.context() as patch:
-            patch.setattr(os, "fsync", fail)
-            patch.setattr(os, "ftruncate", fail)
-            with pytest.raises(
-                HistoryWriteUncertain, match="restart boundary could not be confirmed"
-            ):
-                log.append([{"content": "uncertain"}])
-        assert [path.name for path in tmp_path.iterdir()] == ["history.jsonl"]
-        assert [record["content"] for record in log.iter_all()] == ["keep"]
+        assert [m["content"] for m in log.iter_all()] == ["keep", "later"]
 
     def test_append_failure_does_not_create_file(self, tmp_path: Path):
         from wing.store.file import FileMessageLog

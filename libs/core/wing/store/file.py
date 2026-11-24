@@ -65,7 +65,7 @@ def _is_same_entry(candidate: Path, target: Path) -> bool:
 
 
 class _HistoryTails:
-    """Byte boundaries shared by the event-loop writer and cold readers."""
+    """In-process append boundaries shared by the writer and cold readers."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -76,12 +76,10 @@ class FileMessageLog(MessageLog):
     """文件消息日志：history.jsonl（append+fsync）。"""
 
     _HISTORY = "history.jsonl"
-    _RECOVERY = ".history-recovery.json"
 
     def __init__(self, path: Path | str, tails: _HistoryTails | None = None) -> None:
         self._path = Path(path)
         self._sealed = False
-        self._recovery_checked = False
         self._tails = tails if tails is not None else _HistoryTails()
 
     @property
@@ -107,7 +105,7 @@ class FileMessageLog(MessageLog):
         """
         hist = self._path / self._HISTORY
         with self._tails.lock:
-            offset = self._known_tail_locked()
+            offset = self._tails.offsets.get(self._path)
             try:
                 f = open(hist, "rb")
             except FileNotFoundError as exc:
@@ -163,14 +161,12 @@ class FileMessageLog(MessageLog):
         self._path.mkdir(parents=True, exist_ok=True)
         with open(self._path / self._HISTORY, "ab") as f:
             with self._tails.lock:
-                previous = self._known_tail_locked()
+                previous = self._tails.offsets.get(self._path)
                 start = f.tell() if previous is None else previous
                 self._tails.offsets[self._path] = start
             if previous is not None:
                 try:
                     self._restore_tail(f, previous)
-                    (self._path / self._RECOVERY).unlink(missing_ok=True)
-                    self._sync_directory()
                 except OSError as exc:
                     raise HistoryWriteUncertain(
                         "history requires tail recovery"
@@ -185,10 +181,9 @@ class FileMessageLog(MessageLog):
                 try:
                     self._restore_tail(f, start)
                 except OSError as rollback_error:
-                    restart_boundary = self._record_recovery(start)
                     raise HistoryWriteUncertain(
-                        f"history append could not be rolled back at offset {start}; "
-                        f"write outcome unknown, {restart_boundary}"
+                        f"history append could not be rolled back at offset {start} "
+                        "(write outcome unknown)"
                     ) from rollback_error
                 with self._tails.lock:
                     self._tails.offsets.pop(self._path)
@@ -196,46 +191,9 @@ class FileMessageLog(MessageLog):
             with self._tails.lock:
                 self._tails.offsets.pop(self._path)
 
-    def _known_tail_locked(self) -> int | None:
-        offset = self._tails.offsets.get(self._path)
-        if offset is not None or self._recovery_checked:
-            return offset
-        try:
-            offset = json.loads(
-                (self._path / self._RECOVERY).read_text(encoding="utf-8")
-            )
-            if type(offset) is not int or offset < 0:
-                raise ValueError("invalid history recovery offset")
-        except FileNotFoundError:
-            self._recovery_checked = True
-            return None
-        except (OSError, ValueError) as exc:
-            raise HistoryWriteUncertain(
-                "cannot verify history recovery boundary"
-            ) from exc
-        self._tails.offsets[self._path] = offset
-        self._recovery_checked = True
-        return offset
-
     def requires_recovery(self) -> bool:
         with self._tails.lock:
-            return self._known_tail_locked() is not None
-
-    def _record_recovery(self, offset: int) -> str:
-        try:
-            atomic_write_json(self._path / self._RECOVERY, offset)
-            self._sync_directory()
-        except OSError:
-            log.exception("Cannot confirm history recovery boundary: %s", self._path)
-            return "restart boundary could not be confirmed"
-        return "recovery boundary saved"
-
-    def _sync_directory(self) -> None:
-        fd = os.open(self._path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+            return self._path in self._tails.offsets
 
     @staticmethod
     def _restore_tail(f: BinaryIO, offset: int) -> None:
