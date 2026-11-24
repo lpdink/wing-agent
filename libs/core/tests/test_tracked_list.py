@@ -354,6 +354,31 @@ class TestTraceChain:
         assert len(chain) == 3
         assert [m.content for m in chain] == ["a", "b", "c"]
 
+    def test_last_leaf_uses_append_order_with_duplicate_uuid(self):
+        chain: TrackedList[Message] = TrackedList()
+        parent = Message(role="user", uuid="parent")
+        first = Message(role="assistant", uuid="leaf", parent_uuid="parent")
+        sibling = Message(role="assistant", uuid="sibling", parent_uuid="parent")
+        replacement = Message(role="assistant", uuid="leaf", parent_uuid="missing")
+        chain.extend_detached([parent, first, sibling, replacement, parent])
+
+        assert chain.trace_chain() == [replacement]
+        assert chain.walk_full_chain() == [replacement]
+        assert chain.walk_full_chain("sibling") == [parent, sibling]
+        assert chain.trace_chain("missing") == []
+
+    def test_full_walk_does_not_follow_unzip_with_an_empty_parent(self):
+        chain: TrackedList[Message] = TrackedList()
+        root = Message(role="user", uuid="root")
+        compact = Message(
+            role="assistant", uuid="compact", parent_uuid="", unzip_last_uuid="root"
+        )
+        chain.extend_detached([root, compact])
+
+        assert chain.trace_chain("compact") == [compact]
+        assert chain.walk_full_chain("compact") == [compact]
+        assert chain.walk_full_chain("") == []
+
     def test_trace_chain_stops_at_compact_node(self, tmp_dir):
         """trace_chain stops at compact node (parent_uuid=None)."""
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))

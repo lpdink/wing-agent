@@ -257,8 +257,10 @@ class TrackedList(Generic[T]):
         这是「活跃链从哪里开始」的唯一规则——`trace_chain` 与 `walk_full_chain`
         共用（两份就是两个口径）。
         """
-        leaves = [u for u in self._lines_order if u not in self._all_parent_uuids]
-        return leaves[-1] if leaves else self._lines_order[-1]
+        for uuid in reversed(self._lines_order):
+            if uuid not in self._all_parent_uuids:
+                return uuid
+        return self._lines_order[-1]
 
     def trace_chain(self, from_uuid: str | None = None) -> list[T]:
         """从内存 map 沿 parent_uuid 回溯构建链（倒序遍历）。
@@ -269,27 +271,7 @@ class TrackedList(Generic[T]):
 
         始终以类型化对象工作，返回 [根, ..., 叶] 顺序。
         """
-        if not self._all_items:
-            return []
-
-        if from_uuid is not None:
-            start_uuid = from_uuid
-        else:
-            start_uuid = self._leaf_uuid()
-
-        chain: list[T] = []
-        current_uuid = start_uuid
-        while current_uuid:
-            item = self._all_items.get(current_uuid)
-            if not item:
-                break
-            chain.append(item)
-            if item.parent_uuid is None:
-                break
-            current_uuid = item.parent_uuid
-
-        chain.reverse()
-        return chain
+        return self._walk_chain(from_uuid, across_compact=False)
 
     def find(self, uuid: str) -> T | None:
         """在内存 map 中按 uuid 查找消息（last-write-wins），返回类型化对象。"""
@@ -306,29 +288,22 @@ class TrackedList(Generic[T]):
         返回 [根, ..., 叶] 顺序，包含压缩节点（``unzip_last_uuid is not None``
         可识别）。
         """
+        return self._walk_chain(from_uuid, across_compact=True)
+
+    def _walk_chain(self, from_uuid: str | None, *, across_compact: bool) -> list[T]:
         if not self._all_items:
             return []
 
-        if from_uuid is not None:
-            start_uuid = from_uuid
-        else:
-            start_uuid = self._leaf_uuid()
-
+        current_uuid = from_uuid if from_uuid is not None else self._leaf_uuid()
         chain: list[T] = []
-        current_uuid = start_uuid
         while current_uuid:
             item = self._all_items.get(current_uuid)
             if not item:
                 break
-
             chain.append(item)
-
-            if item.parent_uuid is None and item.unzip_last_uuid is not None:
+            current_uuid = item.parent_uuid
+            if current_uuid is None and across_compact:
                 current_uuid = item.unzip_last_uuid
-            elif item.parent_uuid is None:
-                break
-            else:
-                current_uuid = item.parent_uuid
 
         chain.reverse()
         return chain
