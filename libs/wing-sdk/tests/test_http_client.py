@@ -208,7 +208,10 @@ async def test_update_session_omits_none_valued_fields(client: GatewayClient):
     }
 
 
-async def test_update_session_sends_all_optional_fields(client: GatewayClient):
+async def test_update_session_sends_sparse_and_full_model_updates(
+    client: GatewayClient,
+):
+    await client.update_session("S-1", model_id="ds-flash", title="renamed")
     await client.update_session(
         "S-1",
         model_id="m",
@@ -224,6 +227,12 @@ async def test_update_session_sends_all_optional_fields(client: GatewayClient):
             "method": "POST",
             "path": "/api/session/update",
             "headers": {},
+            "json": {"session_id": "S-1", "model_id": "ds-flash", "title": "renamed"},
+        },
+        {
+            "method": "POST",
+            "path": "/api/session/update",
+            "headers": {},
             "json": {
                 "session_id": "S-1",
                 "model_id": "m",
@@ -234,7 +243,7 @@ async def test_update_session_sends_all_optional_fields(client: GatewayClient):
                 "yolo": False,
                 "workspace": "/ws",
             },
-        }
+        },
     ]
 
 
