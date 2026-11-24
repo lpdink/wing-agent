@@ -110,9 +110,11 @@ class ToolExecutor:
             yield
             return
 
+        # Tool arguments arrive from JSON without coercion against annotations.
         budget = timeout if isinstance(timeout, (int, float)) else None
         clock = clocks[call_id] = _ToolExecutionClock(time.monotonic(), budget)
         self._sink.tool_execution_timing(call_id, clock.snapshot())
+        # A normal return or a wait timeout reaches a known measurement boundary.
         completed = True
         try:
             yield
