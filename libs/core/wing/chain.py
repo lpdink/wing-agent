@@ -21,7 +21,7 @@ import uuid as uuid_mod
 from datetime import datetime
 from typing import Any, Generic, Iterator, List, Type, TypeVar, Union, overload
 
-from wing.schema import ChainNode
+from wing.schema import ChainNode, Message
 from wing.store import MessageLog, canonical_record
 
 T = TypeVar("T", bound=ChainNode)
@@ -103,7 +103,11 @@ class TrackedList(Generic[T]):
         usage_boundary_uuid）在非 null 时保留。加载路径对"键缺失"与"值为 null"
         一视同仁（TrackedList.load 用 record.get，Message._route_flat 用 pop(...,None)）。
         """
-        entry = item.model_dump(mode="json", exclude_none=True)
+        entry = (
+            item.dump_for_history()
+            if isinstance(item, Message)
+            else item.model_dump(mode="json", exclude_none=True)
+        )
         entry.pop("target", None)
         disk_exclude = getattr(item, "disk_exclude", None)
         if disk_exclude:

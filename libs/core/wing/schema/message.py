@@ -9,10 +9,14 @@ from pydantic import (
     ConfigDict,
     Field,
     PrivateAttr,
+    SerializationInfo,
     field_validator,
     model_serializer,
     model_validator,
 )
+
+
+_HISTORY_DUMP = object()
 
 
 class TextBlock(BaseModel):
@@ -258,17 +262,21 @@ class Message(ChainNode):
             ]
         return msg
 
-    @model_serializer(mode="wrap")
-    def _serialize_flat(self, handler: Callable[[Any], dict]) -> dict:
-        """导出派生的扁平字段（向后兼容旧消费方；落盘侧由 ``canonical_record``
-        再决定去留——assistant 的这三项是派生物，写入时剥除）。
+    def dump_for_history(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude_none=True, context=_HISTORY_DUMP)
 
-        导出是派生行为，不是第二份存储：assistant 的 content /
-        reasoning_content / tool_calls 实时取自 content_blocks。注入发生在内层
-        handler 之后，``exclude_none`` 看不到这些键——因此这里自己不给 null
-        （落盘侧的去留见 ``wing.store.canonical_record``）。
-        """
+    @model_serializer(mode="wrap")
+    def _serialize_flat(
+        self, handler: Callable[[Any], dict], info: SerializationInfo
+    ) -> dict:
+        """导出兼容用的扁平字段。内层 handler 返回后注入，需在此过滤 null。"""
         data = handler(self)
+        if (
+            info.context is _HISTORY_DUMP
+            and self.role == "assistant"
+            and data.get("content_blocks") is not None
+        ):
+            return data
         if self.content is not None:
             data["content"] = self.content
         if self.reasoning_content is not None:
