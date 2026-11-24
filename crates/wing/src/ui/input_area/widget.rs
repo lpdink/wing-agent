@@ -10,6 +10,7 @@ use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use super::InputArea;
+use super::VisualRows;
 use super::chrome;
 use super::chrome::ActivityRail;
 use super::chrome::Chrome;
@@ -61,24 +62,34 @@ impl<'a> ComposerWidget<'a> {
 
 impl Widget for ComposerWidget<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Record the rect this frame drew into (empty when collapsed) — mouse
-        // events arrive between frames and hit testing reads it back.
+        if area.is_empty() {
+            self.render_with_rows(area, buf, &[], 0);
+            return;
+        }
+        let mut rows = VisualRows::default();
+        let rows = rows.at(self.input, Chrome::of(area));
+        let (cursor_row, _) = self.input.visual_cursor(rows);
+        self.render_with_rows(area, buf, rows, cursor_row);
+    }
+}
+
+impl ComposerWidget<'_> {
+    pub(crate) fn render_with_rows(
+        self,
+        area: Rect,
+        buf: &mut Buffer,
+        vis_rows: &[wrap::VisualRow],
+        cursor_row: usize,
+    ) {
+        // Mouse events between frames hit the last drawn rect, including an empty one.
         self.input.rendered_area = area;
-        if area.height == 0 || area.width == 0 {
+        if area.is_empty() {
             return;
         }
 
         let chrome = Chrome::of(area);
-        // Every width below is the one the wrapping was computed with, so the
-        // drawn rows and the pointer mapping cannot disagree.
         let text_area_w = chrome.text_width as usize;
-
-        // Build visual rows.
-        let vis_rows =
-            wrap::build_visual_rows(&self.input.lines, &self.input.chips, text_area_w.max(1));
-
-        // Update vertical scroll.
-        self.input.update_vertical_scroll(chrome);
+        self.input.update_vertical_scroll(chrome, cursor_row);
 
         // The one description of what the card is; every register below reads it,
         // so the frame, the caret and the chips cannot drift apart.

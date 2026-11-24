@@ -17,6 +17,7 @@ use ratatui::style::Modifier;
 use ratatui::style::Style;
 
 use super::InputArea;
+use super::VisualRows;
 use super::chrome::Chrome;
 use super::model;
 use super::wrap;
@@ -140,6 +141,16 @@ pub fn focus(input: &InputArea, area: Rect, column: u16, row: u16) -> Option<Sel
 /// Does nothing unless the selection belongs to the composer
 /// ([`Selection::bounds_in`]) — a chat selection can never paint here.
 pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selection: &Selection) {
+    paint_selection_with_rows(buf, input, area, selection, &mut VisualRows::default());
+}
+
+pub(crate) fn paint_selection_with_rows(
+    buf: &mut Buffer,
+    input: &InputArea,
+    area: Rect,
+    selection: &Selection,
+    rows: &mut VisualRows,
+) {
     let Some((start, end)) = selection.bounds_in(SelectionRegion::Composer) else {
         return;
     };
@@ -147,8 +158,7 @@ pub fn paint_selection(buf: &mut Buffer, input: &InputArea, area: Rect, selectio
         return;
     }
     let chrome = Chrome::of(area);
-    let text_width = chrome.text_width as usize;
-    let vis_rows = wrap::build_visual_rows(&input.lines, &input.chips, text_width.max(1));
+    let vis_rows = rows.at(input, chrome);
     let first_row = area.y + chrome.top_row();
     let last_row = first_row + chrome.text_rows;
     for (visible, screen_row) in (first_row..last_row).enumerate() {
@@ -349,7 +359,10 @@ mod tests {
         // With a scrolled window the screen row is an offset into it.
         let mut input = InputArea::with_max_lines(String::new(), 2);
         input.set_text("one\ntwo\nthree");
-        input.update_vertical_scroll(Chrome::of(area));
+        let chrome = Chrome::of(area);
+        let mut rows = VisualRows::default();
+        let (row, _) = input.visual_cursor(rows.at(&input, chrome));
+        input.update_vertical_scroll(chrome, row);
         assert_eq!(input.vertical_scroll, 1);
         let found = hit(&input, area, TEXT_X + 2, TEXT_Y + 1).expect("second window row");
         assert_eq!(found.vis_row, 2);
