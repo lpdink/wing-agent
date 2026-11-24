@@ -11,6 +11,8 @@ use crate::app::modal::ModalOwner;
 use crate::app::modal::SessionLevelAction;
 use crate::app::*;
 use crate::protocol::AskQuestion;
+use crate::protocol::EventMeta;
+use crate::protocol::WingEvent;
 use crate::shared::panels::ask::ASK_CANCEL_CONTENT;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelFinish;
@@ -68,7 +70,7 @@ fn test_ask_panel_key_flow_submits_header_answer() {
 }
 
 #[test]
-fn test_concurrent_asks_answer_the_front_panel_only() {
+fn test_concurrent_asks_keep_second_panel_after_first_answer_is_rejected() {
     // Two asks in flight (the backend runs tools concurrently, so a turn can
     // raise a Bash confirmation and an AskUserQuestion at once). The queue is
     // strict FIFO — the front panel owns the keyboard, and the reply is
@@ -76,6 +78,12 @@ fn test_concurrent_asks_answer_the_front_panel_only() {
     use crossterm::event::KeyCode;
 
     let mut app = test_app();
+    let meta = EventMeta {
+        created_at: "2026-01-01T00:00:00+00:00".into(),
+        session_id: Some(app.session_id.clone()),
+        request_id: "start".into(),
+    };
+    app.handle_event(WingEvent::TurnStarted { meta: meta.clone() });
     app.register_ask_panel(AskPanel::new("ask-1".into(), vec![test_question()]));
     app.register_ask_panel(required_choice_panel("ask-2", &yes_no_yolo()));
     assert_eq!(app.ask_panels.len(), 2);
@@ -94,11 +102,27 @@ fn test_concurrent_asks_answer_the_front_panel_only() {
         AppIntent::SendMessage {
             content,
             tool_call_id,
+            request_id,
             ..
-        } => Some((content, tool_call_id)),
+        } => Some((content, tool_call_id, request_id)),
         _ => None,
     });
-    assert_eq!(sent, Some(("theme: hi".to_string(), Some("ask-1".into()))));
+    let (content, tool_call_id, request_id) = sent.expect("first Ask answer");
+    assert_eq!(content, "theme: hi");
+    assert_eq!(tool_call_id.as_deref(), Some("ask-1"));
+
+    app.handle_event(WingEvent::Error {
+        message: "no active feedback waiter".into(),
+        status_code: 400,
+        error_code: Some(crate::protocol::FEEDBACK_WAITER_INACTIVE.into()),
+        detail: None,
+        meta: EventMeta { request_id, ..meta },
+    });
+    assert!(app.turn.working);
+    assert!(matches!(
+        app.chat.cells.last().map(|c| c.cell()),
+        Some(ChatCell::ErrorMessage(text)) if text == "no active feedback waiter"
+    ));
 
     // The second panel is now the front and was left untouched by the first
     // answer's keys — cursor, committed row and answer all still pristine.

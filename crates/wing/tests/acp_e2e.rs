@@ -520,6 +520,16 @@ async fn bash_confirmation_maps_to_permission_and_writes_the_token_back() {
                 assert_eq!(answer["content"], expected, "第 {turn} 轮的回写 token");
                 assert_eq!(answer["session_id"], sid.as_str());
 
+                if turn == 1 {
+                    let mut rejection = wing_event(&sid, json!({
+                        "type": "error",
+                        "status_code": 400,
+                        "error_code": "feedback_waiter_inactive",
+                        "message": "no active feedback waiter for this tool_call_id",
+                    }));
+                    rejection["request_id"] = answer["request_id"].clone();
+                    gw.push(rejection);
+                }
                 gw.push(wing_event(&sid, tool_call_result(tool_call_id, "Bash", "ok", true)));
                 gw.push(wing_event(&sid, turn_result()));
                 gw.push(wing_event(&sid, done()));

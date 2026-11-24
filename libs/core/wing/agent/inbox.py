@@ -20,6 +20,11 @@ from wing.event import PendingUserMessage
 from wing.schema import MediaRef, Message
 
 
+class InactiveFeedbackWaiterError(InvalidInputError):
+    def __init__(self) -> None:
+        super().__init__("no active feedback waiter for this tool_call_id")
+
+
 @dataclass
 class Inbound:
     """进入 agent 的请求，携带消息和上下文元数据。
@@ -194,9 +199,7 @@ class Inbox:
     def require_feedback_waiter(self, tool_call_id: str) -> asyncio.Future[str]:
         future = self._feedback_waiters.get(tool_call_id)
         if future is None or future.done():
-            raise InvalidInputError(
-                f"no active feedback waiter for tool_call_id={tool_call_id!r}"
-            )
+            raise InactiveFeedbackWaiterError()
         return future
 
     def resolve(self, tool_call_id: str, content: str) -> None:

@@ -47,6 +47,7 @@ use agent_client_protocol::schema::v1::ToolCallUpdateFields;
 use agent_client_protocol::schema::v1::ToolKind;
 use agent_client_protocol::schema::v1::UsageUpdate;
 
+use crate::protocol::FEEDBACK_WAITER_INACTIVE;
 use crate::protocol::WingEvent;
 
 // ============================================================
@@ -463,7 +464,13 @@ pub fn turn_end(event: &WingEvent) -> Option<TurnEnd> {
             Some(TurnEnd::EndTurn)
         }
         WingEvent::Interrupted { .. } => Some(TurnEnd::Cancelled),
-        WingEvent::Error { message, .. } => Some(TurnEnd::Failed(message.clone())),
+        WingEvent::Error {
+            message,
+            error_code,
+            ..
+        } if error_code.as_deref() != Some(FEEDBACK_WAITER_INACTIVE) => {
+            Some(TurnEnd::Failed(message.clone()))
+        }
         _ => None,
     }
 }
