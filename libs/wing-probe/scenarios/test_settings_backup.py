@@ -1,81 +1,100 @@
-"""保存前备份：``config.yaml.bak`` 是**改前文件的逐字副本**（覆盖式，只留最近一份）。
-
-用户拿设置面板反复保存时，唯一能"回到上一份"的东西就是这个 ``.bak``（⑤
-+ §20 风险 3：手写注释会被规范形重写）。它一旦不是逐字副本，回滚就会丢字段——
-把 emitter 的输出或"合并后的文档"写进备份，都会让用户回滚到一个**自己没写过的**
-配置。
-
-覆盖的断言点：
-
-- 首次保存：``backup_path`` 指向 ``<config>.bak``、``.bak`` 逐字节等于保存前的文件；
-  主文件确实变了、仍是合法 YAML，且**单键 map 的 ``extra_body`` 原样往返**；
-- 第二次保存：``.bak`` 变成第一次保存之后的那份（覆盖式、只留最近一份），
-  主文件与它的语义一致。
-"""
+"""Stale saves preserve the file, and each successful save backs up the previous bytes."""
 
 from __future__ import annotations
 
 import pytest
 import yaml
 
-from wing_probe import Probe
+from wing_probe import DriverHttp, DriverHttpError, Probe
 
-#: 透传键（单键 map——最小复现形态）。
-MARKER_KEY = "probe_backup_marker"
-MARKER_VALUE = "one"
+EXTERNAL_EDIT = "# edited outside the gateway (probe: stale fingerprint)"
+
+
+async def _save(http: DriverHttp, current: dict) -> dict:
+    return await http.request(
+        "POST",
+        "/api/settings/set",
+        body={"base": current["fingerprint"], "document": current["values"]},
+    )
 
 
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
-async def test_backup_holds_the_previous_file_verbatim(probe: Probe) -> None:
-    """两次保存：.bak 依次等于"每次保存前"的文件字节。"""
+async def test_conflict_recovery_and_repeated_saves_back_up_previous_bytes(
+    probe: Probe,
+) -> None:
     http = probe.driver_required.http
-    backup = probe.env.config_path.with_name("config.yaml.bak")
-
-    # 基线：还没有 .bak（第 ⑤ 步是"存在才备份"）。
-    assert probe.env.config_path.is_file()
+    path = probe.env.config_path
+    backup = path.with_name("config.yaml.bak")
+    assert path.is_file()
     assert not backup.exists()
 
-    # ── 第一次保存：单键 map 的 extra_body ──
-    before_bytes = probe.env.config_path.read_bytes()
     current = await http.request("GET", "/api/settings/get")
-    document = current["values"]
-    document["providers"][0]["extra_body"] = {MARKER_KEY: MARKER_VALUE}
+    stale_fingerprint = current["fingerprint"]
 
-    first = await http.request(
-        "POST",
-        "/api/settings/set",
-        body={"base": current["fingerprint"], "document": document},
+    # 外部改文件：追加一行注释（保持 YAML 合法——网关进程不受影响）。
+    text = path.read_text(encoding="utf-8")
+    path.write_text(f"{text}{EXTERNAL_EDIT}\n", encoding="utf-8")
+    edited_bytes = path.read_bytes()
+
+    # ── 旧指纹：409，且文件未被触碰 ──
+    with pytest.raises(DriverHttpError) as failure:
+        await _save(http, current)
+    call = failure.value.call
+    assert call.status == 409, call.render()
+    assert call.response["error"] == "conflict", call.response
+    assert path.read_bytes() == edited_bytes
+
+    # 冲突响应里的指纹就是**当前**指纹（客户端据此重取，不是死路）。
+    fresh = await http.request("GET", "/api/settings/get")
+    assert fresh["fingerprint"] != stale_fingerprint, fresh
+    assert fresh["fingerprint"] in call.response["detail"], call.response
+
+    # ── 新指纹：成功，且文档与盘上语义一致（changed 为空） ──
+    receipt = await _save(http, fresh)
+    assert receipt["ok"] is True, receipt
+    assert receipt["problems"] == [], receipt
+    assert receipt["changed"] == [], receipt
+    assert receipt["restart_required"] == [], receipt
+    assert receipt["reload"]["ok"] is True, receipt["reload"]
+
+    # .bak = 保存前那一刻的磁盘事实（含外部编辑的那一行）。
+    assert receipt["backup_path"] == str(backup), receipt
+    assert backup.read_bytes() == edited_bytes, (
+        "recovery backup must include the external edit"
     )
+
+    # 重写后的文件是规范形（合法 YAML，语义不变）。注意 values 里 api_key 是掩码后的
+    # null（"保留磁盘现值"的三态），所以密文按"盘上仍是真值"单独断言。
+    recovered_bytes = path.read_bytes()
+    rewritten = yaml.safe_load(recovered_bytes)
+    provider = rewritten["providers"][0]
+    assert provider["name"] == fresh["values"]["providers"][0]["name"], provider
+    assert provider["base_url"] == fresh["values"]["providers"][0]["base_url"], provider
+    assert isinstance(provider["api_key"], str) and provider["api_key"], provider
+    assert rewritten["agents"] == fresh["values"]["agents"], rewritten["agents"]
+
+    # 新文件指纹与回执一致（下一次保存的基线）。
+    again = await http.request("GET", "/api/settings/get")
+    assert again["fingerprint"] == receipt["fingerprint"], (again, receipt)
+
+    marker = {"probe_backup_marker": "one"}
+    again["values"]["providers"][0]["extra_body"] = marker
+    first = await _save(http, again)
     assert first["ok"] is True, first
-    assert first["backup_path"] == str(backup), first["backup_path"]
-    assert backup.read_bytes() == before_bytes, (
-        "backup must be the previous file verbatim"
-    )
+    assert first["backup_path"] == str(backup), first
+    assert backup.read_bytes() == recovered_bytes, "backup before saving extra_body"
+    after_first = path.read_bytes()
+    assert after_first != recovered_bytes
+    assert yaml.safe_load(after_first)["providers"][0]["extra_body"] == marker
 
-    after_first = probe.env.config_path.read_bytes()
-    assert after_first != before_bytes
-    written = yaml.safe_load(after_first.decode(encoding="utf-8"))
-    assert written["providers"][0]["extra_body"] == {MARKER_KEY: MARKER_VALUE}, written[
-        "providers"
-    ][0]
-
-    # ── 第二次保存：.bak 覆盖成"第一次之后"的那份 ──
     current = await http.request("GET", "/api/settings/get")
-    document = current["values"]
-    document["log"] = {"level": "DEBUG"}
-
-    second = await http.request(
-        "POST",
-        "/api/settings/set",
-        body={"base": current["fingerprint"], "document": document},
-    )
+    assert current["fingerprint"] == first["fingerprint"], (current, first)
+    current["values"]["log"] = {"level": "DEBUG"}
+    second = await _save(http, current)
     assert second["ok"] is True, second
-    assert second["backup_path"] == str(backup), second["backup_path"]
-    assert backup.read_bytes() == after_first, "the backup is overwritten, not appended"
-
-    latest = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
+    assert second["backup_path"] == str(backup), second
+    assert backup.read_bytes() == after_first, "backup before saving log.level"
+    latest = yaml.safe_load(path.read_bytes())
     assert latest["log"]["level"] == "DEBUG", latest["log"]
-    assert latest["providers"][0]["extra_body"] == {MARKER_KEY: MARKER_VALUE}, latest[
-        "providers"
-    ][0]
+    assert latest["providers"][0]["extra_body"] == marker, latest["providers"][0]
