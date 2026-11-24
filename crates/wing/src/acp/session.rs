@@ -49,6 +49,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use crate::gateway::GatewayClient;
+use crate::protocol::FEEDBACK_WAITER_INACTIVE;
 use crate::protocol::WingEvent;
 use wing_api_client::GatewayClient as GatewayApiClient;
 use wing_api_client::models::AgentOverride;
@@ -884,6 +885,22 @@ impl SessionHub {
     /// 而不是 prompt 轮次的事件循环里。中继经 `claim_model_relay` 合并：
     /// 同一会话同时只有一次在途，期间的变更合到下一次。
     fn dispatch(self: &Arc<Self>, event: WingEvent) {
+        if let WingEvent::Error {
+            message,
+            error_code,
+            meta,
+            ..
+        } = &event
+            && error_code.as_deref() == Some(FEEDBACK_WAITER_INACTIVE)
+        {
+            tracing::warn!(
+                session_id = ?meta.session_id,
+                request_id = %meta.request_id,
+                reason = %message,
+                "acp: ask answer rejected"
+            );
+            return;
+        }
         // ACP replays the subscription snapshot once. Live transcript broadcasts
         // would compete with Ask and Done in the bounded turn queue.
         if matches!(
@@ -1555,6 +1572,40 @@ mod tests {
         assert!(!entry.is_armed());
         assert!(!entry.has_turn_in_flight());
         assert!(!entry.deliver(event("s1")), "disarmed → dropped again");
+    }
+
+    #[test]
+    fn rejected_ask_answer_logs_the_request_without_ending_the_turn() {
+        use std::io::Read as _;
+
+        let (hub, _outbound) = test_hub();
+        let entry = hub.register("s1");
+        let mut events = entry.arm_turn().unwrap();
+        let meta = event("s1").meta().unwrap().clone();
+        let (mut log, writer) = std::io::pipe().unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.try_clone().unwrap())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            hub.dispatch(WingEvent::Error {
+                message: "no active feedback waiter".into(),
+                status_code: 400,
+                error_code: Some(FEEDBACK_WAITER_INACTIVE.into()),
+                detail: None,
+                meta: meta.clone(),
+            });
+        });
+        hub.dispatch(WingEvent::Done { meta });
+        assert!(matches!(events.try_recv(), Ok(WingEvent::Done { .. })));
+        assert!(events.is_empty());
+
+        let mut output = String::new();
+        log.read_to_string(&mut output).unwrap();
+        assert!(output.contains("acp: ask answer rejected"), "{output}");
+        assert!(output.contains("request_id=req-1"), "{output}");
+        assert!(output.contains("no active feedback waiter"), "{output}");
     }
 
     #[test]

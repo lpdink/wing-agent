@@ -21,6 +21,8 @@ from wing.schema import MediaRef, Message
 
 
 class InactiveFeedbackWaiterError(InvalidInputError):
+    code = "feedback_waiter_inactive"
+
     def __init__(self) -> None:
         super().__init__("no active feedback waiter for this tool_call_id")
 

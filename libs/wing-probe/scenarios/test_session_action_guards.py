@@ -40,7 +40,7 @@ async def _reject_answer(
     request_id = f"rejected-{label}"
     content = f"bad answer ({label})"
     if transport == "http":
-        with pytest.raises(DriverHttpError) as rejected:
+        try:
             outcome = await session.driver.http.request(
                 "POST",
                 "/api/session/send",
@@ -51,13 +51,13 @@ async def _reject_answer(
                     "tool_call_id": call_id,
                 },
             )
-            call = session.driver.http.last_call(path="/api/session/send")
-            assert call is not None
-            pytest.fail(f"directed answer returned HTTP {call.status} with {outcome!r}")
-        assert rejected.value.status == 400, rejected.value
-        response = rejected.value.call.response
-        assert isinstance(response, dict), response
-        message = response["detail"]
+        except DriverHttpError as rejected:
+            assert rejected.status == 400, rejected
+            response = rejected.call.response
+            assert isinstance(response, dict), response
+            message = response["detail"]
+        else:
+            pytest.fail(f"directed answer was accepted: {outcome!r}")
     else:
         await session.driver.websocket.send_request(
             session.session_id, content, tool_call_id=call_id, request_id=request_id
@@ -93,6 +93,9 @@ async def test_directed_answers_never_become_user_input(
         Turn.of(text="ordinary turn"),
     )
     session = await probe.session(model=MODEL)
+    empty_id = await _reject_answer(session, transport, "", "empty-id")
+    assert not (session.session_dir / "metadata.json").exists()
+
     await session.send("start ask")
     ask = await session.watch.expect("ask")
     call_id = ask.data["tool_call_id"]
@@ -126,7 +129,7 @@ async def test_directed_answers_never_become_user_input(
     result = await session.chat("ordinary input")
     assert result.data["result"] == "ordinary turn", result.data
     await session.watch.expect("done")
-    for request_id in (unknown_id, duplicate_id, late_id):
+    for request_id in (empty_id, unknown_id, duplicate_id, late_id):
         session.watch.assert_never("delivered", where={"request_id": request_id})
     assert probe.requests.count(MODEL) == 4, probe.requests.summary()
     assert [
@@ -230,15 +233,17 @@ async def test_rewind_refused_during_a_turn(probe: Probe, phase: str) -> None:
         before = session.history
         current = await other.rewind("current")
         assert current == {"ok": True, "draft": None}, current
-        with pytest.raises(DriverHttpError) as refused:
+        try:
             outcome = await other.rewind(target)
+        except DriverHttpError as refused:
+            assert refused.status == 409, refused
+            response = refused.call.response
+            assert isinstance(response, dict), response
+            assert "interrupt" in response["detail"], refused
+        else:
             pytest.fail(
                 f"rewind returned {outcome!r} and tip became {session.history.tip_uuid}"
             )
-        assert refused.value.status == 409, refused.value
-        response = refused.value.call.response
-        assert isinstance(response, dict), response
-        assert "interrupt" in response["detail"], refused.value
         after = session.history
         assert after.records == before.records and after.tip_uuid == before.tip_uuid
 

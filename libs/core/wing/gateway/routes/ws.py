@@ -169,9 +169,7 @@ async def handle_ws(ws: WebSocket) -> None:
                     session_id=ctx.session_id,
                     request_id=ctx.request_id or uuid.uuid4().hex,
                     status_code=400 if rejected_feedback else 500,
-                    error_code="feedback_waiter_inactive"
-                    if rejected_feedback
-                    else None,
+                    error_code=e.code if rejected_feedback else None,
                 )
                 for frame in build_frames(json.dumps(wire_dump(error)), error.type):
                     await ws.send_text(frame.text)

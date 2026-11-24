@@ -11,7 +11,7 @@ import asyncio
 
 import pytest
 
-from wing.agent import WingAgent
+from wing.agent import InactiveFeedbackWaiterError, WingAgent
 from wing.agent.tool_executor import _current_tool_call_id
 from wing.common.utils import InvalidInputError
 from wing.event import AskEvent
@@ -62,6 +62,37 @@ async def test_addressed_feedback_basic_path(runtime: WingRuntime):
     assert feedback == "y, go ahead"
     assert agent.status != "waiting"
     assert not agent._inbox._feedback_waiters
+
+
+@pytest.mark.asyncio
+async def test_feedback_admission_and_resolution_do_not_suspend(
+    runtime: WingRuntime, monkeypatch: pytest.MonkeyPatch
+):
+    session = runtime.create_session()
+    agent = session.agent
+    agent._worker.cancel()
+    future = agent._inbox.register_waiter("tc")
+    require_waiter = agent.require_feedback_waiter
+    loop = asyncio.get_running_loop()
+
+    def expire_on_next_tick(tool_call_id: str) -> None:
+        require_waiter(tool_call_id)
+        loop.call_soon(future.cancel)
+
+    monkeypatch.setattr(agent, "require_feedback_waiter", expire_on_next_tick)
+    await runtime.post("first answer", session_id=session.session_id, tool_call_id="tc")
+    assert future.result() == "first answer"
+    assert session.materialized
+    before = session.store.load_metadata(session.session_id)
+    assert before is not None
+
+    with pytest.raises(InactiveFeedbackWaiterError):
+        await runtime.post(
+            "late answer", session_id=session.session_id, tool_call_id="tc"
+        )
+    assert session.store.load_metadata(session.session_id) == before
+    assert session.last_interaction == before.last_interaction
+    assert not agent.has_pending_input
 
 
 @pytest.mark.asyncio

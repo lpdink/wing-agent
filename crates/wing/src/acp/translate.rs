@@ -47,7 +47,6 @@ use agent_client_protocol::schema::v1::ToolCallUpdateFields;
 use agent_client_protocol::schema::v1::ToolKind;
 use agent_client_protocol::schema::v1::UsageUpdate;
 
-use crate::protocol::FEEDBACK_WAITER_INACTIVE;
 use crate::protocol::WingEvent;
 
 // ============================================================
@@ -454,7 +453,7 @@ pub enum TurnEnd {
     Failed(String),
 }
 
-/// 从事件里取轮次终态；`None` = 本轮继续。
+/// 从交给轮次的事件取终态。答复被拒事件已由 SessionHub 在分流时处理。
 pub fn turn_end(event: &WingEvent) -> Option<TurnEnd> {
     match event {
         WingEvent::TurnResult { is_error, .. } => {
@@ -464,13 +463,7 @@ pub fn turn_end(event: &WingEvent) -> Option<TurnEnd> {
             Some(TurnEnd::EndTurn)
         }
         WingEvent::Interrupted { .. } => Some(TurnEnd::Cancelled),
-        WingEvent::Error {
-            message,
-            error_code,
-            ..
-        } if error_code.as_deref() != Some(FEEDBACK_WAITER_INACTIVE) => {
-            Some(TurnEnd::Failed(message.clone()))
-        }
+        WingEvent::Error { message, .. } => Some(TurnEnd::Failed(message.clone())),
         _ => None,
     }
 }
