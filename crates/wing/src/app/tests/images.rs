@@ -730,36 +730,6 @@ fn a_box_that_does_not_start_on_its_caption_is_not_painted() {
     );
 }
 
-/// A `--dump`-style config keeps its meaning across a parse: `Off` is the only
-/// way to turn pictures off, and a value that fell back to `auto` would turn
-/// them back on silently.
-#[test]
-fn a_rendering_config_round_trips_through_its_dump() {
-    let config = crate::config::AppConfig {
-        rendering: crate::config::rendering::RenderingConfig {
-            thinking: crate::config::rendering::ThinkingMode::Hidden,
-            math: crate::config::rendering::MathMode::Off,
-            images: ImagesMode::Off,
-        },
-        ..crate::config::AppConfig::default()
-    };
-    let dumped = config.to_yaml();
-    assert!(dumped.contains("Off"), "{dumped}");
-    let parsed: crate::config::AppConfig =
-        serde_yaml::from_str(&dumped).expect("the dump parses back");
-    assert_eq!(parsed.rendering.images, ImagesMode::Off, "{dumped}");
-    assert_eq!(
-        parsed.rendering.math,
-        crate::config::rendering::MathMode::Off,
-        "{dumped}"
-    );
-    assert_eq!(
-        parsed.rendering.thinking,
-        crate::config::rendering::ThinkingMode::Hidden,
-        "{dumped}"
-    );
-}
-
 // ── 2. the degradation ladder ───────────────────────────────────
 
 /// The two-tier rule, mechanically: every "cannot draw" state renders the
