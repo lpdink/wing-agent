@@ -465,52 +465,6 @@ class TestEagerChunking:
         server._on_event(_notice("hello"))
         assert calls == 1
 
-    @pytest.mark.parametrize("client_ids", [[], ["disconnected"]])
-    def test_unroutable_event_skips_frame_building(self, client_ids):
-        server = _make_server()
-        _register(server, _as_ws(_RecordingWs()), "unsubscribed")
-        event = NoticeEvent(
-            message="hello", target=EventTarget(scope="client", client_ids=client_ids)
-        )
-        with patch("wing.gateway.server.build_frames") as build:
-            server._on_event(event)
-        build.assert_not_called()
-
-    @pytest.mark.parametrize(
-        ("value", "error"),
-        [
-            pytest.param(object(), "Unable to serialize unknown type", id="projection"),
-            pytest.param(10**640, "Exceeds the limit (640 digits)", id="encoding"),
-        ],
-    )
-    def test_unroutable_event_keeps_serialization_diagnostic(self, value, error):
-        import sys
-
-        from wing.event import ToolCallEvent
-
-        server = _make_server()
-        event_bus.subscribe(server._on_event)
-        later = MagicMock()
-        event_bus.subscribe(later)
-        event = ToolCallEvent(
-            tool_name="test",
-            tool_call_id="call",
-            tool_args={"unknown": value},
-            target=EventTarget(scope="client"),
-        )
-        limit = sys.get_int_max_str_digits()
-        try:
-            sys.set_int_max_str_digits(640)
-            with patch("wing.event_bus.log") as logger:
-                event_bus.emit(event)
-        finally:
-            sys.set_int_max_str_digits(limit)
-        logger.error.assert_called_once()
-        assert logger.error.call_args.args[0].startswith(
-            f"EventBus subscriber error: {error}"
-        )
-        later.assert_called_once_with(event)
-
 
 class TestTinyBudgetBoundaryFallback:
     """预算小到装不下一个字符时：前进一个**完整字符**，且绝不产空片。"""

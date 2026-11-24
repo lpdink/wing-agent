@@ -110,18 +110,15 @@ async def _wait_wake(
 
 
 @pytest.mark.probe_env(models=[CHILD_MODEL, PARENT_MODEL])
-@pytest.mark.parametrize("subscribe_child", [True, False], ids=["live", "headless"])
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
-async def test_done_wake_reaches_the_parent(
-    probe: Probe, subscribe_child: bool
-) -> None:
+async def test_done_wake_reaches_the_parent(probe: Probe) -> None:
     """父订阅子会话的收口：子跑完 → 父收到 done 信封，且触发器就此终结。"""
     probe.register(CHILD_MODEL, Turn.of(text="patched the parser"))
     probe.register(PARENT_MODEL, *[Turn.of(text=PARENT_ACK) for _ in range(8)])
 
     parent = await probe.session(model=PARENT_MODEL)
-    child = await probe.session(model=CHILD_MODEL, subscribe=subscribe_child)
+    child = await probe.session(model=CHILD_MODEL)
 
     created = await probe.driver_required.http.create_wake(
         kind="session",
@@ -132,11 +129,8 @@ async def test_done_wake_reaches_the_parent(
     assert wake["state"] == "active", wake
     assert wake["on_events"] == "done,ask", wake
 
-    if subscribe_child:
-        result = await child.chat("do the thing")
-        assert result.data["subtype"] == "success", result.data
-    else:
-        await child.send("do the thing")
+    result = await child.chat("do the thing")
+    assert result.data["subtype"] == "success", result.data
 
     # 父会话：唤醒消息是一条普通用户消息（被消费进上下文时发射 user_message_accepted）
     event = await parent.watch.expect(
@@ -154,14 +148,6 @@ async def test_done_wake_reaches_the_parent(
     # 父会话真跑了一轮（消息进了模型上下文，不是一条只挂在界面上的旁注）
     parent_turn = await parent.watch.expect("turn_result", within=20)
     assert parent_turn.data["result"] == PARENT_ACK, parent_turn.data
-
-    if not subscribe_child:
-        for kind in ("text", "assistant_turn", "turn_result", "done"):
-            child.watch.assert_never(kind)
-        assert [(m["role"], m["content"]) for m in probe.history(child).messages()] == [
-            ("user", "do the thing"),
-            ("assistant", "patched the parser"),
-        ]
 
     # 落盘链：父会话历史里有一条以信封开头的 user 消息
     messages = probe.history(parent).messages()

@@ -16,7 +16,6 @@ import asyncio
 import json
 import socket
 import sys
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -519,25 +518,22 @@ class GatewayServer:
         if target is None:
             return
 
-        # EventBus 即使没有接收者也记录 wire 投影或 JSON 编码失败。
         payload = json.dumps(wire_dump(event))
-        recipients: Iterable[tuple[str, WebSocket | None]]
-        if target.scope == "global":
-            recipients = list(self._client_to_ws.items())
-        elif target.scope == "client":
-            recipients = (
-                (cid, self._client_to_ws.get(cid)) for cid in target.client_ids
-            )
-        else:
-            return
+        # 切分也在 eager 阶段完成（与序列化同理）：帧内容定型后再交给 task，
+        # 不依赖任何延迟序列化的时序。小载荷原样单帧，零额外开销。
+        frames = build_frames(payload, event.type)
 
-        frames = None
-        for cid, ws in recipients:
-            if ws is None or not self._receives_events(cid):
-                continue
-            if frames is None:
-                frames = build_frames(payload, event.type)
-            self._schedule_send(ws, frames, event.type)
+        if target.scope == "global":
+            for cid, ws in list(self._client_to_ws.items()):
+                if not self._receives_events(cid):
+                    continue
+                self._schedule_send(ws, frames, event.type)
+
+        elif target.scope == "client":
+            for cid in target.client_ids:
+                ws = self._client_to_ws.get(cid)
+                if ws is not None and self._receives_events(cid):
+                    self._schedule_send(ws, frames, event.type)
 
     def _schedule_send(self, ws: WebSocket, frames: list[Frame], of_type: str) -> None:
         """调度一个事件的投递（每事件一次 task，同一事件的帧在该 task 内按序发出）。"""
