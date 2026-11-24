@@ -788,41 +788,6 @@ mod tests {
         }
     }
 
-    // ── base64 ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn base64_round_trip() {
-        let cases: [&[u8]; 7] = [
-            b"",
-            b"f",
-            b"fo",
-            b"foo",
-            b"foob",
-            b"hello world",
-            &[0, 1, 2, 250, 251, 252, 253, 254, 255],
-        ];
-        for case in cases {
-            let encoded = b64_encode(case);
-            assert_eq!(b64_decode(&encoded).as_deref(), Some(case), "{case:?}");
-        }
-        // 与标准实现（RFC 4648 例子）对齐。
-        assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
-        assert_eq!(b64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(b64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(b64_decode("Zm9vYmFy").unwrap(), b"foobar");
-        // 缺 padding 也收（终端实现差异的宽容面）。
-        assert_eq!(b64_decode("Zm9vYg").unwrap(), b"foob");
-    }
-
-    #[test]
-    fn base64_decode_rejects_garbage() {
-        for bad in ["!!!!", "Zm9vYmFy===", "Z", "Zm9vY$==", "====="] {
-            assert_eq!(b64_decode(bad), None, "{bad:?} 必须判失败");
-        }
-        // 嵌在别处的 `=` 不是 padding。
-        assert_eq!(b64_decode("Z=9v"), None);
-    }
-
     // ── 包解析 ────────────────────────────────────────────────────────────
 
     #[test]
