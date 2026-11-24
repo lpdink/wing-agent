@@ -702,6 +702,18 @@ async def test_compact_token_baseline_survives_restart(probe: Probe) -> None:
 
     result = await resumed.chat("epsilon")
     assert result.data["result"] == "delta reply", result.data
+    request = probe.context(BASELINE_RESTART_MODEL, index=-1)
+    assert request.messages[0].role == "system", request.describe()
+    assert [message.content for message in request.messages[1:]] == [
+        COMPACT_CONTENT,
+        "beta",
+        "reply two",
+        "gamma",
+        SUMMARY_LOOKING_TEXT,
+        "delta",
+        "post compact reply",
+        "epsilon",
+    ], request.describe()
     assert len(_compact_calls(probe, BASELINE_RESTART_MODEL)) == 1, (
         probe.requests.summary()
     )
