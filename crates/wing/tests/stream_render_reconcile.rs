@@ -553,7 +553,13 @@ fn reconcile_with_palette(
 
 const CHUNK_SIZES: &[usize] = &[1, 16, 256];
 const WIDTHS: &[u16] = &[40, 80, 120];
+const MATH_SWEEP_WIDTH: u16 = 80;
+const MATH_SWEEP_CHUNKS: std::ops::RangeInclusive<usize> = 1..=64;
 const PROFILES: &[Profile] = &[Profile::Thinking, Profile::Content];
+
+fn is_math_shape(name: &str) -> bool {
+    name.starts_with("math_")
+}
 
 #[test]
 fn reconcile_matrix_shapes() {
@@ -561,6 +567,13 @@ fn reconcile_matrix_shapes() {
         for &profile in PROFILES {
             for &chunk in CHUNK_SIZES {
                 for &width in WIDTHS {
+                    // The dedicated math sweep reconciles this same input.
+                    if is_math_shape(name)
+                        && width == MATH_SWEEP_WIDTH
+                        && MATH_SWEEP_CHUNKS.contains(&chunk)
+                    {
+                        continue;
+                    }
                     let chunks = chunk_stream(&corpus, chunk);
                     reconcile(
                         name,
@@ -600,7 +613,7 @@ fn reconcile_matrix_shapes() {
 fn reconcile_math_shapes_every_chunk_size() {
     let math_shapes: Vec<(&'static str, String)> = shapes()
         .into_iter()
-        .filter(|(name, _)| name.starts_with("math_"))
+        .filter(|(name, _)| is_math_shape(name))
         .collect();
     assert!(
         math_shapes.len() >= 8,
@@ -609,13 +622,13 @@ fn reconcile_math_shapes_every_chunk_size() {
     );
     for (name, corpus) in math_shapes {
         for &profile in PROFILES {
-            for chunk in 1..=64usize {
+            for chunk in MATH_SWEEP_CHUNKS {
                 let chunks = chunk_stream(&corpus, chunk);
                 reconcile(
                     name,
                     &corpus,
                     &chunks,
-                    80,
+                    MATH_SWEEP_WIDTH,
                     profile,
                     &format!("chunk={chunk}B"),
                 );
