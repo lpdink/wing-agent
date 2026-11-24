@@ -165,13 +165,17 @@ async def test_status_filter_observes_transitions_without_subscription(
     `test_filters_select_a_subsequence_of_the_full_list` 钉——本场景即使过滤被
     整体忽略也照样通过，它钉的是"未订阅观察者读得到即时状态"。）
     """
-    probe.register(RAIL_MODEL, Turn.of(text="hello there", chunk=2, delay=1.2))
+    probe.register(RAIL_MODEL, Turn.of(text="hello there", chunk=2))
     session = await probe.session(model=RAIL_MODEL)
 
     async with _observer(probe) as observer:
         # 发第一条消息：物化（落盘）+ 起一轮，未订阅的观察者据此看到 working → idle。
-        await session.send("hi")
-        assert await _wait_status(observer, session.session_id, "working") == "working"
+        with probe.env.provider.hold_first_content(RAIL_MODEL) as reached:
+            await session.send("hi")
+            await asyncio.wait_for(reached.wait(), timeout=5)
+            assert (
+                await _wait_status(observer, session.session_id, "working") == "working"
+            )
 
         result = await session.watch.expect("turn_result", within=20.0)
         assert result.data["subtype"] == "success", result.data

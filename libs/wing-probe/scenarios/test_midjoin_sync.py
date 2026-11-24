@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -59,31 +60,22 @@ async def midjoin(probe: Probe, session_id: str) -> AsyncIterator[Event]:
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_midjoin_before_first_chunk_reports_working(probe: Probe) -> None:
-    """首个内容块到达前 join：快照必须是 working（回归点）。
-
-    WHEN turn 已开始、剧本首个内容块尚未吐出（``delay`` 撑开的窗口）
-    AND 新 client 恰好在此窗口订阅
-    THEN 快照 ``status == "working"``——尽管 ``uncommitted`` / ``uncommitted_tools``
-    都是空的（内容为空 ≠ 不在跑）；``turn_started_at`` 供前端恢复已耗时。
-
-    delay 取 3s 而不是刚够用：这个相位没有别的东西撑着窗口（工具轮的窗口是
-    工具执行时长），"确实落在首帧之前"这条证据必须离机器繁忙时的假红足够远。
-    用 ``first_delay`` 而不是 ``delay``：撑开窗口的是**首个内容帧之前**的等待，
-    ``delay`` 是逐帧的（5 帧 × 3s = 12s），那是白付的。
-    """
-    probe.register(FIRST_CHUNK_MODEL, Turn.of(text="late answer", first_delay=3.0))
+    """首个正文帧前加入的订阅者能恢复 working 状态和起始时间。"""
+    probe.register(FIRST_CHUNK_MODEL, Turn.of(text="late answer"))
     session = await probe.session(model=FIRST_CHUNK_MODEL)
 
-    await session.send("hi")
-    await session.watch.expect("turn_started", within=5.0)
+    with probe.env.provider.hold_first_content(FIRST_CHUNK_MODEL) as reached:
+        await session.send("hi")
+        await session.watch.expect("turn_started", within=5.0)
+        await asyncio.wait_for(reached.wait(), timeout=5)
 
-    async with midjoin(probe, session.session_id) as sync:
-        assert sync.data["status"] == "working", sync.data
-        # 相位证据：内容投影两项皆空（wire_dump 剥 null → 键缺失）。
-        assert "uncommitted" not in sync.data, sync.data
-        assert sync.data["uncommitted_tools"] == [], sync.data
-        assert sync.data["turn_started_at"], sync.data
-        sync_at = sync.at
+        async with midjoin(probe, session.session_id) as sync:
+            assert sync.data["status"] == "working", sync.data
+            # wire_dump 剥 null，未提交正文以键缺失表示。
+            assert "uncommitted" not in sync.data, sync.data
+            assert sync.data["uncommitted_tools"] == [], sync.data
+            assert sync.data["turn_started_at"], sync.data
+            sync_at = sync.at
 
     # 确实落在"首个内容块之前"的窗口里：文本流在快照之后才到达。
     text = await session.watch.expect("text", within=15.0)

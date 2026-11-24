@@ -25,7 +25,8 @@ from __future__ import annotations
 import asyncio
 import socket
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -110,6 +111,7 @@ class FakeProvider:
         """唯一的发射时刻账本：``request_index`` → 该请求按 ``frame_index`` 升序的记录。"""
         self._emits_generation: int | None = None
         """写下第一帧时 ``requests`` 的 generation（检测序号复用）。"""
+        self._first_content_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
         self._port = port
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -184,6 +186,24 @@ class FakeProvider:
 
     def models(self) -> list[str]:
         return self.scripts.models()
+
+    @contextmanager
+    def hold_first_content(self, model: str) -> Iterator[asyncio.Event]:
+        """暂停下一次匹配的流式请求，yield 首个正文帧已到写入点的信号。
+
+        响应头及正文前的帧照常发送。退出观察块时放行，含断言失败路径。
+        """
+        if model in self._first_content_gates:
+            raise ValueError(f"first content already held for {model!r}")
+        reached, release = asyncio.Event(), asyncio.Event()
+        gate = (reached, release)
+        self._first_content_gates[model] = gate
+        try:
+            yield reached
+        finally:
+            if self._first_content_gates.get(model) is gate:
+                del self._first_content_gates[model]
+            release.set()
 
     # ── 发射时刻账本 ────────────────────────────────────────
 
@@ -309,6 +329,7 @@ class FakeProvider:
         headers: dict[str, str],
         request_index: int,
     ) -> web.StreamResponse:
+        first_content_gate = self._first_content_gates.pop(model, None)
         response = web.StreamResponse(
             status=200,
             headers={
@@ -334,7 +355,12 @@ class FakeProvider:
                 created=created,
             )
         try:
-            await self._write_frames(response, frames, request_index=request_index)
+            await self._write_frames(
+                response,
+                frames,
+                request_index=request_index,
+                first_content_gate=first_content_gate,
+            )
             await response.write_eof()
         except ConnectionResetError:
             # 客户端中途断开（interrupt 场景的常态）——不是错误。
@@ -347,12 +373,18 @@ class FakeProvider:
         frames: Sequence[SSEFrame],
         *,
         request_index: int,
+        first_content_gate: tuple[asyncio.Event, asyncio.Event] | None = None,
     ) -> None:
         """逐帧等待 + 写；每写成一帧登记一次发射时刻（``[DONE]`` 不登记）。"""
         frame_index = 0
         for frame in frames:
             if frame.delay:
                 await asyncio.sleep(frame.delay)
+            if first_content_gate is not None and frame.kind == "content":
+                reached, release = first_content_gate
+                reached.set()
+                await asyncio.wait_for(release.wait(), timeout=25)
+                first_content_gate = None
             payload = frame.encode()
             at = time.monotonic()
             await response.write(payload)

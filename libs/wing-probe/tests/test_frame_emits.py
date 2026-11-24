@@ -277,6 +277,47 @@ async def test_concurrent_requests_keep_their_own_frames() -> None:
             assert own == list(range(len(own)))
 
 
+@pytest.mark.asyncio
+async def test_first_content_gate_only_holds_one_request() -> None:
+    async with running_provider() as provider:
+        provider.register(MODEL, Script(Turn.of(text="first"), Turn.of(text="second")))
+        async with httpx.AsyncClient(
+            base_url=provider.base_url, timeout=5, trust_env=False
+        ) as client:
+            with pytest.raises(RuntimeError, match="observation failed"):
+                with provider.hold_first_content(MODEL) as reached:
+                    first = await client.send(
+                        client.build_request(
+                            "POST", "/chat/completions", json=request_body(MODEL)
+                        ),
+                        stream=True,
+                    )
+                    assert first.status_code == 200
+                    lines = first.aiter_lines()
+                    role = json.loads((await anext(lines)).removeprefix("data: "))
+                    assert role["choices"][0]["delta"] == {
+                        "role": "assistant",
+                        "content": "",
+                    }
+                    await asyncio.wait_for(reached.wait(), timeout=5)
+                    second = await sse_payload_lines(provider)
+                    assert json.loads(second[1])["choices"][0]["delta"] == {
+                        "content": "second"
+                    }
+                    assert len(provider.emits_for(0)) == 1
+                    raise RuntimeError("observation failed")
+
+            try:
+                remainder = [line async for line in lines if line.startswith("data: ")]
+                assert json.loads(remainder[0].removeprefix("data: "))["choices"][0][
+                    "delta"
+                ] == {"content": "first"}
+                assert remainder[-1] == DONE_LINE
+                assert len(provider.emits_for(0)) == len(provider.emits_for(1)) == 4
+            finally:
+                await first.aclose()
+
+
 # ── 空表、越界与账本生命周期 ────────────────────────────────
 
 
