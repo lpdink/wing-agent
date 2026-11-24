@@ -54,29 +54,10 @@ def _resolve_patterns(patterns: list[str], workspace: Path | None) -> list[str]:
     return resolved
 
 
-def load_rules(
-    rules_patterns: list[str], workspace: Path | None
-) -> tuple[str, list[str]]:
-    """加载所有 rules 文件并拼接；返回 (内容, 实际匹配并成功读取的文件路径)。
-
-    rules 配置支持 glob 模式，如 ~/.wing/rules/*.md
-    相对路径基于 workspace 解析。
-    文件不存在或读取失败时 log.warning 并跳过。
-
-    文件路径列表供 AgentInfo 下发，前端展示加载概览。
-
-    **仅供测试的便捷包装**：生产路径直接用 ``load_rule_files`` + ``rules_prompt``
-    两步（ContextManager 同时需要文件路径与内容）。
-    """
-    files = load_rule_files(rules_patterns, workspace)
-    return rules_prompt(files)
-
-
 def rules_prompt(files: list["RuleFile"]) -> tuple[str, list[str]]:
     """把已读到的 rules 文件拼成系统提示词片段；返回 (内容, 文件路径列表)。
 
-    「路径 + 两换行 + 内容」逐文件拼接是**字节契约**（存量会话的请求前缀依赖它）——
-    `load_rules` 与缓存账本的 `rules:<path>` 段都以此为唯一来源。
+    「路径 + 两换行 + 内容」逐文件拼接是**字节契约**（存量会话的请求前缀依赖它）。
     """
     contents: list[str] = []
     for rule in files:
@@ -106,8 +87,7 @@ def load_rule_files(
 ) -> list[RuleFile]:
     """按加载顺序返回所有成功读取的 rules 文件（含加载时刻的 mtime / size）。
 
-    读取顺序即 `load_rules` 拼进系统提示的顺序：pattern 序 × glob 序。`load_rules` 由本函数
-    派生，两条路径的提示词字节因此不可能漂移。
+    相对 glob 基于 workspace。读取顺序即 `rules_prompt` 的拼接顺序（pattern 序 × glob 序）。
     """
     all_patterns = _resolve_patterns(rules_patterns, workspace)
     if not all_patterns:

@@ -368,7 +368,11 @@ class FileSessionStore(SessionStore):
                 # 损坏/权限问题按"读不到"降级（序列化侧转占位文本），不打断请求。
                 log.warning(f"Failed to read media '{media_id}' at {path}: {e}")
                 return None
-        return self._read_legacy_and_materialize(session_id, media_id, path)
+        data = self._read_legacy_media(media_id)
+        if data is not None:
+            # 物化失败时，当前读取仍可使用老池字节。
+            self._materialize_into(session_id, media_id, path, data)
+        return data
 
     def media_exists(self, session_id: str, media_id: str) -> bool:
         """对象是否可寻址（会话目录或老池任一存在）。纯查询，不物化。"""
@@ -393,34 +397,20 @@ class FileSessionStore(SessionStore):
         target = self._media_path(session_id, media_id)
         if target.exists():
             return True  # 快路径：对象已在会话目录，不碰老池
-        legacy = self._legacy_media_path(media_id)
-        if not legacy.exists():
-            return False
-        try:
-            data = legacy.read_bytes()
-        except OSError as e:
-            log.warning(f"Failed to read media '{media_id}' at {legacy}: {e}")
-            return False
-        return self._materialize_into(session_id, media_id, target, data)
+        data = self._read_legacy_media(media_id)
+        return data is not None and self._materialize_into(
+            session_id, media_id, target, data
+        )
 
-    def _read_legacy_and_materialize(
-        self, session_id: str, media_id: str, target: Path
-    ) -> bytes | None:
-        """（内部）读路径的老池回退：读字节 + best-effort 物化；两处都缺返回 None。
-
-        物化失败只 WARN——本次读取照常返回字节（序列化不该因复制失败而降级），
-        下一次读取自然重试（幂等）。
-        """
+    def _read_legacy_media(self, media_id: str) -> bytes | None:
         legacy = self._legacy_media_path(media_id)
         if not legacy.exists():
             return None
         try:
-            data = legacy.read_bytes()
+            return legacy.read_bytes()
         except OSError as e:
             log.warning(f"Failed to read media '{media_id}' at {legacy}: {e}")
             return None
-        self._materialize_into(session_id, media_id, target, data)
-        return data
 
     def _materialize_into(
         self, session_id: str, media_id: str, target: Path, data: bytes

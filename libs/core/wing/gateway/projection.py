@@ -47,10 +47,6 @@ def build_session_info(session: Session) -> SessionInfoResponse:
     """GET /api/session/info 响应——session 运行时状态快照。"""
     status = session.agent.get_status()
     cm = session.agent.context_manager
-    # `get_status()` 内部也算过一次 context stats，但 `context_stats` 是独立的线字段
-    # （message_count / total_tokens 允许与 `status` 的展示口径不同）——这里按协议
-    # 语义单独取一次，不从 `status` 复用。
-    msg_count, total_tok = cm.get_context_stats()
     return SessionInfoResponse(
         model=status["model"],
         model_id=session.model_id,
@@ -70,8 +66,8 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         last_turn_subtype=session.last_turn_subtype,
         status=session.status,
         context_stats=ContextStatsInfo(
-            message_count=msg_count,
-            total_tokens=total_tok,
+            message_count=status["message_count"],
+            total_tokens=status["total_tokens"],
         ),
         skills_info=cm.get_skills_info(),
         system_prompt=cm.system_prompt.content or "",

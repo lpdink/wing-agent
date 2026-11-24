@@ -49,7 +49,7 @@ from wing.store import (
 )
 from wing.tool_registry import ToolRef
 
-from .model_binding import ModelBinding
+from .model_binding import ModelBinding, resolve_recorded_model
 from .override import validate_override_utf8
 from .tags import TagMutation, apply_tag_ops, sanitize_tag_meta, sanitize_tags
 from .usage import UsageTracker
@@ -1210,56 +1210,28 @@ class Session:
             self._agent.set_max_turns(m.max_turns)
 
     def _restore_persisted_model(self) -> None:
-        """从 metadata 还原模型身份三元组（重启后 resume 的核心动作）。
-
-        恢复链（优先级固定，**无候选集合 / 无优先级回落 / 不猜测**）：① ``model_id`` 命中 id 空间 →
-        **用当前映射**（``ref.name`` / ``ref.provider_name``，跟随配置演化；id 不变而 name/provider
-        变了是配置作者的正常操作），``_model_id = ref.id``；② ``model_id`` 未命中（id 被删）→ 用记录
-        里的**快照** ``(provider_name, model_name)`` 继续跑 + warning，``_model_id =
-        identify(provider, name)``（反查补全，可能 None——name 也不在声明里时不编 id）；③ 快照
-        provider 不可解析 → 回落模板默认 + warning，**记录原样保留**（config 修复后下次 resume 仍可
-        还原）；④ 旧记录（无 ``model_id``）→ 同 ② 的快照路径 + ``identify`` 反查补 id；⑤ 记录不完整
-        （只有 id 或只有半边快照）：id 能命中走 ①，否则视为无记录。
-
-        ``identify`` 是**单键反查**（同 provider 内调用名唯一 ⇒ 至多一个命中），只回答「这个
-        (provider, name) 对应哪个 id」，不参与「该跑哪个模型」的决策。
-
-        对齐落盘（一次性迁移，不是写噪声）：只有当内存三元组与记录**不一致、且拿到了新事实**（id
-        命中后的快照跟随 / 旧记录补 id）才写回 metadata。id 未命中且反查也未命中时**不写**——旧 id
-        与快照是唯一恢复线索，擦掉等于销毁信息。
-        """
+        """应用记录模型；只有拿到新映射时才对齐 metadata。"""
         m = self._metadata
-        config = get_config()
+        recorded = resolve_recorded_model(m, get_config())
+        if isinstance(recorded, ValueError):
+            log.warning(
+                f"Session {self._session_id}: cannot restore model "
+                f"'{m.model_name}' on provider '{m.provider_name}' ({recorded}); "
+                "falling back to template default (record kept)"
+            )
+            return
+        if recorded is None:
+            return
 
-        restored = False
-        if m.model_id is not None:
-            ref = config.find_model(m.model_id)
-            if ref is not None:
-                # ① id 命中：用当前映射（name / provider 跟随配置演化）。
-                self.agent.set_model(ref.name, ref.provider_name)
-                self._model_id = ref.id
-                restored = True
-                log.info(
-                    f"Session {self._session_id}: restored model id "
-                    f"'{ref.id}' → '{ref.name}' (provider '{ref.provider_name}')"
-                )
-
-        if not restored and m.model_name is not None and m.provider_name is not None:
-            try:
-                config.get_provider(m.provider_name)
-            except ValueError as e:
-                # ③ 快照 provider 不可解析：回落模板默认，记录保留。
-                log.warning(
-                    f"Session {self._session_id}: cannot restore model "
-                    f"'{m.model_name}' on provider '{m.provider_name}' ({e}); "
-                    "falling back to template default (record kept)"
-                )
-                return
-            # ②/④ 快照兜底（id 被删 / 旧记录无 model_id）：记录是用户选择，
-            # 不因配置列表变动而作废——仍然还原，只做反查补 id。
-            self.agent.set_model(m.model_name, m.provider_name)
-            self._model_id = config.identify(m.provider_name, m.model_name)
-            restored = True
+        self.agent.set_model(recorded.model_name, recorded.provider_name)
+        self._model_id = recorded.model_id
+        if recorded.snapshot_provider is None:
+            log.info(
+                f"Session {self._session_id}: restored model id "
+                f"'{recorded.model_id}' → '{recorded.model_name}' "
+                f"(provider '{recorded.provider_name}')"
+            )
+        else:
             if m.model_id is not None:
                 log.warning(
                     f"Session {self._session_id}: recorded model id "
@@ -1283,11 +1255,7 @@ class Session:
                 )
             )
 
-        if not restored:
-            return
-
-        # 对齐落盘（一次性迁移）：内存三元组 ≠ 记录才写，且只在拿到新事实
-        # （id 或快照跟随映射）时写——见 docstring。
+        # 无匹配时保留旧 id 与快照，供之后配置修复时恢复。
         if self._model_id is not None and (
             self._model_id,
             self.agent.provider_name,

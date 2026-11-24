@@ -1,5 +1,5 @@
 # wing/session/model_binding.py
-"""会话记录的**生效模型绑定**——resume 链的只读投影。
+"""会话记录的**生效模型绑定**——冷列表与 resume 共用纯判定。
 
 `Session._restore_persisted_model` 是「记录 → agent」的唯一**写**路径（resume /
 逐出后水合时把模型三元组装回 agent）。只读面（`SessionManager.list_sessions`
@@ -11,10 +11,6 @@
 2. 未命中（id 被删 / 旧记录无 id）→ 记录里的快照 ``(provider_name, model_name)``
    （provider 仍可解析时；id 经 ``Config.identify`` 反查补全，可能仍为 None）；
 3. 其余（无记录 / 记录不完整 / 快照 provider 不可用）→ **模板默认**。
-
-两处链条必须一起改：只改一处就是「列表说的模型」与「resume 真跑的模型」的静默
-分叉。应用侧的细节（日志 / 一次性落盘对齐 / 记录保留）以
-`_restore_persisted_model` 为准，本模块只回答「是哪个模型」——无 IO、无副作用。
 """
 
 from __future__ import annotations
@@ -43,58 +39,57 @@ class ModelBinding:
     model_display_name: str | None = None
 
 
+@dataclass(frozen=True)
+class RecordedModel:
+    """可恢复的记录绑定；快照路径同时携带已解析的 provider。"""
+
+    model_id: str | None
+    model_name: str
+    provider_name: str
+    snapshot_provider: ProviderConfig | None = None
+
+
+def resolve_recorded_model(
+    metadata: SessionMetadata, config: Config
+) -> RecordedModel | ValueError | None:
+    """取可恢复的记录绑定，或为恢复日志保留不可用快照 provider 的诊断。"""
+    if metadata.model_id is not None:
+        ref = config.find_model(metadata.model_id)
+        if ref is not None:
+            return RecordedModel(ref.id, ref.name, ref.provider_name)
+
+    model, provider = metadata.model_name, metadata.provider_name
+    if model is None or provider is None:
+        return None
+    try:
+        provider_cfg = config.get_provider(provider)
+    except ValueError as exc:
+        return exc
+    return RecordedModel(
+        config.identify(provider, model), model, provider, provider_cfg
+    )
+
+
 def resolve_model_binding(
     metadata: SessionMetadata,
     config: Config,
     template: AgentTemplate,
 ) -> ModelBinding:
-    """记录 → 生效模型绑定（优先级见模块 docstring）。
-
-    ``template`` 是该会话的模板（``metadata.template_name`` 解析不到时的**默认**
-    模板，口径同 :meth:`SessionManager.resume_session`）：它是第 3 级的答案。
-    """
-    if metadata.model_id is not None:
-        ref = config.find_model(metadata.model_id)
-        if ref is not None:
-            return _binding(ref.id, ref.name, ref.provider_name, config)
-
-    # 快照判据与 `_restore_persisted_model` 逐字对齐（`is not None`，不是真值
-    # 判定）：空串在两侧都必须走同一条路，否则"列表说什么"与"resume 跑什么"
-    # 会在损坏记录上分叉。
-    if (
-        metadata.model_name is not None
-        and metadata.provider_name is not None
-        and _provider_cfg(config, metadata.provider_name) is not None
-    ):
-        return _binding(
-            config.identify(metadata.provider_name, metadata.model_name),
-            metadata.model_name,
-            metadata.provider_name,
-            config,
+    """为冷列表投影生效绑定，记录不可恢复时使用会话模板。"""
+    recorded = resolve_recorded_model(metadata, config)
+    if not isinstance(recorded, RecordedModel):
+        recorded = RecordedModel(
+            template.model_id, template.model, template.provider_name
         )
-
-    return _binding(template.model_id, template.model, template.provider_name, config)
-
-
-def _provider_cfg(config: Config, name: str) -> ProviderConfig | None:
-    """provider 名 → 声明块；不可解析返回 None（不是失败面）。"""
-    try:
-        return config.get_provider(name)
-    except ValueError:
-        return None
-
-
-def _binding(
-    model_id: str | None,
-    model_name: str,
-    provider_name: str,
-    config: Config,
-) -> ModelBinding:
+    provider = recorded.snapshot_provider
+    if provider is None:
+        try:
+            provider = config.get_provider(recorded.provider_name)
+        except ValueError:
+            pass
     return ModelBinding(
-        model_id=model_id,
-        model_name=model_name,
-        provider_name=provider_name,
-        model_display_name=resolve_model_display_name(
-            _provider_cfg(config, provider_name), model_name
-        ),
+        model_id=recorded.model_id,
+        model_name=recorded.model_name,
+        provider_name=recorded.provider_name,
+        model_display_name=resolve_model_display_name(provider, recorded.model_name),
     )
