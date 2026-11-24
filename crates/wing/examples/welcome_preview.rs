@@ -35,10 +35,6 @@ use std::io::Write as _;
 use std::time::Duration;
 use std::time::Instant;
 
-use ratatui::style::Color;
-use ratatui::style::Modifier;
-use ratatui::text::Line;
-use unicode_width::UnicodeWidthStr;
 use wing::config::ThemePalette;
 use wing::ui::welcome::SWEEP_MS;
 use wing::ui::welcome::SessionFacts;
@@ -46,89 +42,10 @@ use wing::ui::welcome::Viewport;
 use wing::ui::welcome::Welcome;
 use wing::ui::welcome::splash_pad;
 
-/// 前景 / 背景的 SGR 参数（`38;` / `48;` 之后接的那一段）。
-fn sgr(color: Option<Color>) -> Option<String> {
-    match color? {
-        // 38;2;r;g;b / 48;2;r;g;b —— 真彩。
-        Color::Rgb(r, g, b) => Some(format!("2;{r};{g};{b}")),
-        // 默认色：不设色彩，让终端用它的默认前景 / 背景。
-        Color::Reset => None,
-        other => Some(ansi_index(other).to_string()),
-    }
-}
+#[path = "support/preview_lines.rs"]
+mod preview_lines;
 
-/// 命名色的 ANSI 索引（16 色表）。
-fn ansi_index(color: Color) -> u8 {
-    match color {
-        Color::Black => 0,
-        Color::Red => 1,
-        Color::Green => 2,
-        Color::Yellow => 3,
-        Color::Blue => 4,
-        Color::Magenta => 5,
-        Color::Cyan => 6,
-        Color::Gray => 7,
-        Color::DarkGray => 8,
-        Color::LightRed => 9,
-        Color::LightGreen => 10,
-        Color::LightYellow => 11,
-        Color::LightBlue => 12,
-        Color::LightMagenta => 13,
-        Color::LightCyan => 14,
-        Color::White => 15,
-        _ => 7,
-    }
-}
-
-/// 一行 ANSI 编码：按 span 输出（真终端就是这么画的），行首补 1 格边距，
-/// 超过 `width` 的部分截掉 —— 超宽在预览里就该看出来。
-fn render_line(line: &Line<'_>, width: u16, plain: bool) -> String {
-    let mut out = String::new();
-    let mut used = 1usize; // 左边距
-    let mut open = false;
-    for span in &line.spans {
-        let mut text = String::new();
-        for ch in span.content.chars() {
-            let w = ch.to_string().width();
-            if used + w > width as usize {
-                break;
-            }
-            text.push(ch);
-            used += w;
-        }
-        if text.is_empty() {
-            continue;
-        }
-        if plain {
-            // 无色预览里带背景色的半格 = 实心格：`▀` 填的是上半、`▄` 填的是下半，
-            // 两半都在时才是满格 —— 不还原成 `█` 的话，画出来的字形会整片瘦一半，
-            // 没法拿来对形状（2x 大字的每一格都是满格，尤其明显）。
-            if span.style.bg.is_some() {
-                text = text.replace(['▀', '▄'], "█");
-            }
-            out.push_str(&text);
-            continue;
-        }
-        let style = span.style;
-        out.push_str("\x1b[0m");
-        if style.add_modifier.contains(Modifier::BOLD) {
-            out.push_str("\x1b[1m");
-        }
-        if let Some(code) = sgr(Some(style.fg.unwrap_or(Color::Reset))) {
-            out.push_str(&format!("\x1b[38;{code}m"));
-        }
-        if let Some(code) = sgr(Some(style.bg.unwrap_or(Color::Reset))) {
-            out.push_str(&format!("\x1b[48;{code}m"));
-        }
-        out.push_str(&text);
-        open = true;
-    }
-    if open && !plain {
-        out.push_str("\x1b[0m");
-    }
-    out.insert(0, ' ');
-    out
-}
+use preview_lines::{Preview, render_line};
 
 /// 画一块：宽度 `width`，扫光进度 `phase`（`None` = 已定格）。
 ///
@@ -190,7 +107,7 @@ fn draw(
     for line in &lines {
         // 左边距占 1 列，所以可见预算是"内容宽 + 1"：否则贴着内容右边缘的那一行
         // 会被截掉最后一列（分节线正好画到那里 —— 它的长度就是块宽）。
-        out.push_str(&render_line(line, width + 1, plain));
+        out.push_str(&render_line(line, width + 1, plain, Preview::Welcome));
         out.push('\n');
     }
     out.push('\n');
