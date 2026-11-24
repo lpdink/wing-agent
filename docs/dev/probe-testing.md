@@ -88,6 +88,8 @@ Setting API / setup mode 的整机证据（都在真网关上跑，断言锚定 
 | `test_settings_setup_mode.py` | 钱场景：坏配置 → 降级启动 → 503 `setup_mode` → `set` 修好 → `setup_mode_exited=true` → 会话跑通；另两个用例覆盖顶层数字键与 YAML 语法错（`.bak` 逐字留坏文件） |
 | `test_settings_list_editing.py` | 新增 provider + 新 model id → `/api/models` 立刻出现且能驱动一轮；删空 `agents` → 精确 `empty_list`、文件未变、恢复后可保存 |
 | `test_settings_restart_required.py` | 改 `gateway.port` → 回执点名 + **旧端口照常、新端口无人监听**（不做假热更） |
+| `test_settings_groups.py` | 分组顺序、标题、成员覆盖、`section` 同源、`section_doc` 仅在组首项、嵌套节点无 `section`，保存后保持键集和分隔行 |
+| `test_settings_file_shape.py` | 保存文件列出所有声明根键，注释不含声明文案且只含规定形态，默认值与 schema 一致，取消注释后仍为合法 YAML |
 | `test_settings_backup.py` | 旧指纹 → 409 `conflict` + 文件未被覆盖，重取指纹后幂等保存 `changed == []`。连续保存的 `.bak` 逐字等于每次保存前的文件，单键 `extra_body` 跨无关保存原样保留 |
 
 ## 新增一个场景

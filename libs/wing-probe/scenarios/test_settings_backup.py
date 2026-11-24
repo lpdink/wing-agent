@@ -1,4 +1,9 @@
-"""Stale saves preserve the file, and each successful save backs up the previous bytes."""
+"""设置保存的 409 冲突恢复与逐字节备份。
+
+外部编辑后的旧指纹保存应保留主文件原字节。恢复保存和后续每次保存都应将写入前的
+磁盘字节放入 ``config.yaml.bak``。这让用户能恢复手写注释和上一版配置，即使保存
+把主文件重写成了规范形。
+"""
 
 from __future__ import annotations
 
