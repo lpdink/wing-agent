@@ -28,15 +28,9 @@ class _SessionSnapshot(WingEvent):
 
     订阅快照与主动历史刷新共用此投影。
 
-    状态（快照事实）：
-    status：快照时刻 session 的运行状态（idle / working / waiting），与
-      `/api/session/list` 同一取值域（`inactive` 不会出现——能同步的 session
-      必在内存）。**必填**：快照必须自述状态，订阅方直接读它（working / waiting
-      ⇒ turn 在飞行），MUST NOT 由 uncommitted / uncommitted_tools 是否为空反推
-      ——"有未提交内容 ⇒ working" 只单向成立（一轮 LLM 调用在飞行、尚未吐出首个
-      已终结块时两者都空，而 turn 确在 working）。也不存在"回落推断"这条路径：
-      CLI 与网关同版本升级，字段缺失 / 取值未知即协议错误（两端解码期失败，而
-      非静默退化）。
+    status：必填的运行状态（idle / working / waiting）。订阅方直接使用该值；
+      working / waiting 表示 turn 在飞行，即使当时的两个未提交投影都是空的。
+      字段缺失或取值未知时解码失败。
     turn_started_at：当前 turn 的开始时刻（UTC ISO 字符串），无进行中 turn 时
       为 null——前端据此恢复已耗时而非从 resume 时刻重算
 
@@ -66,8 +60,6 @@ class _SessionSnapshot(WingEvent):
     uncommitted_tools: list[dict[str, Any]] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
     pending_user_messages: list[PendingUserMessage] = Field(default_factory=list)
-    # 无默认值：每个构造点都必须显式给出快照时刻的状态——同步载荷自描述，
-    # 前端不做推断（漏给值应当是构造期的错误，而非静默退化成"不在跑"）。
     status: SessionStatus
     turn_started_at: str | None = None
     tool_execution_timings: dict[str, ToolExecutionTiming] = Field(default_factory=dict)
@@ -93,14 +85,10 @@ class SessionHistoryRefreshedEvent(_SessionSnapshot):
 
 
 class SessionStateChangedEvent(WingEvent):
-    """统一的 session 级状态变更事件。
+    """Session 级状态变更，只携带本次更新的值。
 
-    替代 ModelSwitchedEvent + ThinkToggledEvent + SessionUpdatedEvent。
-    所有字段可选，只携带当前值。
-
-    模型三件套与 AgentInfo 对齐：``model_id`` 是引用词（前端据此做选择态匹配），
-    ``provider_name`` 是运行期事实（展示分组），``model`` 是调用名 + 展示名
-    ``model_display_name``。四者同刻下发（model_id 未取到时为 None）。
+    模型变更的四个字段取自同一时刻，与 AgentInfo 同口径：`model_id` 是选择态引用词，
+    `provider_name` 用于展示分组，`model` 是调用名。`model_display_name` 缺省时展示调用名。
     """
 
     type: Literal["session_state_changed"] = "session_state_changed"
@@ -108,10 +96,7 @@ class SessionStateChangedEvent(WingEvent):
     model: str | None = None
     model_id: str | None = None
     provider_name: str | None = None
-    """当前模型的 provider 名（运行期事实；与 model / model_id 同刻下发）。"""
     model_display_name: str | None = None
-    """当前模型的展示名（与 model 同刻下发；未声明 / 无展示名 = 省略，
-    前端回落 model）。"""
     thinking: bool | None = None
     reasoning_effort: str | None = None
     yolo: bool | None = None
@@ -175,12 +160,11 @@ class SettingsChangedEvent(WingEvent):
 # ============================================================
 
 
-# TODO: SessionInitEvent 与 SyncSessionEvent 信息重叠（都携带 model / tools 等
-# session 状态）——前者面向 stdio 协议消费者，后者面向 TUI 状态同步。
 class SessionInitEvent(WingEvent):
-    """Session 初始化事件——供 stdio 模式输出 system/init 消息。
+    """订阅初始化，供 stdio 输出 `system/init`。
 
-    在 subscribe/fork 后由 _push_sync() emit，携带权威的 session 状态。
+    `_push_sync()` 在 `replay=false` 时也发送本事件。`SyncSessionEvent` 随
+    `replay=true` 发送，携带完整的会话快照。
     """
 
     type: Literal["session_init"] = "session_init"

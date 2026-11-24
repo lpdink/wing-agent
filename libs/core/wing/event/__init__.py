@@ -118,11 +118,9 @@ _WIRE_EXCLUDE: set[str] = {"target", "parent_uuid", "unzip_last_uuid", "role"}
 def wire_dump(event: WingEvent) -> dict:
     """事件 → WS 直播帧 / SyncSession 载荷的统一 wire dict。
 
-    剥除存储专用字段（`_WIRE_EXCLUDE`）与值为 null 的字段；保留 uuid。
-    直播帧（gateway server / ws）、SyncSession.events、SyncSession.uncommitted
-    共用此规则——消除各调用点分散的 `model_dump_json`。事件无 wrap 序列化器，
-    `model_dump(mode="json", exclude=...)` 后字典过滤 null 即可（与 Message 的
-    存储边界不同，见 TrackedList._to_record）。
+    剥除存储专用字段（`_WIRE_EXCLUDE`）与事件顶层值为 null 的字段，保留 uuid。
+    直播帧与 `SyncSession.events` 共用此规则。`SyncSession.uncommitted` 先经
+    `serialize_message` 投影为 Message 字典，事件外层再走此函数。
     """
     data = event.model_dump(mode="json", exclude=_WIRE_EXCLUDE)
     return {k: v for k, v in data.items() if v is not None}

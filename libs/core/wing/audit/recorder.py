@@ -84,8 +84,6 @@ class AuditRecorder:
         except Exception as exc:  # 兜底：审计失败不影响 agent
             log.error(f"audit: failed to record {type(event).__name__}: {exc!r}")
 
-    # ── 三张表 ───────────────────────────────────
-
     def _record_llm_call(self, event: LLMCallMetricsEvent) -> None:
         ts_ms, ts = _stamp(event)
         self._db().execute(

@@ -72,12 +72,7 @@ class HookRegistry:
         return list(self._handlers.get(point, []))
 
     def clear(self) -> None:
-        """清空所有已注册的 handler，为 reload 做准备。
-
-        注意：会清除所有 handler，不区分来源。
-        当前所有 hooks 均来自 config 路径加载，故 reload 安全。
-        若未来 core 注册内置 hooks，需改为按 source 选择性清除。
-        """
+        """热重载前清空所有 handler，涵盖每个来源。"""
         self._handlers.clear()
 
     def off(self, point: str, fn: Callable) -> bool:
@@ -92,14 +87,7 @@ class HookRegistry:
         return True
 
     def invoke(self, point: str, value: Any, **context: Any) -> Any:
-        """同步执行 hook 管道。
-
-        依次执行所有 handler，串联 value：
-        - handler 返回非 None → 替换当前 value
-        - handler 返回 None → 保留当前 value
-        - handler 异常 → 跳过，保留当前 value，log warning
-        context 在整个管道中不变。
-        """
+        """同步执行 hook 管道，跳过协程函数并告警。"""
         for fn in self._handlers.get(point, []):
             if inspect.iscoroutinefunction(fn):
                 log.warning(
@@ -121,16 +109,7 @@ class HookRegistry:
         return value
 
     async def invoke_async(self, point: str, value: Any, **context: Any) -> Any:
-        """异步执行 hook 管道。
-
-        支持 sync + async handler 混合执行：
-        - async handler → await fn(value, **context)
-        - sync handler → fn(value, **context)
-        - handler 返回非 None → 替换当前 value
-        - handler 返回 None → 保留当前 value
-        - handler 异常 → 跳过，保留当前 value，log warning
-        context 在整个管道中不变。
-        """
+        """按注册顺序混合调用同步 handler 和 await 协程函数。"""
         for fn in self._handlers.get(point, []):
             try:
                 if inspect.iscoroutinefunction(fn):

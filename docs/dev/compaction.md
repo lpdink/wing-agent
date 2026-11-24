@@ -63,9 +63,10 @@
 
 **换入**（`_apply_pending_compact`）：摘要节点取代 `msgs[:end_idx+1]`，`unzip_last_uuid`
 编码被压缩区间；保留区（tail）**整条复制**、只换链坐标（`uuid` / `parent_uuid`）——上下文
-事实与 provider 审计字段（`usage` / `stop_reason`）、媒体引用都随行。写入顺序是
-`append_detached(摘要) → append_detached(tail…) → set_tip(tail 末条)`，中间的崩溃窗口是
-已知问题（`TODO(crash-safety)`，与手动路径同源）。
+事实与 provider 审计字段（`usage` / `stop_reason`）、媒体引用都随行。摘要和保留区由
+`extend_detached` 批量追加，成功后 `set_tip` 指向批末。文件后端遇到写入错误时尝试回截，
+回截失败时当前 store 的读端只暴露已确认前缀，续写前重试回截。上界只保留在进程内，
+崩溃重启后的文件可能含完整的批次前缀或截断行。
 
 ## 3. 手动压缩
 
