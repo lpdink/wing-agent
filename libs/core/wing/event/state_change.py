@@ -88,7 +88,7 @@ class SessionStateChangedEvent(WingEvent):
     """Session 级状态变更，只携带本次更新的值。
 
     模型变更的四个字段取自同一时刻，与 AgentInfo 同口径：`model_id` 是选择态引用词，
-    `provider_name` 用于展示分组，`model` 是调用名。`model_display_name` 缺省时展示调用名。
+    `provider_name` 用于展示分组，`model` 是调用名，`model_display_name` 是可省略的展示名。
     """
 
     type: Literal["session_state_changed"] = "session_state_changed"

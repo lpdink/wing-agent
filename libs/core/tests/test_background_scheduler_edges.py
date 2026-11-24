@@ -146,15 +146,17 @@ async def test_slow_job_does_not_block_stop():
     finished = asyncio.Event()
 
     async def slow() -> None:
+        nonlocal now
         entered.set()
         await release.wait()
+        await asyncio.sleep(0)
+        now += 2.0
         finished.set()
 
     scheduler = BackgroundScheduler(clock=lambda: now)
     scheduler.add_job("slow", 1, slow, initial_delay_seconds=0)
     scheduler.start()
     await asyncio.wait_for(entered.wait(), timeout=5.0)
-    now = 2.0
     release.set()
     await asyncio.wait_for(finished.wait(), timeout=5.0)
 

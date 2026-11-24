@@ -57,9 +57,9 @@
   单位；这条路径仍带 system + tools 的低估偏差，是可以接受的降级（真实形态下它只在
   完全拿不到服务端数字时出现）。
 
-切点算好之后就固化成 `PendingCompact`（`start_uuid` / `end_uuid` + 摘要正文），落
-`history.jsonl` 的 aux kv 通道（`pending_compact`）。换入时按 uuid 在当前链上自校验：找不到
-（rewind / 手动压缩改过链）就丢弃，不半提交。
+切点算好之后就固化成 `PendingCompact`（`start_uuid` / `end_uuid` + 摘要正文），由
+`MessageLog` 的 aux 通道以 `pending_compact` 为键保存，文件后端写入会话目录下的
+`pending_compact.json`。换入时按 uuid 在当前链上自校验，找不到就丢弃（例如 rewind 或手动压缩改过链）。
 
 **换入**（`_apply_pending_compact`）：摘要节点取代 `msgs[:end_idx+1]`，`unzip_last_uuid`
 编码被压缩区间；保留区（tail）**整条复制**、只换链坐标（`uuid` / `parent_uuid`）——上下文

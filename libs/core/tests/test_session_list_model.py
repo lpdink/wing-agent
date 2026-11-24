@@ -180,8 +180,11 @@ class TestRecordProjection:
         )
         _use_config(
             monkeypatch,
-            models=[ModelSpec(id="ds-flash", name="renamed-upstream")],
-            agents=[("default", "ds-flash")],
+            models=[
+                ModelSpec(id="ds-flash", name="renamed-upstream"),
+                "template-model",
+            ],
+            agents=[("default", "template-model")],
         )
 
         store = FileSessionStore(root)
