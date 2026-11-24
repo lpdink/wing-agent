@@ -211,6 +211,15 @@ class SettingsGetResponse(BaseModel):
     setup_mode: bool = Field(default=False, description="网关此刻是否处于 setup mode")
     config_path: str = Field(description="config.yaml 的绝对路径")
 
+    pending_restart_paths: list[str] | None = Field(
+        default=None, description="已加载但待重启的配置路径，null 表示状态未知"
+    )
+
+
+class RestartListener(BaseModel):
+    host: str
+    port: int
+
 
 class SettingsStatusResponse(BaseModel):
     """GET /api/settings/status 响应——启动路径上的最便宜预检。"""
@@ -221,6 +230,9 @@ class SettingsStatusResponse(BaseModel):
         default_factory=list, description="当前全部问题"
     )
     fingerprint: str | None = Field(default=None, description="磁盘文件的 sha256 指纹")
+    restart_listener: RestartListener | None = Field(
+        default=None, description="此指纹对应的重启监听地址，未通过启动校验时为空"
+    )
 
 
 # ============================================================

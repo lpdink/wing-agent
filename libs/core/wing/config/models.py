@@ -88,12 +88,12 @@ class ModelSpec(BaseModel):
             "控制字符 / 空串 / 超长——引用词是查表的键，静默改写会在两台机器上得到"
             "不同的查找结果。"
         ),
-        apply=ApplyScope.HOT,
+        apply=ApplyScope.NEXT_SESSION,
         default=None,
     )
     name: str = S(
         doc="实际调用名（传给 provider.generate）",
-        apply=ApplyScope.HOT,
+        apply=ApplyScope.NEXT_SESSION,
     )
     display_name: str | None = S(
         doc="展示名（缺省由前端回落调用名）",
@@ -843,11 +843,14 @@ class GatewayConfig(BaseModel):
         doc="监听地址",
         apply=ApplyScope.RESTART,
         default="127.0.0.1",
+        min_length=1,
     )
     port: int = S(
         doc="监听端口",
         apply=ApplyScope.RESTART,
         default=32523,
+        ge=1,
+        le=65535,
     )
     auth: AuthConfig = S(
         doc="API key 鉴权配置",

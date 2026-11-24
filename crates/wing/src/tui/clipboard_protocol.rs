@@ -30,14 +30,16 @@
 //!   的唯一依据（`pw` 两边都有；listing 的 DATA 与数据的 DATA 靠 `mime` 区分）。每次 read
 //!   用**唯一 id**（`wing-paste-<n>`），被放弃的 read 残留的包因此不会被记到下一次读上。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use super::TermEvent;
 use super::stdin_proxy::Sequence;
+use crate::shared::text_edit::TextInputId;
 use crate::util::image_compress::KNOWN_IMAGE_MIMES;
 use crate::util::mime::normalize_mime;
 
@@ -69,8 +71,94 @@ const MAX_QUEUED_EVENTS: usize = 4;
 const PROGRESS_STEP: usize = 256 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Paste ownership sampled when the terminal announces a paste.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClipboardTarget {
+    #[default]
+    Default,
+    TextOnly(TextInputId),
+    Ignore,
+}
+
+/// Reply to the terminal's ordered paste announcement before reading clipboard bytes.
+#[derive(Debug)]
+pub struct ClipboardAnnouncement(oneshot::Sender<ClipboardTarget>);
+
+impl ClipboardAnnouncement {
+    pub fn route(self, target: ClipboardTarget) {
+        let _ = self.0.send(target);
+    }
+}
+
+/// Carries announcements across the private PTY alongside keys without placing
+/// clipboard text or the terminal's password on the crossterm input stream.
+pub(super) struct Announcements {
+    prefix: String,
+    pending: Mutex<AnnouncementSlots>,
+}
+
+#[derive(Default)]
+struct AnnouncementSlots {
+    next: u64,
+    replies: HashMap<u64, ClipboardAnnouncement>,
+}
+
+impl Announcements {
+    pub(super) fn new() -> Self {
+        Self {
+            prefix: format!("wing-clipboard-{}-", uuid::Uuid::new_v4()),
+            pending: Mutex::default(),
+        }
+    }
+
+    pub(super) fn mark(&self, bytes: &mut Vec<u8>) -> oneshot::Receiver<ClipboardTarget> {
+        let (reply, result) = oneshot::channel();
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.replies.retain(|_, reply| !reply.0.is_closed());
+        let id = pending.next;
+        pending.next += 1;
+        pending.replies.insert(id, ClipboardAnnouncement(reply));
+        // Bracketed paste is a single event in crossterm, ordered with keys.
+        bytes.extend_from_slice(format!("\x1b[200~{}{id}\x1b[201~", self.prefix).as_bytes());
+        result
+    }
+
+    pub(super) fn decode(&self, text: &str) -> Option<Option<ClipboardAnnouncement>> {
+        let id = text.strip_prefix(&self.prefix)?.parse::<u64>().ok()?;
+        let announcement = self
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .replies
+            .remove(&id);
+        // A late marker must still be consumed when its protocol read expired.
+        Some(announcement.filter(|reply| !reply.0.is_closed()))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct ClipboardText(String);
+
+impl ClipboardText {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for ClipboardText {
+    fn from(text: String) -> Self {
+        Self(text)
+    }
+}
+
+impl std::fmt::Debug for ClipboardText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
 /// 剪贴板读回的载荷（App 边界，冻结给 05）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum ClipboardPayload {
     /// 文本表示（`text/plain`）。
     Text(String),
@@ -80,6 +168,20 @@ pub enum ClipboardPayload {
         mime: String,
         name: Option<String>,
     },
+}
+
+impl std::fmt::Debug for ClipboardPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text(_) => f.write_str("Text(<redacted>)"),
+            Self::Image { bytes, mime, name } => f
+                .debug_struct("Image")
+                .field("len", &bytes.len())
+                .field("mime", mime)
+                .field("name", name)
+                .finish(),
+        }
+    }
 }
 
 /// 通道投给 App 的一条事件：一次读的**整个生命周期**（开始 / 进度 / 交付 / 失败），
@@ -98,6 +200,10 @@ pub enum ClipboardEvent {
     ReadProgress { received: u64 },
     /// 读回完成，交付载荷。
     Delivered(ClipboardPayload),
+    TextInput {
+        target: TextInputId,
+        result: Result<ClipboardText, ClipboardFailure>,
+    },
     /// **在途读**的失败：归属当前这条读（App 侧把它的占位符翻成失败态 + toast）。
     /// `mime` 就是这次读的表示 —— 只有 `image/*` 的读才有占位符可翻。
     ReadFailed {
@@ -158,7 +264,7 @@ use crate::util::base64::{decode as b64_decode, encode as b64_encode};
 // ---------------------------------------------------------------------------
 
 /// 一条 OSC 5522 包（`ESC]5522;` 与终止符之间的内容）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Packet {
     pub op: String,
     pub status: String,
@@ -214,6 +320,18 @@ impl Packet {
     }
 }
 
+pub(super) fn is_announcement(raw: &[u8]) -> bool {
+    let meta = raw.split(|b| *b == b';').next().unwrap_or_default();
+    meta.split(|b| *b == b':')
+        .any(|field| field == b"status=OK")
+        && Packet::parse(raw).is_some_and(|packet| {
+            packet.op == "read"
+                && packet.status == "OK"
+                && packet.id.is_none()
+                && packet.pw_b64.is_some()
+        })
+}
+
 /// targets listing 的负载：空格 / 换行分隔的 MIME 串（Ghostty 会用 `\n` 结尾）。
 fn parse_listing(payload: &[u8]) -> Vec<String> {
     String::from_utf8_lossy(payload)
@@ -243,10 +361,14 @@ pub(crate) fn choose_mime(available: &[String]) -> Option<String> {
     // 文本统一按规范名 `text/plain` 请求：终端（Ghostty 的 `isTextMime`）会把各种文本别名
     // （含 `text/plain;charset=utf-8`）都算成同一个表示，请求规范名最稳。`starts_with`
     // 同时覆盖等值形态。
-    if bases.iter().any(|b| b.starts_with("text/plain")) {
-        return Some("text/plain".to_string());
-    }
-    None
+    choose_text_mime(available)
+}
+
+fn choose_text_mime(available: &[String]) -> Option<String> {
+    available
+        .iter()
+        .any(|mime| normalize_mime(mime).starts_with("text/plain"))
+        .then(|| "text/plain".to_string())
 }
 
 /// 构造带 OTP 的 follow-up read 请求（`ESC]5522;…ST`）。
@@ -285,6 +407,10 @@ pub(crate) enum Effect {
     Progress { received: u64 },
     /// 读回完成：交付 App。
     Deliver(ClipboardPayload),
+    TextInput {
+        target: TextInputId,
+        result: Result<ClipboardText, ClipboardFailure>,
+    },
     /// 在途读失败：归属当前这条读。带上它的 MIME —— App 侧据此判断这条读有没有
     /// 占位符（只有图片读有，见 [`Effect::ImageReadStarted`]）。
     ReadFailed {
@@ -298,6 +424,7 @@ pub(crate) enum Effect {
 /// 一次已完成的 paste event（listing 与 DONE 都到齐了）。
 #[derive(Debug)]
 struct PendingEvent {
+    target: ClipboardTarget,
     pw_b64: String,
     primary: bool,
     mimes: Vec<String>,
@@ -306,6 +433,7 @@ struct PendingEvent {
 /// 正在收集的 event（OK 已到，等 listing 与 DONE）。
 #[derive(Debug)]
 struct EventCollector {
+    target: ClipboardTarget,
     pw_b64: String,
     primary: bool,
     mimes: Vec<String>,
@@ -313,10 +441,10 @@ struct EventCollector {
 }
 
 /// 在途的 read。`id` 每次唯一：被放弃的 read 残留的包（同 mime、同 pw）必须落不到下一次。
-#[derive(Debug)]
 struct ReadState {
     id: String,
     mime: String,
+    settings: Option<TextInputId>,
     data: Vec<u8>,
     deadline: Instant,
     /// 进度水位：最后一次报出去的累计字节数，与那次上报的时刻（[`PROGRESS_STEP`] /
@@ -326,7 +454,7 @@ struct ReadState {
 }
 
 /// 协议状态机：纯逻辑（时钟注入），驱动的 I/O 在外面。
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Session {
     event: Option<EventCollector>,
     read: Option<ReadState>,
@@ -358,7 +486,17 @@ impl Session {
     ///
     /// 归属规则（协议里没有别的手段）：**没有 `id` = 终端自发的事件**（三连包），
     /// `id == 当前 read 的 id` = 我们这次读的响应，其余一律是噪声（例如被放弃的读的残留包）。
+    #[cfg(test)]
     pub fn on_sequence(&mut self, raw: &[u8], now: Instant) -> Vec<Effect> {
+        self.on_sequence_for(raw, ClipboardTarget::Default, now)
+    }
+
+    fn on_sequence_for(
+        &mut self,
+        raw: &[u8],
+        target: ClipboardTarget,
+        now: Instant,
+    ) -> Vec<Effect> {
         let Some(packet) = Packet::parse(raw) else {
             // 坏包：读中途算致命（响应不可信），其余忽略（可能是别人的协议流量）。
             if self.read.is_some() {
@@ -373,7 +511,7 @@ impl Session {
         }
         match packet.id.as_deref() {
             // 终端自发的事件（event 三连不带 id）。
-            None => self.on_event_packet(&packet, now),
+            None => self.on_event_packet(&packet, target, now),
             Some(id) => {
                 let ours = self.read.as_ref().is_some_and(|read| read.id == id);
                 if !ours {
@@ -386,7 +524,12 @@ impl Session {
         }
     }
 
-    fn on_event_packet(&mut self, packet: &Packet, now: Instant) -> Vec<Effect> {
+    fn on_event_packet(
+        &mut self,
+        packet: &Packet,
+        target: ClipboardTarget,
+        now: Instant,
+    ) -> Vec<Effect> {
         // event 三连没有 id 可比，就比**一次性密码**：它由终端为每一次粘贴新生成（Ghostty
         // 的 `otp`），三连里每个包都回显。旧事件被放弃后迟到的 listing / DONE 因此落不到
         // 新事件上（read 侧的同款隔离见唯一 id）。
@@ -402,6 +545,7 @@ impl Session {
                     tracing::debug!("clipboard: superseding an unfinished paste event");
                 }
                 self.event = Some(EventCollector {
+                    target,
                     pw_b64,
                     primary: packet.primary,
                     mimes: Vec::new(),
@@ -431,7 +575,11 @@ impl Session {
                 let Some(event) = self.event.take() else {
                     return Vec::new();
                 };
+                if event.target == ClipboardTarget::Ignore {
+                    return Vec::new();
+                }
                 let pending = PendingEvent {
+                    target: event.target,
                     pw_b64: event.pw_b64,
                     primary: event.primary,
                     mimes: event.mimes,
@@ -447,7 +595,9 @@ impl Session {
                         // **丢的不是在途那条**：它没有 id，也就找不到在途的读，所以按
                         // 「与读无关」投递，别把正在传的那张图的占位符翻成失败态。
                         tracing::warn!("clipboard: paste event dropped (queue full)");
-                        vec![Effect::PasteRejected(ClipboardFailure::QueueFull)]
+                        rejected(event.target, ClipboardFailure::QueueFull)
+                            .into_iter()
+                            .collect()
                     }
                 } else {
                     self.start(pending, now)
@@ -514,9 +664,9 @@ impl Session {
             // 收不全的事件（OK 到了、listing / DONE 没到）也要给用户一个交代：粘贴了却
             // 毫无动静是最难排查的形态。
             tracing::debug!("clipboard: paste event incomplete, giving up");
+            let target = event.target;
             self.event = None;
-            // 事件三连没到齐 = 这条粘贴根本没开始读，与在途的读无关。
-            effects.push(Effect::PasteRejected(ClipboardFailure::Timeout));
+            effects.extend(rejected(target, ClipboardFailure::Timeout));
         }
         if let Some(read) = &self.read
             && now >= read.deadline
@@ -534,8 +684,12 @@ impl Session {
     /// 队列里已到齐的粘贴事件无反馈卡死，而后续粘贴因 `read.is_none()` 直接开始新读
     /// （插队），被卡的事件要等下一次读完成才被取出（那时 OTP 多半已失效）。
     fn abort_read(&mut self, failure: ClipboardFailure, now: Instant) -> Vec<Effect> {
-        let mime = self.read.take().map_or_else(String::new, |read| read.mime);
-        let mut effects = vec![Effect::ReadFailed { mime, failure }];
+        let mut effects: Vec<_> = self
+            .read
+            .take()
+            .map(|read| read.result(Err(failure)))
+            .into_iter()
+            .collect();
         effects.extend(self.pump_queue(now));
         effects
     }
@@ -546,23 +700,22 @@ impl Session {
         };
         // 一个 DATA 都没到 = 终端表示「这个表示不可用」（协议正是用它表达不可用），
         // 不是「空粘贴」：空载荷投给 App 只会变成静默无操作或 0 字节的图。
-        let mut effects = if read.data.is_empty() {
-            vec![Effect::ReadFailed {
+        let mut read = read;
+        let data = std::mem::take(&mut read.data);
+        let result = if data.is_empty() {
+            Err(ClipboardFailure::NoRepresentation)
+        } else if read.mime.starts_with("image/") {
+            Ok(ClipboardPayload::Image {
+                bytes: data,
                 mime: read.mime.clone(),
-                failure: ClipboardFailure::NoRepresentation,
-            }]
+                name: None,
+            })
         } else {
-            let payload = if read.mime.starts_with("image/") {
-                ClipboardPayload::Image {
-                    bytes: read.data,
-                    mime: read.mime.clone(),
-                    name: None,
-                }
-            } else {
-                ClipboardPayload::Text(String::from_utf8_lossy(&read.data).into_owned())
-            };
-            vec![Effect::Deliver(payload)]
+            Ok(ClipboardPayload::Text(
+                String::from_utf8_lossy(&data).into_owned(),
+            ))
         };
+        let mut effects = vec![read.result(result)];
         effects.extend(self.pump_queue(now));
         effects
     }
@@ -583,16 +736,22 @@ impl Session {
     }
 
     fn start(&mut self, event: PendingEvent, now: Instant) -> Vec<Effect> {
-        let Some(mime) = choose_mime(&event.mimes) else {
-            tracing::debug!(mimes = ?event.mimes, "clipboard: no usable representation");
-            // 没有读被建立：这条粘贴连开始都没开始，App 侧没有占位符可谈。
-            return vec![Effect::PasteRejected(ClipboardFailure::NoRepresentation)];
+        let (mime, settings) = match event.target {
+            ClipboardTarget::Default => (choose_mime(&event.mimes), None),
+            ClipboardTarget::TextOnly(target) => (choose_text_mime(&event.mimes), Some(target)),
+            ClipboardTarget::Ignore => return Vec::new(),
+        };
+        let Some(mime) = mime else {
+            return rejected(event.target, ClipboardFailure::NoRepresentation)
+                .into_iter()
+                .collect();
         };
         self.reads_started += 1;
         let id = format!("{REQUEST_ID_PREFIX}{}", self.reads_started);
         self.read = Some(ReadState {
             id: id.clone(),
             mime: mime.clone(),
+            settings,
             data: Vec::new(),
             deadline: now + IDLE_TIMEOUT,
             reported: 0,
@@ -612,6 +771,39 @@ impl Session {
     }
 }
 
+impl ReadState {
+    fn result(self, result: Result<ClipboardPayload, ClipboardFailure>) -> Effect {
+        if let Some(target) = self.settings {
+            let text = result.and_then(|payload| match payload {
+                ClipboardPayload::Text(text) => Ok(text.into()),
+                ClipboardPayload::Image { .. } => Err(ClipboardFailure::NoRepresentation),
+            });
+            return Effect::TextInput {
+                target,
+                result: text,
+            };
+        }
+        match result {
+            Ok(payload) => Effect::Deliver(payload),
+            Err(failure) => Effect::ReadFailed {
+                mime: self.mime,
+                failure,
+            },
+        }
+    }
+}
+
+fn rejected(target: ClipboardTarget, failure: ClipboardFailure) -> Option<Effect> {
+    match target {
+        ClipboardTarget::Default => Some(Effect::PasteRejected(failure)),
+        ClipboardTarget::TextOnly(target) => Some(Effect::TextInput {
+            target,
+            result: Err(failure),
+        }),
+        ClipboardTarget::Ignore => None,
+    }
+}
+
 fn failure_for(status: &str) -> ClipboardFailure {
     match status {
         "EPERM" => ClipboardFailure::Denied,
@@ -628,13 +820,22 @@ fn failure_for(status: &str) -> ClipboardFailure {
 /// 起一个协议驱动任务：消费分流层的序列通道，把读回的载荷投进终端事件通道。
 ///
 /// 独立任务的意义：超时 / 等待 / 写出都不占事件循环（UI 永远不会因为终端不回而卡住）。
-pub(crate) fn spawn(sequences: mpsc::Receiver<Sequence>, events: mpsc::Sender<TermEvent>) {
-    spawn_with(sequences, events, write_request);
+pub(crate) fn spawn(
+    sequences: mpsc::Receiver<Sequence>,
+    events: mpsc::Sender<TermEvent>,
+    ordered: bool,
+) {
+    spawn_with(sequences, events, ordered, write_request);
 }
 
 /// [`spawn`] 的测试缝：写出口可注入（单测不该往真 stdout 上写转义序列）。
-fn spawn_with<W>(mut sequences: mpsc::Receiver<Sequence>, events: mpsc::Sender<TermEvent>, write: W)
-where
+fn spawn_with<S, W>(
+    mut sequences: mpsc::Receiver<S>,
+    events: mpsc::Sender<TermEvent>,
+    ordered: bool,
+    write: W,
+) where
+    S: Into<Sequence> + Send + 'static,
     W: Fn(&[u8]) -> io::Result<()> + Send + Sync + 'static,
 {
     tokio::spawn(async move {
@@ -646,7 +847,14 @@ where
                         // 分流层没了（进程收尾）：静默退场。
                         break;
                     };
-                    for effect in session.on_sequence(&raw, Instant::now()) {
+                    let raw = raw.into();
+                    let target = match raw.route {
+                        Some(route) => tokio::time::timeout(IDLE_TIMEOUT, route)
+                            .await.ok().and_then(Result::ok).unwrap_or(ClipboardTarget::Ignore),
+                        None if ordered => ClipboardTarget::Ignore,
+                        None => ClipboardTarget::Default,
+                    };
+                    for effect in session.on_sequence_for(&raw.bytes, target, Instant::now()) {
                         apply(effect, &events, &write).await;
                     }
                 }
@@ -697,6 +905,14 @@ where
                 .send(TermEvent::Clipboard(ClipboardEvent::Delivered(payload)))
                 .await;
         }
+        Effect::TextInput { target, result } => {
+            let _ = events
+                .send(TermEvent::Clipboard(ClipboardEvent::TextInput {
+                    target,
+                    result,
+                }))
+                .await;
+        }
         Effect::ReadFailed { mime, failure } => {
             let _ = events
                 .send(TermEvent::Clipboard(ClipboardEvent::ReadFailed {
@@ -741,39 +957,188 @@ mod tests {
         out
     }
 
+    fn paste_packets(pw: &str, mimes: &[&str]) -> [Vec<u8>; 3] {
+        let pw = b64_encode(pw.as_bytes());
+        [
+            packet(&format!("type=read:status=OK:pw={pw}"), None),
+            packet(
+                &format!("type=read:status=DATA:mime={}:pw={pw}", b64_encode(b".")),
+                Some(mimes.join(" ").as_bytes()),
+            ),
+            packet(&format!("type=read:status=DONE:pw={pw}"), None),
+        ]
+    }
+
     /// 终端发来的 unsolicited paste event（OK + listing + DONE）。
     fn event_triplet(pw: &str, mimes: &[&str], at_ms: u64, s: &mut Session) -> Vec<Effect> {
-        let mut effects = s.on_sequence(
-            &packet(
-                &format!("type=read:status=OK:pw={}", b64_encode(pw.as_bytes())),
-                None,
-            ),
-            at(at_ms),
-        );
-        let listing = if mimes.is_empty() {
-            String::new()
-        } else {
-            format!("{}\n", mimes.join(" "))
+        paste_packets(pw, mimes)
+            .into_iter()
+            .enumerate()
+            .flat_map(|(offset, packet)| s.on_sequence(&packet, at(at_ms + offset as u64)))
+            .collect()
+    }
+
+    #[test]
+    fn canceled_announcement_markers_are_consumed_without_reusing_their_route() {
+        fn marker_text(bytes: &[u8]) -> &str {
+            std::str::from_utf8(bytes)
+                .unwrap()
+                .strip_prefix("\x1b[200~")
+                .unwrap()
+                .strip_suffix("\x1b[201~")
+                .unwrap()
+        }
+
+        let announcements = Announcements::new();
+        let mut canceled_marker = Vec::new();
+        drop(announcements.mark(&mut canceled_marker));
+        let mut live_marker = Vec::new();
+        let mut route = announcements.mark(&mut live_marker);
+
+        assert!(matches!(
+            announcements.decode(marker_text(&canceled_marker)),
+            Some(None)
+        ));
+        assert!(announcements.decode("ordinary bracketed paste").is_none());
+        assert!(matches!(
+            route.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let request = announcements
+            .decode(marker_text(&live_marker))
+            .flatten()
+            .unwrap();
+        let event = TermEvent::ClipboardAnnouncement(request);
+        assert_eq!(format!("{event:?}"), "ClipboardAnnouncement");
+        let TermEvent::ClipboardAnnouncement(request) = event else {
+            unreachable!()
         };
-        effects.extend(s.on_sequence(
-            &packet(
-                &format!(
-                    "type=read:status=DATA:mime={}:pw={}",
-                    b64_encode(b"."),
-                    b64_encode(pw.as_bytes())
-                ),
-                Some(listing.as_bytes()),
-            ),
-            at(at_ms + 1),
+        request.route(ClipboardTarget::Default);
+        assert_eq!(route.try_recv(), Ok(ClipboardTarget::Default));
+        assert!(matches!(
+            announcements.decode(marker_text(&live_marker)),
+            Some(None)
         ));
-        effects.extend(s.on_sequence(
-            &packet(
-                &format!("type=read:status=DONE:pw={}", b64_encode(pw.as_bytes())),
-                None,
-            ),
-            at(at_ms + 2),
-        ));
-        effects
+    }
+
+    #[test]
+    fn incomplete_announcement_reports_timeout_only_to_its_live_input() {
+        let [start, _, done] = paste_packets("fixture", &["text/plain"]);
+        let expires = at(IDLE_TIMEOUT.as_millis() as u64);
+        let mut session = Session::new();
+        let target = TextInputId::new();
+        assert!(
+            session
+                .on_sequence_for(&start, ClipboardTarget::TextOnly(target), at(0))
+                .is_empty()
+        );
+        assert_eq!(
+            session.on_timeout(expires),
+            [Effect::TextInput {
+                target,
+                result: Err(ClipboardFailure::Timeout)
+            }]
+        );
+        assert!(session.on_sequence(&done, expires).is_empty());
+
+        assert!(
+            session
+                .on_sequence_for(&start, ClipboardTarget::Ignore, at(0))
+                .is_empty()
+        );
+        assert!(session.on_timeout(expires).is_empty());
+        assert!(session.deadline().is_none());
+    }
+
+    #[tokio::test]
+    async fn ordered_driver_discards_abandoned_announcements_and_scopes_nontext_rejection() {
+        let (seq_tx, seq_rx) = mpsc::channel::<Sequence>(12);
+        let (ev_tx, mut ev_rx) = mpsc::channel(8);
+        let (write_tx, mut writes) = mpsc::unbounded_channel();
+        spawn_with(seq_rx, ev_tx, true, move |request| {
+            write_tx.send(request.to_vec()).unwrap();
+            Ok(())
+        });
+
+        let (cancel, canceled) = oneshot::channel();
+        drop(cancel);
+        let target = TextInputId::new();
+        let (route, live) = oneshot::channel();
+        route.send(ClipboardTarget::TextOnly(target)).unwrap();
+        for (otp, mimes, route) in [
+            ("canceled", &["text/plain"][..], Some(canceled)),
+            ("missing", &["text/plain"][..], None),
+            ("image only", &["image/png"][..], Some(live)),
+        ] {
+            let [bytes, listing, done] = paste_packets(otp, mimes);
+            seq_tx.send(Sequence { bytes, route }).await.unwrap();
+            seq_tx.send(listing.into()).await.unwrap();
+            seq_tx.send(done.into()).await.unwrap();
+        }
+        drop(seq_tx);
+
+        let rejected = tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+            .await
+            .unwrap();
+        assert!(
+            matches!(rejected, Some(TermEvent::Clipboard(ClipboardEvent::TextInput {
+            target: owner, result: Err(ClipboardFailure::NoRepresentation),
+        })) if owner == target)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), ev_rx.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), writes.recv())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn settings_paste_uses_text_and_keeps_the_target_from_the_first_packet() {
+        let mut session = Session::new();
+        let target = TextInputId::new();
+        let pw = b64_encode(b"fixture-otp");
+        let start = packet(&format!("type=read:status=OK:pw={pw}"), None);
+        assert!(
+            session
+                .on_sequence_for(&start, ClipboardTarget::TextOnly(target), at(0))
+                .is_empty()
+        );
+        let listing = packet(
+            &format!("type=read:status=DATA:mime={}:pw={pw}", b64_encode(b".")),
+            Some(b"image/png text/plain"),
+        );
+        assert!(session.on_sequence(&listing, at(1)).is_empty());
+        let done = packet(&format!("type=read:status=DONE:pw={pw}"), None);
+        assert_eq!(
+            session.on_sequence(&done, at(2)),
+            [Effect::Send(read_request(
+                &pw,
+                "text/plain",
+                false,
+                "wing-paste-1"
+            ))]
+        );
+        let mime = b64_encode(b"text/plain");
+        let data = packet(
+            &format!("type=read:id=wing-paste-1:status=DATA:mime={mime}"),
+            Some(b"token"),
+        );
+        assert!(session.on_sequence(&data, at(3)).is_empty());
+        let done = packet("type=read:id=wing-paste-1:status=DONE", None);
+        assert_eq!(
+            session.on_sequence(&done, at(4)),
+            [Effect::TextInput {
+                target,
+                result: Ok(ClipboardText("token".into()))
+            }]
+        );
     }
 
     fn response(meta: &str, payload: Option<&[u8]>) -> Vec<u8> {
@@ -868,7 +1233,7 @@ mod tests {
             &b"type=read:status=OK:x;!!!"[..], // 坏 base64 负载
             &b"\xff\xfe"[..],                  // 不是 UTF-8
         ] {
-            assert_eq!(Packet::parse(bad), None, "{bad:?}");
+            assert!(Packet::parse(bad).is_none(), "{bad:?}");
         }
     }
 
@@ -1629,7 +1994,7 @@ mod tests {
         let (ev_tx, mut ev_rx) = mpsc::channel(8);
         let written = Arc::new(Mutex::new(Vec::<u8>::new()));
         let sink = Arc::clone(&written);
-        spawn_with(seq_rx, ev_tx, move |bytes| {
+        spawn_with(seq_rx, ev_tx, false, move |bytes| {
             sink.lock().unwrap().extend_from_slice(bytes);
             Ok(())
         });
@@ -1696,7 +2061,7 @@ mod tests {
     async fn driver_reports_failures_as_events() {
         let (seq_tx, seq_rx) = mpsc::channel(8);
         let (ev_tx, mut ev_rx) = mpsc::channel(8);
-        spawn_with(seq_rx, ev_tx, |_| Ok(()));
+        spawn_with(seq_rx, ev_tx, false, |_| Ok(()));
 
         // 完整的 event 三连 → 驱动进入「读在途」。
         seq_tx
@@ -1754,7 +2119,7 @@ mod tests {
         let (ev_tx, mut ev_rx) = mpsc::channel(8);
         let written = Arc::new(Mutex::new(Vec::<u8>::new()));
         let sink = Arc::clone(&written);
-        spawn_with(seq_rx, ev_tx, move |bytes| {
+        spawn_with(seq_rx, ev_tx, false, move |bytes| {
             sink.lock().unwrap().extend_from_slice(bytes);
             Ok(())
         });

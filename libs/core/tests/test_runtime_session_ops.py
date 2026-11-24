@@ -310,7 +310,7 @@ class TestReloadProviderPool:
 
         provider_item = next(i for i in result.items if i.name == "provider")
         assert provider_item.ok is False
-        assert "boom" in provider_item.detail
+        assert provider_item.detail == "RuntimeError"
         # 先建后换：失败不改动池——旧实例未关闭、仍被解析（会话不被钉死）
         assert old._client.is_closed is False
         assert session.agent.model_provider is old

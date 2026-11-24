@@ -174,12 +174,12 @@ impl GatewayClient {
         if let Some(key) = api_key
             && !key.is_empty()
         {
-            request.headers_mut().insert(
-                "Authorization",
+            let mut value: tokio_tungstenite::tungstenite::http::HeaderValue =
                 format!("Bearer {key}")
                     .parse()
-                    .context("API key contains invalid header characters")?,
-            );
+                    .context("API key contains invalid header characters")?;
+            value.set_sensitive(true);
+            request.headers_mut().insert("Authorization", value);
         }
 
         let (ws_stream, _resp) = match tokio_tungstenite::connect_async(request).await {

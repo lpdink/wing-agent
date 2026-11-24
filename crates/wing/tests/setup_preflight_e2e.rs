@@ -162,3 +162,311 @@ async fn usable_config_goes_down_the_normal_startup_chain() {
     );
     let _ = std::fs::remove_dir_all(&home);
 }
+
+#[cfg(unix)]
+mod tui_paste {
+    use super::*;
+    use std::fs::{self, File};
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    use futures_util::SinkExt;
+    use serde_json::{Value, json};
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::WebSocketStream;
+    use tokio_tungstenite::tungstenite::{Message, handshake::derive_accept_key, protocol::Role};
+
+    use crate::common::e2e::wing_command;
+    use crate::common::pty::{openpty_pair, read_written, write_all};
+
+    const INTERFACE_KEY: &str = "fixture-interface-pty-32";
+    const PROVIDER_KEY: &str = "fixture-provider-pty-83";
+
+    fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines()
+            .filter_map(|line| line.split_once(':'))
+            .find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value.trim()))
+    }
+
+    #[derive(Clone)]
+    struct SetupStub {
+        seen: mpsc::UnboundedSender<(&'static str, bool)>,
+        operational: bool,
+        stage: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    async fn serve_setup(mut stream: TcpStream, stub: SetupStub) {
+        use std::sync::atomic::Ordering;
+        let SetupStub {
+            seen,
+            operational,
+            stage,
+        } = stub;
+        let mut buffer = Vec::new();
+        let problem = json!({"path":"provider_token", "kind":"missing_required", "message":"Fixture provider key is required"});
+        while let Some((head, body)) = read_request(&mut stream, &mut buffer).await {
+            let path = head.split_whitespace().nth(1).unwrap_or_default();
+            let auth_ok = header(&head, "authorization")
+                .is_some_and(|value| value.strip_prefix("Bearer ") == Some(INTERFACE_KEY));
+            let mut status = "200 OK";
+            let result = match path {
+                "/api/settings/status" if operational && stage.load(Ordering::SeqCst) > 0 => {
+                    let check = stage.fetch_add(1, Ordering::SeqCst);
+                    let _ = seen.send(("readiness auth", auth_ok));
+                    if !auth_ok || check == 1 {
+                        status = if auth_ok {
+                            "503 Unavailable"
+                        } else {
+                            "401 Unauthorized"
+                        };
+                        json!({"error":"fixture-check"})
+                    } else {
+                        json!({"valid":true,"setup_mode":false,"problems":[]})
+                    }
+                }
+                "/api/settings/status" => {
+                    json!({"valid":false,"setup_mode":!operational,"problems":[problem]})
+                }
+                "/api/settings/get" => {
+                    json!({"values":{},"setup_mode":!operational,"fingerprint":"fixture-base","config_path":"fixture.yaml","problems":[problem]})
+                }
+                "/api/settings/schema" => {
+                    json!({"version":"fixture","config_path":"fixture.yaml","root":{
+                        "key":"config","path":"config","title":"Config","kind":"object","doc":"",
+                        "children":[{"key":"provider_token","path":"provider_token","title":"Provider key","doc":"Fixture key","kind":"secret","secret":true,"required":true}]
+                    }})
+                }
+                "/api/settings/set" => {
+                    let old_key = header(&head, "authorization") == Some("Bearer old-fixture-key");
+                    let matched = old_key
+                        && stage.load(Ordering::SeqCst) == 0
+                        && serde_json::from_slice::<Value>(&body).ok()
+                            == Some(json!({
+                                "base":"fixture-base","document":{"provider_token":PROVIDER_KEY}
+                            }));
+                    if matched {
+                        stage.store(1, Ordering::SeqCst);
+                    }
+                    let _ = seen.send(("provider saved", matched));
+                    json!({"ok":matched,"fingerprint":"saved","problems":[],"setup_mode_exited":matched && !operational,"changed":["provider_token"]})
+                }
+                "/ws" => {
+                    let _ = seen.send(("WS auth", auth_ok));
+                    let key = header(&head, "sec-websocket-key").expect("WebSocket upgrade");
+                    let accept = derive_accept_key(key.as_bytes());
+                    let reply = format!(
+                        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                    );
+                    stream.write_all(reply.as_bytes()).await.unwrap();
+                    let mut ws = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
+                    let _ = ws
+                        .send(Message::Text(
+                            r#"{"type":"connected","client_id":"fixture"}"#.into(),
+                        ))
+                        .await;
+                    let _ = seen.closed().await;
+                    return;
+                }
+                "/api/session/create" => {
+                    let _ = seen.send(("HTTP auth", auth_ok));
+                    json!({"session_id":"fixture","template_name":"test","workspace":null})
+                }
+                _ => json!({}),
+            };
+            let result = result.to_string();
+            let reply = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                result.len(),
+                result
+            );
+            if stream.write_all(reply.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    fn bracketed(text: &str) -> String {
+        format!("\x1b[200~{text}\x1b[201~")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn setup_paste_saves_and_authenticates_with_the_new_interface_key() {
+        verify_setup_auth(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operational_repair_retries_readiness_with_the_rotated_key() {
+        verify_setup_auth(true).await;
+    }
+
+    async fn verify_setup_auth(operational: bool) {
+        let (seen, mut requests) = mpsc::unbounded_channel();
+        let stub = SetupStub {
+            seen,
+            operational,
+            stage: Default::default(),
+        };
+        let tag = if operational {
+            "tui-rotation"
+        } else {
+            "tui-paste"
+        };
+        let (home, port) = start_fake_gateway("wing-setup-e2e", tag, stub, serve_setup).await;
+        fs::create_dir_all(home.join("tui")).unwrap();
+        let interface_path = home.join("tui/config.yaml");
+        fs::write(
+            &interface_path,
+            "api_key: old-fixture-key\ncolors:\n  preset: dark\nrendering:\n  images: off\n",
+        )
+        .unwrap();
+
+        let (master, slave) = openpty_pair();
+        // Both descriptors are owned by this test until transferred to the child.
+        let (master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+        let size = libc::winsize {
+            ws_row: 40,
+            ws_col: 120,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        assert_eq!(
+            unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCSWINSZ, &size) },
+            0
+        );
+        let port = port.to_string();
+        let mut command = wing_command(&["tui", "--host", "127.0.0.1", "--port", &port], &home);
+        command
+            .env("TERM", "xterm-256color")
+            .env(
+                "RUST_LOG",
+                "wing=debug,tungstenite::handshake::client=trace",
+            )
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave.try_clone().unwrap()))
+            .stderr(Stdio::from(slave));
+        // Give crossterm a real controlling terminal for winsize and mode changes.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY.into(), 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut child = command.spawn().unwrap();
+        drop(command);
+        let fd = master.as_raw_fd();
+        let mut output = Vec::new();
+        let mut wait_for = |fragment: &str| {
+            let text = fragment.as_bytes();
+            output.extend(read_written(fd, Duration::from_secs(4), |buf| {
+                buf.windows(text.len()).any(|window| window == text)
+            }));
+            assert!(
+                output.windows(text.len()).any(|window| window == text),
+                "expected setup frame fragment {fragment:?}"
+            );
+        };
+        wait_for("Fixture provider key is required");
+
+        let interface_paste = format!(
+            "/{}\r\r{}",
+            bracketed("api_key\r\n"),
+            bracketed(&format!("{INTERFACE_KEY}\r\n"))
+        );
+        write_all(fd, interface_paste.as_bytes());
+        wait_for(&"•".repeat(INTERFACE_KEY.len()));
+        let provider_paste = format!(
+            "\r/{}\r\r{}\rs",
+            bracketed("provider_token"),
+            bracketed(&format!("{PROVIDER_KEY}\n"))
+        );
+        write_all(fd, provider_paste.as_bytes());
+        let readiness_frame = if operational {
+            // Drain redraws while the wizard handles the save and readiness request.
+            let frame = read_written(fd, Duration::from_millis(800), |_| false);
+            for expected in ["provider saved", "readiness auth"] {
+                let observed = tokio::time::timeout(Duration::from_secs(4), requests.recv())
+                    .await
+                    .unwrap_or_else(|_| panic!("missing fixture request {expected}"));
+                assert_eq!(observed, Some((expected, true)));
+            }
+            write_all(fd, b"s");
+            frame
+        } else {
+            Vec::new()
+        };
+        wait_for("\x1b[?1049l");
+        output.extend(readiness_frame);
+        for expected in [
+            if operational {
+                "readiness auth"
+            } else {
+                "provider saved"
+            },
+            "WS auth",
+            "HTTP auth",
+        ] {
+            let observed = tokio::time::timeout(Duration::from_secs(4), requests.recv())
+                .await
+                .unwrap();
+            assert_eq!(observed, Some((expected, true)));
+        }
+        assert!(
+            fs::read_to_string(&interface_path)
+                .unwrap()
+                .contains(INTERFACE_KEY)
+        );
+        let logs = || -> String {
+            fs::read_dir(home.join("tui/logs"))
+                .unwrap()
+                .flatten()
+                .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+                .collect()
+        };
+        tokio::time::timeout(Duration::from_secs(4), async {
+            while !logs().contains("session created") {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("startup log");
+        // The main TUI can request the cursor position before handling quit keys.
+        let cursor_query = b"\x1b[6n";
+        let mut replies = 0;
+        write_all(fd, b"\x03\x03");
+        let exit = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                output.extend(read_written(fd, Duration::from_millis(50), |_| false));
+                let queries = output
+                    .windows(cursor_query.len())
+                    .filter(|bytes| *bytes == cursor_query)
+                    .count();
+                while replies < queries {
+                    write_all(fd, b"\x1b[1;1R");
+                    replies += 1;
+                }
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("TUI exits normally after setup");
+        assert!(exit.success(), "TUI exit status: {exit}");
+        for key in [INTERFACE_KEY, PROVIDER_KEY] {
+            assert!(
+                !output
+                    .windows(key.len())
+                    .any(|bytes| bytes == key.as_bytes())
+            );
+        }
+        let logs = logs();
+        assert!(!logs.contains(INTERFACE_KEY) && !logs.contains(PROVIDER_KEY));
+        drop(master);
+        drop(requests);
+        fs::remove_dir_all(home).unwrap();
+    }
+}

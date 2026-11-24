@@ -18,7 +18,6 @@ use wing_api_client::models::SettingsGetResponse;
 use wing_api_client::models::SettingsSchemaResponse;
 use wing_api_client::models::SettingsSetResponse;
 
-use super::Focus;
 use super::ScalarKind;
 use super::SettingsAction;
 use super::SettingsPanel;
@@ -57,6 +56,7 @@ fn schema() -> SettingsSchemaResponse {
 
 fn state_with(values: Value, problems: Vec<SettingProblem>) -> SettingsGetResponse {
     SettingsGetResponse {
+        pending_restart_paths: None,
         values,
         secrets: HashMap::new(),
         fingerprint: "fp-1".into(),
@@ -71,7 +71,7 @@ fn state() -> SettingsGetResponse {
 }
 
 fn panel() -> SettingsPanel {
-    SettingsPanel::new(&schema(), state(), None, View::Tree)
+    SettingsPanel::new(&schema(), state(), None, View::Categories)
 }
 
 fn interface_catalog() -> wing_api_client::models::SettingNode {
@@ -90,7 +90,12 @@ fn interface_source() -> InterfaceSource {
 }
 
 fn panel_with_interface() -> SettingsPanel {
-    SettingsPanel::new(&schema(), state(), Some(interface_source()), View::Tree)
+    SettingsPanel::new(
+        &schema(),
+        state(),
+        Some(interface_source()),
+        View::Categories,
+    )
 }
 
 fn press(panel: &mut SettingsPanel, key: KeyEvent) -> SettingsAction {
@@ -151,21 +156,20 @@ fn rows_of_all_groups(panel: &mut SettingsPanel) -> Vec<Row> {
 ///
 /// 走**按键**而不是直接写字段：顺带覆盖 `↑↓` 选组与 `Enter` 进右栏这两条路径。
 fn goto_group(panel: &mut SettingsPanel, index: usize) {
-    // `↑↓` 在右栏是移动行：先回到左栏，否则永远走不到目标组。
-    if panel.focus() == Focus::Items {
-        press_code(panel, KeyCode::Tab);
+    if panel.view() == View::Tree && panel.group_cursor() == index {
+        return;
     }
-    assert_eq!(panel.focus(), Focus::Groups);
+    while panel.view() != View::Categories {
+        press_code(panel, KeyCode::Esc);
+    }
     while panel.group_cursor() < index {
         press_code(panel, KeyCode::Down);
     }
     while panel.group_cursor() > index {
         press_code(panel, KeyCode::Up);
     }
-    if panel.focus() == Focus::Groups {
-        press_code(panel, KeyCode::Enter);
-    }
-    assert_eq!(panel.focus(), Focus::Items);
+    press_code(panel, KeyCode::Enter);
+    assert_eq!(panel.view(), View::Tree);
 }
 
 /// 把左栏挪到某个根的第一个分组（v1 的「切根」在 v2 里 = 选那个根的锚点）。
@@ -247,7 +251,12 @@ fn three_providers() -> Value {
 }
 
 fn panel_with(values: Value) -> SettingsPanel {
-    SettingsPanel::new(&schema(), state_with(values, Vec::new()), None, View::Tree)
+    SettingsPanel::new(
+        &schema(),
+        state_with(values, Vec::new()),
+        None,
+        View::Categories,
+    )
 }
 
 /// 列表项行（不含 `(+ 新增一项)`）的 label，按行序。
@@ -293,7 +302,7 @@ fn opening_lands_on_the_first_anchor_with_its_members_expanded() {
         ["Providers", "Net", "Misc", "Interface"]
     );
     assert_eq!(panel.group_cursor(), 0);
-    assert_eq!(panel.focus(), Focus::Groups, "打开先落在左栏");
+    assert_eq!(panel.view(), View::Categories, "打开先落在左栏");
     // 右栏 = 当前组的成员子树（成员默认展开一层，没有"根头行"）。
     let paths: Vec<&str> = panel.rows().iter().map(|row| row.path.as_str()).collect();
     assert_eq!(paths, vec!["providers", "providers[0]", "providers[]"]);
@@ -305,7 +314,7 @@ fn opening_lands_on_the_first_anchor_with_its_members_expanded() {
             .all(|row| row.root == super::Root::Gateway)
     );
     assert_eq!(panel.rows()[0].depth, 0, "成员行是右栏的第一层");
-    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(panel.view(), View::Categories);
 }
 
 #[test]
@@ -656,7 +665,7 @@ fn readonly_rows_ignore_edit_keys() {
         config_path: "p".into(),
         groups: Vec::new(),
     };
-    let mut panel = SettingsPanel::new(&schema, state(), None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema, state(), None, View::Categories);
     goto(&mut panel, "extra_body");
     assert_eq!(row(&panel, "extra_body").action, RowAction::ReadOnly);
     press_code(&mut panel, KeyCode::Enter);
@@ -713,7 +722,7 @@ fn esc_ladder_level_4_closes_help() {
     press_code(&mut panel, KeyCode::Char('?'));
     assert_eq!(panel.view(), View::Help);
     press_code(&mut panel, KeyCode::Esc);
-    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(panel.view(), View::Categories);
 }
 
 #[test]
@@ -739,9 +748,9 @@ fn esc_ladder_level_5_folds_the_choice_block() {
 fn esc_ladder_level_6_steps_out_of_the_items_column_first() {
     let mut panel = panel();
     goto_group(&mut panel, 0);
-    assert_eq!(panel.focus(), Focus::Items);
+    assert_eq!(panel.view(), View::Tree);
     assert_eq!(press_code(&mut panel, KeyCode::Esc), SettingsAction::None);
-    assert_eq!(panel.focus(), Focus::Groups, "右栏的 Esc 先退回左栏");
+    assert_eq!(panel.view(), View::Categories, "右栏的 Esc 先退回左栏");
 }
 
 #[test]
@@ -749,7 +758,7 @@ fn esc_ladder_level_7_asks_before_discarding_dirty_changes() {
     let mut panel = panel();
     edit_port(&mut panel, "9");
     press_code(&mut panel, KeyCode::Esc); // 右栏 → 左栏
-    assert_eq!(panel.focus(), Focus::Groups);
+    assert_eq!(panel.view(), View::Categories);
     assert!(panel.prompt().is_none(), "还没到关面板那一级");
     press_code(&mut panel, KeyCode::Esc);
     assert_eq!(panel.prompt().unwrap().kind, PromptKind::Confirm);
@@ -926,7 +935,7 @@ fn nullable_enum_offers_an_unset_row_that_writes_null() {
         config_path: "p".into(),
         groups: Vec::new(),
     };
-    let mut panel = SettingsPanel::new(&schema, state(), None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema, state(), None, View::Categories);
     goto(&mut panel, "providers");
     press_code(&mut panel, KeyCode::Right);
     goto(&mut panel, "providers[0]");
@@ -1251,7 +1260,7 @@ fn add_row_is_absent_at_max_items_so_add_does_nothing() {
         config_path: "p".into(),
         groups: Vec::new(),
     };
-    let mut panel = SettingsPanel::new(&schema, state(), None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema, state(), None, View::Categories);
     goto(&mut panel, "tools");
     press_code(&mut panel, KeyCode::Right);
     assert!(!panel.rows().iter().any(|row| row.path == "tools[]"));
@@ -1416,7 +1425,7 @@ fn search_shows_direct_children_of_a_matching_structure_node() {
         config_path: "p".into(),
         groups: Vec::new(),
     };
-    let mut panel = SettingsPanel::new(&schema, state(), None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema, state(), None, View::Categories);
     press_code(&mut panel, KeyCode::Char('/'));
     type_text(&mut panel, "zzz-unique");
     assert!(panel.rows().iter().any(|row| row.path == "providers"));
@@ -1608,11 +1617,11 @@ fn enter_on_a_document_level_problem_does_nothing() {
 fn problems_view_escape_and_p_return_to_the_tree_and_slash_starts_search() {
     let mut panel = SettingsPanel::new(&schema(), state(), None, View::Problems);
     press_code(&mut panel, KeyCode::Esc);
-    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(panel.view(), View::Categories);
     press_code(&mut panel, KeyCode::Char('p'));
     assert_eq!(panel.view(), View::Problems);
     press_code(&mut panel, KeyCode::Char('p'));
-    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(panel.view(), View::Categories);
     press_code(&mut panel, KeyCode::Char('p'));
     press_code(&mut panel, KeyCode::Char('/'));
     assert_eq!(panel.view(), View::Tree);
@@ -1843,7 +1852,7 @@ fn ctrl_r_is_accepted_only_when_a_restart_is_pending() {
     assert!(!panel.footer_hint().contains("Ctrl+R"));
     // 一次带 restart_required 的保存回执之后，键才生效、才出现在键位栏。
     mark_restart_pending(&mut panel);
-    assert!(panel.footer_hint().contains("Ctrl+R 立即重启"));
+    assert!(panel.footer_hint().contains("Ctrl+R 重启网关"));
     assert_eq!(press(&mut panel, ctrl('r')), SettingsAction::RestartGateway);
 }
 
@@ -1866,7 +1875,13 @@ fn ctrl_r_asks_before_discarding_dirty_changes() {
 /// 灌一次「带 restart_required」的保存回执（Ctrl+R 的前提）。
 fn mark_restart_pending(panel: &mut SettingsPanel) {
     let mut response = ok_response(Vec::new());
-    response.restart_required = vec!["gateway.port".into()];
+    response.reload = Some(wing_api_client::models::ReloadResponse {
+        diagnostics_redacted: true,
+        ok: true,
+        results: vec![],
+        pending_restart_paths: Some(vec!["gateway.port".into()]),
+        new_session_defaults_changed: false,
+    });
     panel.apply_save(super::SaveOutcome {
         gateway: Some(response),
         interface_ok: None,
@@ -1904,13 +1919,19 @@ fn restart_required_is_tracked_from_the_last_save() {
     let mut panel = panel();
     edit_port(&mut panel, "8080");
     let mut response = ok_response(Vec::new());
-    response.restart_required = vec!["gateway.port".into()];
+    response.reload = Some(wing_api_client::models::ReloadResponse {
+        diagnostics_redacted: true,
+        ok: true,
+        results: vec![],
+        pending_restart_paths: Some(vec!["gateway.port".into()]),
+        new_session_defaults_changed: false,
+    });
     panel.apply_save(super::SaveOutcome {
         gateway: Some(response),
         interface_ok: None,
     });
     assert_eq!(panel.restart_required(), &["gateway.port".to_string()]);
-    assert!(panel.footer_hint().contains("保存"));
+    assert!(!panel.footer_hint().contains("s 保存"));
 }
 
 #[test]
@@ -1932,15 +1953,13 @@ fn stale_fingerprint_marks_the_banner_and_a_matching_one_clears_it() {
 // ── Interface 根（D2 / D4） ─────────────────────────────────
 
 #[test]
-fn tab_switches_columns_and_the_anchors_cover_both_roots() {
+fn tab_on_categories_preserves_navigation_to_both_roots() {
     let mut panel = panel_with_interface();
-    assert_eq!(panel.focus(), Focus::Groups);
     press_code(&mut panel, KeyCode::Tab);
-    assert_eq!(panel.focus(), Focus::Items, "Tab 进右栏");
+    assert_eq!(panel.view(), View::Categories);
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.view(), View::Tree);
     assert_eq!(panel.rows()[panel.cursor()].root, super::Root::Gateway);
-    press_code(&mut panel, KeyCode::Tab);
-    assert_eq!(panel.focus(), Focus::Groups, "再按回左栏");
-    // Interface 是最后一个锚点（v1 的"另一个根"在 v2 里就是一组）。
     goto_title(&mut panel, "Interface");
     assert_eq!(panel.rows()[panel.cursor()].root, super::Root::Interface);
     assert!(panel.rows().iter().any(|row| row.path == "colors"));
@@ -1960,7 +1979,7 @@ fn anchors_come_from_the_declaration_not_from_hardcoded_names() {
         )],
         root: catalog,
     };
-    let panel = SettingsPanel::new(&schema, state(), None, View::Tree);
+    let panel = SettingsPanel::new(&schema, state(), None, View::Categories);
     assert_eq!(panel.anchors().len(), 1);
     assert_eq!(panel.anchors()[0].title, "Everything");
     let paths: Vec<&str> = panel.rows().iter().map(|row| row.path.as_str()).collect();
@@ -1980,7 +1999,7 @@ fn an_old_gateway_without_groups_still_gets_anchors() {
         groups: Vec::new(),
         root: catalog,
     };
-    let panel = SettingsPanel::new(&schema, state(), None, View::Tree);
+    let panel = SettingsPanel::new(&schema, state(), None, View::Categories);
     assert_eq!(
         panel
             .anchors()
@@ -2055,7 +2074,7 @@ fn delete_confirm_prompt_shows_consequences() {
         config_path: "p".into(),
         groups: Vec::new(),
     };
-    let mut panel = SettingsPanel::new(&schema, state(), None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema, state(), None, View::Categories);
     goto(&mut panel, "providers");
     press_code(&mut panel, KeyCode::Right);
     goto(&mut panel, "providers[0]");
@@ -2193,7 +2212,7 @@ fn every_row_action_variant_is_reachable_from_the_tree() {
         config_path: "p".into(),
         groups: Vec::new(),
     };
-    let mut panel = SettingsPanel::new(&schema, state(), None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema, state(), None, View::Categories);
     goto(&mut panel, "providers");
     press_code(&mut panel, KeyCode::Right);
     goto(&mut panel, "providers[0]");
@@ -2287,14 +2306,14 @@ fn arrow_keys_on_a_leaf_row_jump_to_the_parent() {
 #[test]
 fn footer_hint_reflects_the_active_mode() {
     let mut panel = panel();
-    assert!(panel.footer_hint().contains("保存"));
+    assert!(!panel.footer_hint().contains("s 保存"));
     assert!(panel.footer_hint().contains("Esc 关闭"));
     goto(&mut panel, "gateway");
     press_code(&mut panel, KeyCode::Char('?'));
-    assert!(panel.footer_hint().contains("关闭帮助"));
+    assert!(panel.footer_hint().contains("Esc 返回"));
     press_code(&mut panel, KeyCode::Esc);
     press_code(&mut panel, KeyCode::Char('/'));
-    assert!(panel.footer_hint().contains("命中"));
+    assert!(panel.footer_hint().contains("Enter 定位"));
     press_code(&mut panel, KeyCode::Esc);
     goto(&mut panel, "gateway");
     press_code(&mut panel, KeyCode::Right);
@@ -2306,7 +2325,7 @@ fn footer_hint_reflects_the_active_mode() {
     assert_eq!(panel.footer_hint(), "Enter 确认 · Esc 取消");
     press_code(&mut panel, KeyCode::Esc);
     press_code(&mut panel, KeyCode::Char('p'));
-    assert!(panel.footer_hint().contains("返回树"));
+    assert!(panel.footer_hint().contains("Esc 返回"));
 }
 
 #[test]
@@ -2341,8 +2360,12 @@ fn cursor_search_helpers_do_not_panic_on_empty_catalogs() {
         config_path: "p".into(),
         groups: Vec::new(),
     };
-    let mut panel =
-        SettingsPanel::new(&schema, state_with(json!({}), Vec::new()), None, View::Tree);
+    let mut panel = SettingsPanel::new(
+        &schema,
+        state_with(json!({}), Vec::new()),
+        None,
+        View::Categories,
+    );
     assert!(panel.rows().is_empty(), "空目录 → 空右栏");
     assert!(panel.anchors().is_empty(), "没有顶层键就没有锚点");
     press_code(&mut panel, KeyCode::Down);
@@ -2369,7 +2392,7 @@ fn interface_secret_editing_masks_the_buffer_and_previews() {
             catalog,
             doc: json!({"api_key": "sk-0123456789"}),
         }),
-        View::Tree,
+        View::Categories,
     );
     goto_root(&mut panel, super::Root::Interface);
     press_code(&mut panel, KeyCode::Right);
@@ -2473,7 +2496,7 @@ fn state_with_secret_set() -> SettingsGetResponse {
 fn unedited_secret_null_is_echoed_back_in_the_save_document() {
     // 契约红线：`null` = 保留磁盘现值，保存时必须**原样回传**。
     // 丢掉这个键 = 清空密钥 = 用户下一次调用 401。
-    let mut panel = SettingsPanel::new(&schema(), state_with_secret_set(), None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema(), state_with_secret_set(), None, View::Categories);
     goto(&mut panel, "providers");
     press_code(&mut panel, KeyCode::Right);
     goto(&mut panel, "providers[0]");
@@ -2535,7 +2558,7 @@ fn an_absent_secret_stays_absent_in_the_save_document() {
 fn problems_view_left_returns_to_the_tree() {
     let mut panel = SettingsPanel::new(&schema(), state(), None, View::Problems);
     assert_eq!(press_code(&mut panel, KeyCode::Left), SettingsAction::None);
-    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(panel.view(), View::Categories);
 }
 
 #[test]
@@ -2558,19 +2581,16 @@ fn problems_view_right_jumps_to_the_row_like_enter() {
 }
 
 #[test]
-fn problems_view_tab_switches_columns_and_enter_opens_the_group() {
+fn tab_keeps_the_problem_list_and_escape_returns_to_categories() {
     let mut panel =
         SettingsPanel::new(&schema(), state(), Some(interface_source()), View::Problems);
-    assert_eq!(panel.focus(), Focus::Items, "问题清单首屏的主角是右栏");
     press_code(&mut panel, KeyCode::Tab);
-    assert_eq!(panel.focus(), Focus::Groups);
-    // 左栏选到 Interface 组，Enter 回到树视图并落在那一组。
+    assert_eq!(panel.view(), View::Problems);
+    press_code(&mut panel, KeyCode::Esc);
+    assert_eq!(panel.view(), View::Categories);
     goto_title(&mut panel, "Interface");
-    press_code(&mut panel, KeyCode::Tab);
-    press_code(&mut panel, KeyCode::Enter);
     assert_eq!(panel.view(), View::Tree);
     assert_eq!(panel.group().unwrap().root, super::Root::Interface);
-    assert_eq!(panel.focus(), Focus::Items);
 }
 
 #[test]
@@ -2665,8 +2685,12 @@ fn unchanged_nullable_field_does_not_write_an_explicit_null() {
         config_path: "p".into(),
         groups: Vec::new(),
     };
-    let mut panel =
-        SettingsPanel::new(&schema, state_with(json!({}), Vec::new()), None, View::Tree);
+    let mut panel = SettingsPanel::new(
+        &schema,
+        state_with(json!({}), Vec::new()),
+        None,
+        View::Categories,
+    );
     goto(&mut panel, "theme");
     press_code(&mut panel, KeyCode::Enter);
     assert_eq!(panel.edit_state().unwrap().visible_buffer(), "");
@@ -2679,7 +2703,7 @@ fn unchanged_nullable_field_does_not_write_an_explicit_null() {
 fn a_successful_save_that_exits_setup_mode_clears_the_flag() {
     let mut setup = state();
     setup.setup_mode = true;
-    let mut panel = SettingsPanel::new(&schema(), setup, None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema(), setup, None, View::Categories);
     assert!(panel.setup_mode());
     let mut response = ok_response(Vec::new());
     response.setup_mode_exited = true;
@@ -2691,7 +2715,7 @@ fn a_successful_save_that_exits_setup_mode_clears_the_flag() {
     // 不含 exited 的回执不动这个标记。
     let mut setup = state();
     setup.setup_mode = true;
-    let mut panel = SettingsPanel::new(&schema(), setup, None, View::Tree);
+    let mut panel = SettingsPanel::new(&schema(), setup, None, View::Categories);
     panel.apply_save(super::SaveOutcome {
         gateway: Some(ok_response(Vec::new())),
         interface_ok: None,
@@ -2699,32 +2723,32 @@ fn a_successful_save_that_exits_setup_mode_clears_the_flag() {
     assert!(panel.setup_mode());
 }
 
-// ── v2：双栏（左栏锚点 / 右栏设置项）──────────────────────────
+// ── 分类与设置项 ─────────────────────────────────────────
 
 #[test]
-fn the_left_column_selects_groups_and_enter_opens_the_right_one() {
+fn categories_and_items_use_the_same_navigation_keys() {
     let mut panel = panel();
-    assert_eq!(panel.focus(), Focus::Groups);
+    assert_eq!(panel.view(), View::Categories);
     assert_eq!(panel.group().unwrap().title, "Providers");
     // ↑↓ 选分组：右栏跟着换，光标回到首行。
     goto(&mut panel, "providers[0]");
     assert!(panel.cursor() > 0, "右栏的光标已经挪过");
-    press_code(&mut panel, KeyCode::Tab); // 回左栏
+    press_code(&mut panel, KeyCode::Esc); // 回左栏
     press_code(&mut panel, KeyCode::Down);
     assert_eq!(panel.group().unwrap().title, "Net");
-    assert_eq!(panel.cursor(), 0, "换组 = 右栏回到首行");
-    assert!(panel.rows().iter().any(|row| row.path == "gateway"));
     // Enter 进右栏；→ 同样能进。
     press_code(&mut panel, KeyCode::Enter);
-    assert_eq!(panel.focus(), Focus::Items);
-    press_code(&mut panel, KeyCode::Tab);
-    assert_eq!(panel.focus(), Focus::Groups);
+    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(panel.cursor(), 0);
+    assert!(panel.rows().iter().any(|row| row.path == "gateway"));
+    press_code(&mut panel, KeyCode::Esc);
+    assert_eq!(panel.view(), View::Categories);
     press_code(&mut panel, KeyCode::Right);
-    assert_eq!(panel.focus(), Focus::Items, "→ 也进右栏");
+    assert_eq!(panel.view(), View::Tree, "→ 也进右栏");
     // 左栏的 ← 无处可去（不产生动作、也不换焦点）。
-    press_code(&mut panel, KeyCode::Tab);
+    press_code(&mut panel, KeyCode::Esc);
     assert_eq!(press_code(&mut panel, KeyCode::Left), SettingsAction::None);
-    assert_eq!(panel.focus(), Focus::Groups);
+    assert_eq!(panel.view(), View::Categories);
     // Home / End 跳首尾组。
     press_code(&mut panel, KeyCode::End);
     assert_eq!(panel.group().unwrap().title, "Misc");
@@ -2736,9 +2760,9 @@ fn the_left_column_selects_groups_and_enter_opens_the_right_one() {
 }
 
 #[test]
-fn paging_in_the_left_column_uses_the_anchor_viewport() {
+fn paging_categories_uses_the_list_viewport() {
     let mut panel = panel();
-    panel.set_anchor_viewport_rows(2);
+    panel.set_viewport_rows(2);
     press_code(&mut panel, KeyCode::PageDown);
     assert_eq!(panel.group_cursor(), 2, "翻页步长 = 左栏可见行数");
     press_code(&mut panel, KeyCode::PageUp);
@@ -2746,25 +2770,25 @@ fn paging_in_the_left_column_uses_the_anchor_viewport() {
 }
 
 #[test]
-fn left_from_a_top_level_row_steps_out_to_the_left_column() {
+fn left_from_a_top_level_row_returns_to_categories() {
     let mut panel = panel();
     goto(&mut panel, "providers");
-    assert_eq!(panel.focus(), Focus::Items);
+    assert_eq!(panel.view(), View::Tree);
     // `providers` 是展开的（进组即展开）→ ← 先折叠它。
     press_code(&mut panel, KeyCode::Left);
     assert!(!panel.rows().iter().any(|row| row.path == "providers[0]"));
-    assert_eq!(panel.focus(), Focus::Items, "还有事可做就不退栏");
+    assert_eq!(panel.view(), View::Tree, "还有事可做就不退栏");
     // 再按 ← ：无处可去（depth 0 且已折叠）→ 回左栏。
     press_code(&mut panel, KeyCode::Left);
-    assert_eq!(panel.focus(), Focus::Groups);
+    assert_eq!(panel.view(), View::Categories);
 }
 
 #[test]
-fn esc_steps_out_one_column_at_a_time_and_only_then_closes() {
+fn escape_returns_to_categories_before_closing() {
     let mut panel = panel();
     goto(&mut panel, "providers");
     assert_eq!(press_code(&mut panel, KeyCode::Esc), SettingsAction::None);
-    assert_eq!(panel.focus(), Focus::Groups, "第一级：回左栏");
+    assert_eq!(panel.view(), View::Categories, "第一级：回左栏");
     assert_eq!(
         press_code(&mut panel, KeyCode::Esc),
         SettingsAction::Close { discard: false },
@@ -2802,14 +2826,7 @@ fn anchor_badges_report_dirty_problems_and_search_hits() {
         views.iter().find(|v| v.title == "Net").unwrap().hits,
         Some(0)
     );
-    assert!(
-        views
-            .iter()
-            .find(|v| v.title == "Providers")
-            .unwrap()
-            .selected,
-        "自动跳到有命中的组"
-    );
+    assert_eq!(cursor_path(&panel), "providers");
     press_code(&mut panel, KeyCode::Esc);
     assert!(panel.anchor_views().iter().all(|v| v.hits.is_none()));
 }
@@ -2831,7 +2848,7 @@ fn anchor_badges_count_the_problems_of_their_own_group() {
             hint: None,
         },
     ];
-    let panel = SettingsPanel::new(&schema(), state, None, View::Tree);
+    let panel = SettingsPanel::new(&schema(), state, None, View::Categories);
     let views = panel.anchor_views();
     assert_eq!(views.iter().find(|v| v.title == "Net").unwrap().problems, 1);
     assert_eq!(
@@ -2849,9 +2866,9 @@ fn search_follows_the_hits_into_another_group_and_esc_returns() {
     press_code(&mut panel, KeyCode::Char('/'));
     // `max_input_lines` 不存在；用 tools 组里的键：命中在 Misc 组。
     type_text(&mut panel, "tools");
-    assert_eq!(panel.group().unwrap().title, "Misc", "跳到有命中的组");
+    assert_eq!(cursor_path(&panel), "tools");
     assert!(panel.rows().iter().any(|row| row.path == "tools"));
-    assert_eq!(panel.focus(), Focus::Items, "搜索结果在右栏");
+    assert_eq!(panel.view(), View::Tree, "搜索结果在右栏");
     press_code(&mut panel, KeyCode::Esc);
     assert_eq!(
         panel.group().unwrap().title,
@@ -2884,12 +2901,12 @@ fn the_problem_list_jumps_to_the_group_that_owns_the_path() {
         hint: None,
     }];
     let mut panel = SettingsPanel::new(&schema(), state, None, View::Problems);
-    assert_eq!(panel.focus(), Focus::Items, "问题清单首屏焦点在右栏");
+    assert_eq!(panel.view(), View::Problems);
     assert_eq!(panel.group().unwrap().title, "Providers", "还没跳");
     assert_eq!(press_code(&mut panel, KeyCode::Enter), SettingsAction::None);
     assert_eq!(panel.view(), View::Tree);
     assert_eq!(panel.group().unwrap().title, "Misc", "跳到问题所在的组");
-    assert_eq!(panel.focus(), Focus::Items);
+    assert_eq!(panel.view(), View::Tree);
     assert_eq!(cursor_path(&panel), "extra_body");
 }
 
@@ -2924,7 +2941,7 @@ fn injecting_the_interface_root_appends_its_anchor_without_moving_the_cursor() {
     assert_eq!(panel.group().unwrap().id, "net", "当前组不动");
     assert_eq!(panel.anchors().last().unwrap().title, "Interface");
     // 走到最后一个锚点 = Interface 根。
-    press_code(&mut panel, KeyCode::Tab);
+    press_code(&mut panel, KeyCode::Esc);
     press_code(&mut panel, KeyCode::End);
     press_code(&mut panel, KeyCode::Enter);
     assert_eq!(panel.group().unwrap().root, super::Root::Interface);
@@ -2937,7 +2954,7 @@ fn injecting_the_interface_root_appends_its_anchor_without_moving_the_cursor() {
 }
 
 #[test]
-fn editing_in_the_right_column_still_produces_the_same_actions() {
+fn editing_in_a_category_keeps_preview_and_save_actions() {
     // v2 只改了导航；编辑/保存/预览的产出必须一字不差（Interface 实时预览是最容易漏的）。
     let mut panel = panel_with_interface();
     goto_title(&mut panel, "Interface");
@@ -2965,24 +2982,17 @@ fn editing_in_the_right_column_still_produces_the_same_actions() {
 }
 
 #[test]
-fn the_footer_hint_follows_the_focused_column() {
+fn the_footer_describes_the_current_level_and_action() {
     let mut panel = panel();
-    assert!(
-        panel.footer_hint().contains("↑↓ 选分组"),
-        "{}",
-        panel.footer_hint()
-    );
-    assert!(panel.footer_hint().contains("Enter 进右栏"));
-    assert!(
-        panel.footer_hint().contains("Esc 关闭"),
-        "左栏的 Esc 是关闭"
-    );
+    assert!(panel.footer_hint().contains("Enter 进入"));
+    assert!(panel.footer_hint().contains("Esc 关闭"));
     press_code(&mut panel, KeyCode::Enter);
-    let hint = panel.footer_hint();
-    assert!(hint.contains("↑↓ 移动"), "{hint}");
-    assert!(hint.contains("Tab/←→ 切栏"), "{hint}");
-    assert!(hint.contains("Esc 回左栏"), "{hint}");
-    assert!(!hint.contains("切根"), "v1 的切根键位已消失：{hint}");
+    assert!(panel.footer_hint().contains("Enter 展开/折叠"));
+    assert!(panel.footer_hint().contains("Esc 返回"));
+    press_code(&mut panel, KeyCode::Char('/'));
+    type_text(&mut panel, "auth.enabled");
+    press_code(&mut panel, KeyCode::Enter);
+    assert!(panel.footer_hint().contains("Tab 切换"));
 }
 
 #[test]
@@ -2996,66 +3006,424 @@ fn a_reload_keeps_both_the_group_and_the_row_under_the_cursor() {
 }
 
 #[test]
-fn an_invisible_left_column_takes_focus_esc_and_tab_with_it() {
-    // 窄卡片：08 只画右栏，每帧用 set_anchors_visible(false) 告知。
-    let mut panel = panel();
-    assert_eq!(panel.focus(), Focus::Groups, "开面板时焦点默认在左栏");
-    panel.set_anchors_visible(false);
-    assert_eq!(panel.focus(), Focus::Items, "左栏不存在 ⇒ 焦点被收回右栏");
-    assert!(
-        !panel.footer_hint().contains("切栏"),
-        "{}",
-        panel.footer_hint()
-    );
-
-    // `Tab` 无处可切。
+fn tab_edits_boolean_and_enum_rows_but_never_during_search() {
+    let mut panel = provider_panel();
+    goto(&mut panel, "providers[0].protocol");
     press_code(&mut panel, KeyCode::Tab);
-    assert_eq!(panel.focus(), Focus::Items);
-
-    // 右栏首行就是 depth 0 的 `providers`：`←` 先折叠它，再按本该退左栏 —— 这里无处可退。
-    assert_eq!(cursor_path(&panel), "providers");
-    press_code(&mut panel, KeyCode::Left);
-    assert!(
-        !panel.rows().iter().any(|row| row.path == "providers[0]"),
-        "折叠了"
-    );
-    press_code(&mut panel, KeyCode::Left);
-    assert_eq!(panel.focus(), Focus::Items, "不退到一个看不见的栏");
-
-    // `Esc` 直接走放弃改动 / 关闭那两级。
     assert_eq!(
-        press_code(&mut panel, KeyCode::Esc),
-        SettingsAction::Close { discard: false }
+        panel.current_row().unwrap().value,
+        ValueText::Text("anthropic".into())
+    );
+    press_code(&mut panel, KeyCode::Char('/'));
+    type_text(&mut panel, "protocol");
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(panel.search_query(), Some("protocol"));
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(
+        panel.current_row().unwrap().value,
+        ValueText::Text("anthropic".into())
     );
 
-    // 脏面板仍然是二次确认，不会一按就把改动丢了。跨组导航只能靠搜索（左栏不可见），
-    // 这条路径本身就是 v2 的：搜索会把焦点放进右栏并跳到有命中的组。
-    let mut panel = panel_with(json!({}));
-    panel.set_anchors_visible(false);
+    let mut panel = self::panel();
     press_code(&mut panel, KeyCode::Char('/'));
-    type_text(&mut panel, "port");
-    assert_eq!(panel.group().unwrap().id, "net", "搜索跳到了那一组");
-    assert_eq!(panel.focus(), Focus::Items, "搜索把焦点放进右栏");
-    // 搜索结果里挪到 gateway.port（`goto` 助手会经左栏换组，这里左栏不存在）。
-    while cursor_path(&panel) != "gateway.port" {
-        press_code(&mut panel, KeyCode::Down);
-    }
-    // 搜索态下 `Enter` 的语义是"退出搜索、光标留在命中行"，再按一次才进编辑器。
+    type_text(&mut panel, "auth.enabled");
     press_code(&mut panel, KeyCode::Enter);
-    assert!(panel.search_query().is_none(), "第一次 Enter 退出搜索");
-    assert_eq!(cursor_path(&panel), "gateway.port", "光标留在命中行");
+    let before = panel.current_row().unwrap().value.clone();
+    press_code(&mut panel, KeyCode::Tab);
+    assert_ne!(panel.current_row().unwrap().value, before);
+}
+
+fn mixed_model_panel() -> SettingsPanel {
+    let mut schema = schema();
+    schema.root = fx::mixed_model_catalog();
+    schema.groups.clear();
+    SettingsPanel::new(
+        &schema,
+        state_with(fx::mixed_model_values(), Vec::new()),
+        None,
+        View::Categories,
+    )
+}
+
+fn model_doc(panel: &SettingsPanel) -> &Value {
+    panel
+        .doc
+        .value(super::Root::Gateway, "providers[0].models")
+        .unwrap()
+}
+
+fn search(panel: &mut SettingsPanel, query: &str) {
+    press_code(panel, KeyCode::Char('/'));
+    type_text(panel, query);
+}
+
+#[test]
+fn image_input_uses_the_same_rows_for_both_existing_model_shapes() {
+    let mut panel = mixed_model_panel();
+    assert!(panel.problems().is_empty(), "{:?}", panel.problems());
+    let baseline = model_doc(&panel).clone();
+    search(&mut panel, "Image input");
+    let switches = panel
+        .rows()
+        .iter()
+        .filter(|row| row.label == "Image input")
+        .collect::<Vec<_>>();
+    assert_eq!(switches.len(), 3);
+    assert_eq!(switches[0].value, ValueText::Default("disabled".into()));
+    assert_eq!(switches[1].value, ValueText::Text("enabled".into()));
+    let labels = panel
+        .rows()
+        .iter()
+        .map(|row| row.label.as_str())
+        .collect::<Vec<_>>();
+    assert!(labels.contains(&"legacy/model"));
+    assert!(labels.contains(&"Friendly"));
+    assert_eq!(model_doc(&panel), &baseline);
+
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(
+        model_doc(&panel)[0],
+        json!({"name": "legacy/model", "capabilities": {"vision": true}})
+    );
+    assert!(panel.problems().is_empty(), "{:?}", panel.problems());
+    assert_eq!(model_doc(&panel)[1], baseline[1]);
+    assert_eq!(model_doc(&panel)[2], baseline[2]);
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(model_doc(&panel), &baseline);
+    assert_eq!(panel.dirty_count(), 0);
+    assert!(panel.problems().is_empty(), "{:?}", panel.problems());
+
+    goto(&mut panel, "providers[0].models[1]");
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, "providers[0].models[1].capabilities");
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, "providers[0].models[1].capabilities.vision");
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(model_doc(&panel)[1]["capabilities"]["vision"], json!(false));
+    assert_eq!(model_doc(&panel)[1]["id"], "chosen");
+    assert_eq!(model_doc(&panel)[1]["name"], "upstream");
+    panel.apply_save(super::SaveOutcome {
+        gateway: Some(ok_response(Vec::new())),
+        interface_ok: None,
+    });
+    assert!(panel.problems().is_empty(), "{:?}", panel.problems());
+}
+
+#[test]
+fn model_name_noop_and_unrelated_save_keep_legacy_entries_as_strings() {
+    let mut panel = mixed_model_panel();
+    let baseline = model_doc(&panel).clone();
+    search(&mut panel, "Model name");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.edit_state().unwrap().visible_buffer(), "legacy/model");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.dirty_count(), 0);
+    search(&mut panel, "port");
+    press_code(&mut panel, KeyCode::Enter);
     press_code(&mut panel, KeyCode::Enter);
     press(&mut panel, ctrl('u'));
-    type_text(&mut panel, "1234");
+    type_text(&mut panel, "81");
     press_code(&mut panel, KeyCode::Enter);
-    assert!(panel.dirty_count() > 0, "改动落地");
-    assert_eq!(press_code(&mut panel, KeyCode::Esc), SettingsAction::None);
-    assert!(panel.pending.is_some(), "脏 ⇒ 二次确认");
+    let SettingsAction::Save { gateway, .. } = press_code(&mut panel, KeyCode::Char('s')) else {
+        panic!("port change must be saved");
+    };
+    assert_eq!(gateway["port"], 81);
+    assert_eq!(gateway["providers"][0]["models"], baseline);
+}
 
-    // 左栏回来了 ⇒ 焦点语义恢复（`Esc` 先退一栏，而不是直接弹放弃确认）。
-    panel.pending = None;
-    panel.set_anchors_visible(true);
-    assert_eq!(panel.focus(), Focus::Items);
-    assert_eq!(press_code(&mut panel, KeyCode::Esc), SettingsAction::None);
-    assert_eq!(panel.focus(), Focus::Groups, "左栏可见时 Esc 先退一栏");
+#[test]
+fn adding_a_model_opens_its_name_editor_without_a_variant_prompt() {
+    let mut panel = mixed_model_panel();
+    search(&mut panel, "providers[].models");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Char('a'));
+    assert!(panel.prompt().is_none());
+    let edit = panel.edit_state().expect("the new model name editor");
+    assert_eq!(edit.path(), "providers[0].models[3].name");
+    type_text(&mut panel, "new/model");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(model_doc(&panel)[3], json!({"name": "new/model"}));
+}
+
+#[test]
+fn a_real_missing_object_name_still_jumps_to_model_name() {
+    let mut schema = schema();
+    schema.root = fx::mixed_model_catalog();
+    schema.groups.clear();
+    let mut values = fx::mixed_model_values();
+    values["providers"][0]["models"][1] = json!({"id": "missing-name"});
+    let mut panel = SettingsPanel::new(
+        &schema,
+        state_with(values, Vec::new()),
+        None,
+        View::Problems,
+    );
+    assert_eq!(panel.problems().len(), 1, "{:?}", panel.problems());
+    assert_eq!(
+        panel.problems()[0].path.as_deref(),
+        Some("providers[0].models[1].name")
+    );
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.current_row().unwrap().label, "Model name");
+    assert_eq!(
+        panel.current_row().unwrap().value,
+        ValueText::Text("(required)".into())
+    );
+}
+
+#[test]
+fn renaming_and_reverting_a_moved_legacy_model_preserves_its_short_form() {
+    let mut panel = mixed_model_panel();
+    let object = model_doc(&panel)[1].clone();
+    search(&mut panel, "Model name");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Char('d'));
+    assert!(
+        panel.prompt().is_none(),
+        "the virtual required name cannot be cleared"
+    );
+    press_code(&mut panel, KeyCode::Enter);
+    press(&mut panel, ctrl('u'));
+    type_text(&mut panel, "renamed");
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(model_doc(&panel)[0], "renamed");
+    search(&mut panel, "Image input");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Tab);
+    goto(&mut panel, "providers[0].models[0]");
+    press_code(&mut panel, KeyCode::Char('J'));
+    assert_eq!(model_doc(&panel)[0], object);
+    goto(&mut panel, "providers[0].models[1].capabilities.vision");
+    press_code(&mut panel, KeyCode::Char('r'));
+    assert_eq!(model_doc(&panel)[1], "renamed");
+    assert!(panel.is_dirty(super::Root::Gateway, "providers[0].models[1].name"));
+    assert!(!panel.is_dirty(
+        super::Root::Gateway,
+        "providers[0].models[1].capabilities.vision"
+    ));
+    goto(&mut panel, "providers[0].models[1]");
+    press_code(&mut panel, KeyCode::Char('d'));
+    assert_eq!(panel.prompt().unwrap().kind, PromptKind::Confirm);
+    press_code(&mut panel, KeyCode::Esc);
+    assert_eq!(model_doc(&panel)[1], "renamed");
+}
+
+#[test]
+fn leaving_expanded_items_with_left_retires_the_enum_choice() {
+    let mut panel = provider_panel();
+    goto(&mut panel, "providers[0].protocol");
+    press_code(&mut panel, KeyCode::Enter);
+    assert!(panel.choices().is_some());
+    press_code(&mut panel, KeyCode::Home);
+    press_code(&mut panel, KeyCode::Left);
+    press_code(&mut panel, KeyCode::Left);
+    assert_eq!(panel.view(), View::Categories);
+    assert!(panel.choices().is_none());
+    press_code(&mut panel, KeyCode::Down);
+    press_code(&mut panel, KeyCode::Enter);
+    assert_eq!(panel.view(), View::Tree);
+    press_code(&mut panel, KeyCode::Esc);
+    assert_eq!(panel.view(), View::Categories);
+}
+
+#[test]
+fn settings_action_debug_keeps_credentials_out_of_diagnostics() {
+    let gateway_secret = "gateway-secret-for-test";
+    let interface_secret = "interface-secret-for-test";
+    let preview = SettingsAction::PreviewInterface(json!({"api_key": interface_secret}));
+    let save = SettingsAction::Save {
+        gateway: json!({"providers": [{"api_key": gateway_secret}]}),
+        base: "disk-fingerprint".into(),
+        interface: json!({"api_key": interface_secret}),
+        gateway_dirty: true,
+        interface_dirty: false,
+    };
+    let debug = format!("{preview:?} {save:?}");
+    for private in [
+        "api_key",
+        gateway_secret,
+        interface_secret,
+        "disk-fingerprint",
+    ] {
+        assert!(!debug.contains(private), "debug leaked {private}");
+    }
+    assert!(debug.contains("PreviewInterface(<redacted>)"));
+    assert!(debug.contains("gateway_dirty: true"));
+    assert!(debug.contains("interface_dirty: false"));
+    for (action, name) in [
+        (SettingsAction::None, "None"),
+        (SettingsAction::RestartGateway, "RestartGateway"),
+        (
+            SettingsAction::Close { discard: true },
+            "Close { discard: true }",
+        ),
+        (SettingsAction::Reload, "Reload"),
+    ] {
+        assert_eq!(format!("{action:?}"), name);
+    }
+}
+
+#[test]
+fn search_paste_rebuilds_results_and_a_snapshot_retires_the_old_target() {
+    let mut panel = panel();
+    search(&mut panel, "gate");
+    let old = panel.paste_target().expect("search accepts paste");
+    panel.apply_snapshot(&schema(), state());
+    assert_eq!(panel.search_query(), Some("gate"));
+    let active = panel.paste_target().expect("search survived the snapshot");
+    assert_ne!(active, old);
+    panel.insert_paste(old, "stale").unwrap();
+    assert_eq!(panel.search_query(), Some("gate"));
+    assert!(panel.insert_paste(active, "way\nport").is_err());
+    panel.insert_paste(active, "way.port").unwrap();
+    assert_eq!(panel.search_query(), Some("gateway.port"));
+    assert_eq!(cursor_path(&panel), "gateway.port");
+    assert_eq!(press_code(&mut panel, KeyCode::Enter), SettingsAction::None);
+    assert_eq!(panel.group().unwrap().title, "Net");
+    assert_eq!(panel.dirty_count(), 0);
+
+    press_code(&mut panel, KeyCode::Char('d'));
+    assert!(panel.prompt().is_some());
+    assert!(panel.paste_target().is_none());
+    panel.insert_paste(active, "late reply").unwrap();
+    assert!(panel.prompt().is_some());
+    press_code(&mut panel, KeyCode::Esc);
+    press_code(&mut panel, KeyCode::Char('?'));
+    assert!(panel.paste_target().is_none());
+}
+
+#[test]
+fn problem_page_keys_use_the_viewport_and_repeat_failures_preserve_the_return_view() {
+    let backend = [
+        "gateway.port",
+        "gateway.auth.enabled",
+        "providers[0].base_url",
+        "providers[0].protocol",
+        "providers[0].name",
+        "providers[0].models[0]",
+        "extra_body",
+    ]
+    .into_iter()
+    .map(|path| SettingProblem {
+        path: Some(path.into()),
+        kind: "invalid_value".into(),
+        message: format!("Rejected {path}"),
+        hint: None,
+    })
+    .collect();
+    let mut panel = panel();
+    goto(&mut panel, "gateway.port");
+    let mut failure = ok_response(backend);
+    failure.ok = false;
+    for _ in 0..2 {
+        panel.apply_save(super::SaveOutcome {
+            gateway: Some(failure.clone()),
+            interface_ok: None,
+        });
+        assert_eq!(panel.view(), View::Problems);
+    }
+    panel.set_viewport_rows(3);
+    press_code(&mut panel, KeyCode::PageDown);
+    assert_eq!(panel.problem_cursor(), 3);
+    press_code(&mut panel, KeyCode::PageDown);
+    assert_eq!(panel.problem_cursor(), 6);
+    press_code(&mut panel, KeyCode::PageUp);
+    assert_eq!(panel.problem_cursor(), 3);
+    press_code(&mut panel, KeyCode::Home);
+    assert_eq!(panel.problem_cursor(), 0);
+    press_code(&mut panel, KeyCode::Esc);
+    assert_eq!(panel.view(), View::Tree);
+    assert_eq!(cursor_path(&panel), "gateway.port");
+}
+
+#[test]
+fn an_object_only_model_catalog_uses_its_declared_list_type() {
+    let mut schema = schema();
+    schema.root = fx::mixed_model_catalog();
+    schema.groups.clear();
+    let models = schema.root.children[0]
+        .element
+        .as_mut()
+        .unwrap()
+        .children
+        .iter_mut()
+        .find(|node| node.key == "models")
+        .unwrap();
+    models
+        .variants
+        .as_mut()
+        .unwrap()
+        .retain(|node| node.kind == wing_api_client::models::SettingKind::Object);
+    let values = json!({"providers": [{"models": [{"id": "old-id", "name": "old-model"}]}]});
+    let mut panel = SettingsPanel::new(
+        &schema,
+        state_with(values, Vec::new()),
+        None,
+        View::Categories,
+    );
+    let declared = panel
+        .gateway_catalog()
+        .node_at("providers[0].models")
+        .unwrap();
+    assert_eq!(declared.variants.as_ref().unwrap().len(), 1);
+    search(&mut panel, "providers[].models");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, "providers[0].models[]");
+    assert!(panel.footer_hint().contains("Enter 新增"));
+    press_code(&mut panel, KeyCode::Enter);
+    assert!(panel.prompt().is_none());
+    assert_eq!(cursor_path(&panel), "providers[0].models[1].name");
+    assert_eq!(
+        model_doc(&panel)[0],
+        json!({"id": "old-id", "name": "old-model"})
+    );
+    assert_eq!(model_doc(&panel)[1], json!({"name": ""}));
+}
+
+#[test]
+fn reverting_vision_preserves_other_model_fields_until_the_last_override_is_reset() {
+    let mut panel = mixed_model_panel();
+    search(&mut panel, "Image input");
+    press_code(&mut panel, KeyCode::Enter);
+    press_code(&mut panel, KeyCode::Tab);
+    let id = "providers[0].models[0].id";
+    goto(&mut panel, id);
+    press_code(&mut panel, KeyCode::Enter);
+    type_text(&mut panel, "persistent-id");
+    press_code(&mut panel, KeyCode::Enter);
+    let vision = "providers[0].models[0].capabilities.vision";
+    goto(&mut panel, vision);
+    press_code(&mut panel, KeyCode::Tab);
+    assert_eq!(
+        model_doc(&panel)[0],
+        json!({"name": "legacy/model", "id": "persistent-id"})
+    );
+    assert!(panel.is_dirty(super::Root::Gateway, id));
+    assert!(!panel.is_dirty(super::Root::Gateway, vision));
+    goto(&mut panel, id);
+    press_code(&mut panel, KeyCode::Char('r'));
+    assert_eq!(model_doc(&panel)[0], "legacy/model");
+    assert_eq!(panel.dirty_count(), 0);
+
+    let original_object = "providers[0].models[1]";
+    goto(&mut panel, original_object);
+    press_code(&mut panel, KeyCode::Right);
+    goto(&mut panel, &format!("{original_object}.capabilities"));
+    press_code(&mut panel, KeyCode::Right);
+    goto(
+        &mut panel,
+        &format!("{original_object}.capabilities.vision"),
+    );
+    press_code(&mut panel, KeyCode::Char('r'));
+    assert_eq!(
+        model_doc(&panel)[1],
+        json!({"id": "chosen", "name": "upstream", "display_name": "Friendly"})
+    );
+    assert_eq!(
+        panel.current_row().unwrap().value,
+        ValueText::Default("disabled".into())
+    );
 }

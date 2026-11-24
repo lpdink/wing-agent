@@ -31,7 +31,7 @@ use crate::config::catalog::dump_config_yaml;
 pub const ABSENT_FINGERPRINT: &str = "absent";
 
 /// 读到的 TUI 配置文档。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct InterfaceDoc {
     /// 稀疏文档（只有文件里写下的键）。
     pub doc: Value,
@@ -39,6 +39,15 @@ pub struct InterfaceDoc {
     pub fingerprint: String,
     /// 实际读的路径（面板标题与回执展示）。
     pub path: PathBuf,
+}
+
+impl std::fmt::Debug for InterfaceDoc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InterfaceDoc")
+            .field("path", &self.path)
+            .field("fingerprint", &self.fingerprint)
+            .finish_non_exhaustive()
+    }
 }
 
 /// 写盘结论（设置面板用它更新本地指纹 / 写回执）。

@@ -14,7 +14,6 @@ use wing_api_client::models::SettingProblem;
 
 use super::doc::Root;
 use super::doc::SettingsDoc;
-use super::tree::concrete_node;
 use crate::shared::doc_edit::index_path;
 use crate::shared::doc_edit::join_path;
 
@@ -35,20 +34,13 @@ pub(crate) fn local_problems(doc: &SettingsDoc, roots: &[(Root, &SettingNode)]) 
     let mut out = Vec::new();
     for (root, catalog) in roots {
         for child in &catalog.children {
-            walk(doc, *root, catalog, child, &child.key, &mut out);
+            walk(doc, *root, child, &child.key, &mut out);
         }
     }
     out
 }
 
-fn walk(
-    doc: &SettingsDoc,
-    root: Root,
-    catalog: &SettingNode,
-    node: &SettingNode,
-    path: &str,
-    out: &mut Vec<Problem>,
-) {
+fn walk(doc: &SettingsDoc, root: Root, node: &SettingNode, path: &str, out: &mut Vec<Problem>) {
     let readonly = !node.editable || node.apply == wing_api_client::models::ApplyScope::Readonly;
     match node.kind {
         SettingKind::List => {
@@ -81,8 +73,12 @@ fn walk(
             }
             for index in 0..count {
                 let item_path = index_path(path, index);
-                if let Some(item) = concrete_node(catalog, doc, root, &item_path) {
-                    walk(doc, root, catalog, item, &item_path, out);
+                let item = node
+                    .element
+                    .as_deref()
+                    .or_else(|| node.select_variant(doc.value(root, &item_path)?));
+                if let Some(item) = item {
+                    walk(doc, root, item, &item_path, out);
                 }
             }
         }
@@ -91,7 +87,7 @@ fn walk(
                 return;
             }
             for child in &node.children {
-                walk(doc, root, catalog, child, &join_path(path, &child.key), out);
+                walk(doc, root, child, &join_path(path, &child.key), out);
             }
         }
         _ => {

@@ -925,19 +925,15 @@ fn test_paste_clipboard_key_is_reserved_below_the_panels() {
 /// 在飞期间连按被合并（第一次落地前不再起第二条链），落地后恢复可读。
 #[test]
 fn test_paste_clipboard_key_merges_repeats_while_a_read_is_in_flight() {
-    use crate::app::runner::release_clipboard_read;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// 数一次并取走草稿里的读取 intent。
     fn reads(app: &mut App) -> usize {
         app.drain_intents()
             .into_iter()
-            .filter(|i| matches!(i, AppIntent::ReadClipboard))
+            .filter(|i| matches!(i, AppIntent::ReadClipboard(_)))
             .count()
     }
-
-    // 闸门是进程级静态：先清干净、跑完也清干净（整个测试二进制只有这个用例碰它）。
-    release_clipboard_read();
 
     let mut app = test_app();
     for mods in [KeyModifiers::CONTROL, KeyModifiers::SUPER] {
@@ -948,11 +944,12 @@ fn test_paste_clipboard_key_merges_repeats_while_a_read_is_in_flight() {
 
     // 真循环里第一条 intent 会被 runner 执行（闸门已在分派点认领）；这里模拟读取
     // 落地（成功或失败都会释放闸门）。
-    release_clipboard_read();
+    app.on_clipboard_paste(
+        crate::tui::ClipboardTarget::Default,
+        Ok(crate::util::clipboard_paste::PasteOutcome::Empty),
+    );
     app.handle_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
     assert_eq!(reads(&mut app), 1, "落地后的新手势重新起链");
-
-    release_clipboard_read();
 }
 
 // ── 层视图的键位归属（`/ss` 参数为空时是另一套键位） ──────────

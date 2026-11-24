@@ -13,7 +13,6 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use serde_json::Value;
 use serde_json::json;
-use wing_api_client::models::ApplyScope;
 use wing_api_client::models::SecretPresence;
 use wing_api_client::models::SecretState;
 use wing_api_client::models::SettingGroup;
@@ -23,8 +22,6 @@ use wing_api_client::models::SettingsGetResponse;
 use wing_api_client::models::SettingsSchemaResponse;
 
 use crate::config::ThemePalette;
-use crate::shared::panels::settings::InterfaceSource;
-use crate::shared::panels::settings::RowMarkers;
 use crate::shared::panels::settings::SettingsPanel;
 use crate::shared::panels::settings::View;
 
@@ -131,312 +128,6 @@ pub(crate) fn sample_catalog() -> SettingNode {
 }
 
 /// Interface 根（TUI 自己的配置）：带一个 `value_hint = "color"` 的颜色字段。
-pub(crate) fn interface_catalog() -> SettingNode {
-    let mut accent = str_field("accent");
-    accent.value_hint = Some("color".into());
-    accent.doc = "强调色（命名色或 #RRGGBB）".into();
-    let preset = enum_field(
-        "preset",
-        &[
-            ("auto", "跟随终端"),
-            ("dark", "品牌配色"),
-            ("light", "亮底配色"),
-        ],
-    );
-    let colors = object("colors", vec![preset, accent]);
-    let layout = object(
-        "layout",
-        vec![int_field("max_input_lines", Some(1.0), None)],
-    );
-    root(vec![colors, layout])
-}
-
-// ── 产品口径的夹具（8 个锚点；帧证据与布局测试用）─────────────
-
-/// 后端 `config/groups.py` 那张表的镜像（**测试夹具**：断言的是布局，不是分组契约本身
-/// ——分组契约由 Python 侧 `test_config_groups.py` 与 probe 场景钉住）。
-pub(crate) fn product_groups() -> Vec<SettingGroup> {
-    let group = |id: &str, title: &str, doc: &str, members: &[&str]| SettingGroup {
-        id: id.to_string(),
-        title: title.to_string(),
-        doc: doc.to_string(),
-        members: members.iter().map(|member| (*member).to_string()).collect(),
-    };
-    vec![
-        group(
-            "providers",
-            "Providers",
-            "LLM provider 与模型目录",
-            &["providers"],
-        ),
-        group(
-            "agents",
-            "Agents",
-            "Agent 模板：模型引用 / 工具集 / 提示词",
-            &["agents"],
-        ),
-        group(
-            "behavior",
-            "Behavior",
-            "Agent 行为与内置工具的通用开关",
-            &[
-                "safe_command_patterns",
-                "yolo",
-                "steer",
-                "tool_result_truncate",
-            ],
-        ),
-        group(
-            "images",
-            "Images",
-            "ReadImage 与请求期图片投影",
-            &["images"],
-        ),
-        group(
-            "sessions",
-            "Sessions",
-            "会话内存态回收（磁盘状态一概不动）",
-            &["sessions"],
-        ),
-        group(
-            "gateway",
-            "Gateway",
-            "网关监听 / 鉴权 / 远程工具",
-            &["gateway"],
-        ),
-        group(
-            "advanced",
-            "Advanced",
-            "扩展点（hooks / prompt 命令）· 日志 · 低层少用开关",
-            &["hooks", "commands", "log", "user_agent"],
-        ),
-    ]
-}
-
-/// 与 [`product_groups`] 配套的目录：真实的顶层键 + 每键几个代表性字段。
-pub(crate) fn product_catalog() -> SettingNode {
-    let models = {
-        let spec = element(object(
-            "ModelSpec",
-            vec![str_field("id"), str_field("display_name")],
-        ));
-        let mut node = list_of("models", vec![element(str_field("str")), spec]);
-        node.min_items = Some(1);
-        node.summary_fields = vec!["id".into()];
-        node
-    };
-    let provider = element(object(
-        "ProviderConfig",
-        vec![
-            required_str("name"),
-            enum_field(
-                "protocol",
-                &[
-                    ("openai", "OpenAI 兼容协议"),
-                    ("anthropic", "Anthropic Messages 协议"),
-                ],
-            ),
-            required_str("base_url"),
-            secret_field("api_key"),
-            float_field("timeout_first_chunk", 300.0),
-            models,
-        ],
-    ));
-    let mut providers = list("providers", provider);
-    providers.min_items = Some(1);
-    providers.summary_fields = vec!["name".into(), "protocol".into()];
-
-    let agent = element(object(
-        "AgentConfig",
-        vec![
-            required_str("name"),
-            required_str("model"),
-            bool_field("default", false),
-            list("tools", element(str_field("tool"))),
-        ],
-    ));
-    let mut agents = list("agents", agent);
-    agents.min_items = Some(1);
-    agents.summary_fields = vec!["name".into(), "model".into()];
-
-    let truncate = object(
-        "tool_result_truncate",
-        vec![
-            int_field("max_length", None, None),
-            int_field("keep_chars", None, None),
-        ],
-    );
-    let eviction = object(
-        "eviction",
-        vec![
-            bool_field("enabled", true),
-            float_field("idle_ttl_seconds", 3600.0),
-            restart_field("sweep_interval_seconds", 60.0),
-        ],
-    );
-    let sessions = object("sessions", vec![eviction]);
-    let auth = object(
-        "auth",
-        vec![
-            bool_field("enabled", false),
-            list(
-                "keys",
-                element(object(
-                    "ApiKeyEntry",
-                    vec![
-                        secret_field("key"),
-                        enum_field("role", &[("admin", "管理"), ("tool_runtime", "工具")]),
-                    ],
-                )),
-            ),
-        ],
-    );
-    let mut host = str_field("host");
-    host.apply = ApplyScope::Restart;
-    let mut port = int_field("port", Some(1.0), Some(65535.0));
-    port.apply = ApplyScope::Restart;
-    let gateway = object(
-        "gateway",
-        vec![host, port, auth, float_field("remote_tool_timeout", 300.0)],
-    );
-    let commands = object("commands", vec![list("paths", element(str_field("path")))]);
-    let log = object(
-        "log",
-        vec![enum_field(
-            "level",
-            &[("DEBUG", "调试"), ("INFO", "信息"), ("WARNING", "警告")],
-        )],
-    );
-    let user_agent = object(
-        "user_agent",
-        vec![enum_field(
-            "preset",
-            &[("opencode", "opencode"), ("qwen-code", "qwen-code")],
-        )],
-    );
-
-    root(vec![
-        providers,
-        agents,
-        list("safe_command_patterns", element(str_field("pattern"))),
-        bool_field("yolo", false),
-        bool_field("steer", true),
-        truncate,
-        object(
-            "images",
-            vec![
-                int_field("max_bytes", None, None),
-                int_field("max_images", None, None),
-                int_field("count_quantum", None, None),
-            ],
-        ),
-        sessions,
-        gateway,
-        list("hooks", element(str_field("hook"))),
-        commands,
-        log,
-        user_agent,
-    ])
-}
-
-/// `apply = restart` 的 float 字段（键位栏 / 行尾标记的 restart 形态）。
-fn restart_field(key: &str, default: f64) -> SettingNode {
-    let mut node = float_field(key, default);
-    node.apply = ApplyScope::Restart;
-    node
-}
-
-/// 产品口径的稀疏文档：两个 provider、一个 agent、若干显式值。
-pub(crate) fn product_values() -> Value {
-    json!({
-        "providers": [
-            {
-                "name": "gateway",
-                "protocol": "openai",
-                "base_url": "http://127.0.0.1:8080/v1",
-                "api_key": null,
-                "timeout_first_chunk": 300.0,
-                "models": ["gpt-4o"]
-            },
-            {
-                "name": "dashscope",
-                "protocol": "openai",
-                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                "api_key": null,
-                "models": ["ds-flash", "ds-pro"]
-            }
-        ],
-        "agents": [{"name": "default", "model": "gateway:gpt-4o", "tools": ["Bash", "Read"]}],
-        "yolo": false,
-        "gateway": {"port": 32523},
-        "log": {"level": "INFO"}
-    })
-}
-
-/// 产品口径的面板（Gateway 7 组 + Interface 1 组 = 8 个锚点）。
-/// 产品口径的 schema（真目录 + 真分组表）。
-pub(crate) fn product_schema() -> SettingsSchemaResponse {
-    SettingsSchemaResponse {
-        version: "0.0.0-test".into(),
-        root: product_catalog(),
-        config_path: "~/.wing/core/config.yaml".into(),
-        groups: product_groups(),
-    }
-}
-
-/// 产品口径的 state（真稀疏文档 + 两个 provider 的密文）。
-pub(crate) fn product_state() -> SettingsGetResponse {
-    SettingsGetResponse {
-        values: product_values(),
-        secrets: {
-            let mut secrets = HashMap::new();
-            secrets.insert(
-                "providers[0].api_key".to_string(),
-                SecretState {
-                    state: SecretPresence::Set,
-                    hint: Some("ab12".into()),
-                },
-            );
-            secrets.insert(
-                "providers[1].api_key".to_string(),
-                SecretState {
-                    state: SecretPresence::Set,
-                    hint: None,
-                },
-            );
-            secrets
-        },
-        fingerprint: "fp-product".into(),
-        problems: vec![],
-        setup_mode: false,
-        config_path: "~/.wing/core/config.yaml".into(),
-    }
-}
-
-/// 产品口径的 Interface 注入内容（用 [`crate::config::catalog::interface_groups`] 的真声明）。
-pub(crate) fn product_interface() -> InterfaceSource {
-    let catalog = interface_catalog();
-    InterfaceSource {
-        groups: crate::config::catalog::interface_groups(),
-        catalog,
-        doc: json!({"colors": {"accent": "cyan", "preset": "dark"}}),
-    }
-}
-
-pub(crate) fn product_panel() -> (SettingNode, SettingNode, SettingsPanel) {
-    let gateway = product_catalog();
-    let interface = interface_catalog();
-    let panel = SettingsPanel::new(
-        &product_schema(),
-        product_state(),
-        Some(product_interface()),
-        View::Tree,
-    );
-    (gateway, interface, panel)
-}
-
-// ── 文档 / 面板 ─────────────────────────────────────────────
-
 pub(crate) fn sample_values() -> Value {
     json!({
         "providers": [{
@@ -513,6 +204,7 @@ pub(crate) fn schema(catalog: &SettingNode) -> SettingsSchemaResponse {
 
 pub(crate) fn state(values: Value) -> SettingsGetResponse {
     SettingsGetResponse {
+        pending_restart_paths: None,
         values,
         secrets: sample_secrets(),
         fingerprint: "fp-1".into(),
@@ -523,19 +215,6 @@ pub(crate) fn state(values: Value) -> SettingsGetResponse {
 }
 
 /// Interface 根的注入内容（分组声明 + catalog + 稀疏文档）。
-pub(crate) fn interface_source(catalog: SettingNode) -> InterfaceSource {
-    InterfaceSource {
-        groups: vec![SettingGroup {
-            id: "interface".into(),
-            title: "Interface".into(),
-            doc: "TUI 自身的说明".into(),
-            members: catalog.children.iter().map(|c| c.key.clone()).collect(),
-        }],
-        catalog,
-        doc: json!({"colors": {"accent": "cyan", "preset": "dark"}}),
-    }
-}
-
 /// 只带后端问题的面板（目录是空根 → 没有本地问题，问题表就是传进来的那些）。
 pub(crate) fn panel_from_problems(
     problems: Vec<wing_api_client::models::SettingProblem>,
@@ -553,14 +232,19 @@ pub(crate) fn big_list(count: usize) -> (SettingNode, SettingsPanel) {
     let values = json!({
         "items": (0..count).map(|i| format!("item{i:02}")).collect::<Vec<_>>()
     });
-    let panel = SettingsPanel::new(&schema(&catalog), state(values), None, View::Tree);
+    let panel = SettingsPanel::new(&schema(&catalog), state(values), None, View::Categories);
     (catalog, panel)
 }
 
 /// 打开面板（Gateway 根、树视图、无 Interface）。
 pub(crate) fn panel() -> SettingsPanel {
     let catalog = sample_catalog();
-    SettingsPanel::new(&schema(&catalog), state(sample_values()), None, View::Tree)
+    SettingsPanel::new(
+        &schema(&catalog),
+        state(sample_values()),
+        None,
+        View::Categories,
+    )
 }
 
 /// 一把问题（`count` 条；文案够长，足以触发折行与窗口数学）。
@@ -627,15 +311,4 @@ pub(crate) fn goto(panel: &mut SettingsPanel, needle: &str) {
 pub(crate) fn open_editor(panel: &mut SettingsPanel, needle: &str) {
     goto(panel, needle);
     press(panel, KeyCode::Enter);
-}
-
-/// 行标记的合理缺省（tree.rs / detail.rs 的单元测试直接构造 `Row` 时用）。
-pub(crate) fn markers() -> RowMarkers {
-    RowMarkers {
-        dirty: false,
-        problem: false,
-        required: false,
-        secret: false,
-        apply: ApplyScope::Hot,
-    }
 }

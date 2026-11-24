@@ -263,6 +263,17 @@ fn visit(ctx: &Ctx, rows: &mut Vec<Row>, node: &SettingNode, place: Place<'_>) {
 
 fn emit_object(ctx: &Ctx, rows: &mut Vec<Row>, node: &SettingNode, place: Place<'_>, vis: bool) {
     let label = match place.owner {
+        Some(list) if super::model::object_variant(ctx.root, list).is_some() => {
+            ["display_name", "name", "id"]
+                .into_iter()
+                .filter_map(|key| {
+                    super::model::field_value(ctx.doc, ctx.root, &join_path(&place.path, key))
+                })
+                .filter_map(Value::as_str)
+                .find(|text| !text.trim().is_empty())
+                .unwrap_or("(未填写模型名)")
+                .to_string()
+        }
         Some(list) => summary_line(ctx.doc, ctx.root, node, &place.path, &list.summary_fields),
         None => node.display_label().to_string(),
     };
@@ -377,23 +388,24 @@ fn add_variants(node: &SettingNode) -> usize {
 
 fn emit_leaf(ctx: &Ctx, rows: &mut Vec<Row>, node: &SettingNode, place: Place<'_>, as_item: bool) {
     // 标量列表项的主文本是**值本身**（`Bash` / `Read` 行）。
-    let label = if as_item {
+    let field_label = super::model::field_label(node);
+    let label = if as_item && !node.secret {
         ctx.doc
             .value(ctx.root, &place.path)
             .map_or_else(|| node.display_label().to_string(), render_scalar)
     } else {
-        node.display_label().to_string()
+        field_label.to_string()
     };
     let value = display_value(ctx.doc, ctx.root, node, &place.path);
     rows.push(Row {
         root: ctx.root,
         path: place.path.clone(),
         depth: place.depth,
+        match_spans: ctx.spans(&label),
         label,
         value,
         markers: ctx.markers(node, &place.path),
         action: leaf_action(node),
-        match_spans: ctx.spans(node.display_label()),
         tpath: place.tpath.clone(),
     });
     // enum 的内联选择项：只在树里插子行，不是独立视图。
@@ -498,35 +510,32 @@ pub fn display_value(doc: &SettingsDoc, root: Root, node: &SettingNode, path: &s
     if node.kind == SettingKind::Object || node.kind == SettingKind::List {
         return ValueText::None;
     }
-    match doc.value(root, path) {
-        Some(Value::Null) if node.secret => match doc.secret_state(root, path) {
-            Some(state) => match state.state {
-                wing_api_client::models::SecretPresence::Set => ValueText::Masked {
-                    hint: state.hint.clone(),
+    let value = super::model::field_value(doc, root, path);
+    if node.secret {
+        return match value {
+            Some(Value::Null) => match doc.secret_state(root, path) {
+                Some(state) => match state.state {
+                    wing_api_client::models::SecretPresence::Set => ValueText::Masked {
+                        hint: state.hint.clone(),
+                    },
+                    wing_api_client::models::SecretPresence::Empty => {
+                        ValueText::Text("(empty)".into())
+                    }
+                    _ => ValueText::Text("(not set)".into()),
                 },
-                wing_api_client::models::SecretPresence::Empty => ValueText::Text("(empty)".into()),
-                _ => ValueText::Text("(not set)".into()),
+                None => ValueText::Inherited,
             },
-            // 没有密文表（老网关 / Interface 本地文档）→ 原样保留。
-            None => ValueText::Inherited,
-        },
-        Some(Value::Null) if node.nullable => ValueText::Text("(unset)".into()),
-        Some(Value::String(text)) if node.secret => {
-            if text.is_empty() {
-                ValueText::Text("(empty)".into())
-            } else {
-                ValueText::Masked {
-                    // 本地 Interface 密钥的 hint：与 `--dump-config` 的掩码注释共用一份实现
-                    // （`config/catalog.rs::secret_hint`，规则与后端 `_state_of` 同源）。
-                    hint: secret_hint(text),
-                }
-            }
-        }
-        Some(value) => ValueText::Text(render_scalar(value)),
-        None if node.secret => match node.default.as_ref().filter(|_| node.has_default) {
-            Some(default) => ValueText::Default(render_scalar(default)),
+            Some(Value::String(text)) if text.is_empty() => ValueText::Text("(empty)".into()),
+            Some(Value::String(text)) => ValueText::Masked {
+                hint: secret_hint(text),
+            },
+            Some(_) => ValueText::Text("(invalid value)".into()),
             None => ValueText::Text("(not set)".into()),
-        },
+        };
+    }
+    match value {
+        Some(Value::Null) if node.nullable => ValueText::Text("(unset)".into()),
+        Some(value) => ValueText::Text(render_scalar(value)),
         None => match node.default.as_ref().filter(|_| node.has_default) {
             Some(default) => ValueText::Default(render_scalar(default)),
             None if node.required => ValueText::Text("(required)".into()),
@@ -582,7 +591,13 @@ pub(crate) fn concrete_node<'a>(
                 walked = index_path(&walked, *index);
                 node = match (node.element.as_deref(), node.variants.as_deref()) {
                     (Some(element), _) => element,
-                    (None, Some(_)) => node.select_variant(doc.value(root, &walked)?)?,
+                    (None, Some(variants)) => {
+                        let value = doc.value(root, &walked)?;
+                        match super::model::object_variant(root, node) {
+                            Some(index) if value.is_string() => &variants[index],
+                            _ => node.select_variant(value)?,
+                        }
+                    }
                     _ => return None,
                 };
             }
@@ -1123,6 +1138,27 @@ mod tests {
             "短密钥不给 hint"
         );
         let _ = catalog;
+    }
+
+    #[test]
+    fn malformed_interface_credentials_never_reach_row_text() {
+        let mut node = fx::secret_field("api_key");
+        node.path = "api_key".into();
+        for malformed in [
+            json!(["synthetic-secret"]),
+            json!({"key": "synthetic-secret"}),
+        ] {
+            let doc = SettingsDoc::new(
+                json!({}),
+                json!({"api_key": malformed}),
+                HashMap::new(),
+                "fp".into(),
+            );
+            assert_eq!(
+                display_value(&doc, Root::Interface, &node, "api_key"),
+                ValueText::Text("(invalid value)".into()),
+            );
+        }
     }
 
     #[test]

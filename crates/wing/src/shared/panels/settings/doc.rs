@@ -48,7 +48,7 @@ impl Root {
 /// 值的寻址一律走规范路径（具体下标，`providers[0].api_key`）。
 /// [`Self::value`] 只读；写入口 = [`Self::set_value`] / [`Self::remove_value`]（单条路径）
 /// 与 [`Self::root_doc_mut`] + `shared::doc_edit` 的列表增删移（整项操作，`list.rs` 用）。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SettingsDoc {
     gateway: Value,
     interface: Value,
@@ -195,6 +195,10 @@ impl SettingsDoc {
     /// 改动即脏（不因「改回原值」自动清除）。
     pub(crate) fn mark_dirty(&mut self, root: Root, path: &str) {
         self.dirty.insert((root, path.to_string()));
+    }
+
+    pub(crate) fn clear_dirty(&mut self, root: Root, path: &str) {
+        self.dirty.remove(&(root, path.to_string()));
     }
 
     /// 该 **具体路径** 自己是否被标脏（不含子孙）。

@@ -25,16 +25,22 @@
 //! clipboard. Spawning happens on the blocking pool; the event loop only awaits
 //! the result.
 
-use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
+use std::{fmt, io};
 
 use crate::util::image_compress::KNOWN_IMAGE_MIMES;
 use crate::util::mime::normalize_mime;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PasteMode {
+    TextOrImage,
+    TextOnly,
+}
 
 /// Environment variables that mark the session as remote (SSH / MOSH).
 ///
@@ -56,7 +62,7 @@ const IMAGE_TIMEOUT: Duration = Duration::from_secs(5);
 const WAIT_POLL: Duration = Duration::from_millis(5);
 
 /// 一次成功读取的内容。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum PasteOutcome {
     /// 文本表示。
     Text(String),
@@ -64,6 +70,20 @@ pub enum PasteOutcome {
     Image { bytes: Vec<u8>, mime: String },
     /// 剪贴板既没有文本也没有图片（合法的空结果，不是失败）。
     Empty,
+}
+
+impl fmt::Debug for PasteOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(_) => f.write_str("Text(<redacted>)"),
+            Self::Image { mime, bytes } => f
+                .debug_struct("Image")
+                .field("mime", mime)
+                .field("len", &bytes.len())
+                .finish(),
+            Self::Empty => f.write_str("Empty"),
+        }
+    }
 }
 
 /// 读失败的原因（App 侧转定向 toast；文案由 [`PasteFailure::message`] 给）。
@@ -111,6 +131,15 @@ impl PasteFailure {
     }
 }
 
+pub(crate) fn settings_text(result: &Result<PasteOutcome, PasteFailure>) -> Result<&str, String> {
+    match result {
+        Ok(PasteOutcome::Text(text)) => Ok(text),
+        Ok(_) | Err(PasteFailure::NoRepresentation) => Err("Clipboard has no text".into()),
+        Err(PasteFailure::Failed(_)) => Err("Clipboard read failed".into()),
+        Err(failure) => Err(failure.message()),
+    }
+}
+
 /// 主机平台。显式枚举（而不是 `cfg` 分支散在各处）是因为测试要在任一主机上
 /// 走每一条平台的流程 — 同 `super::clipboard` 把三张命令表都声明出来的理由。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +184,24 @@ impl CommandSpec {
             args: args.iter().map(|arg| (*arg).to_string()).collect(),
             image_file: None,
         }
+    }
+}
+
+const MACOS_PLAIN_TEXT: &str = r#"
+ObjC.import('AppKit');
+const text = ObjC.unwrap($.NSPasteboard.generalPasteboard.stringForType($.NSPasteboardTypeString));
+if (typeof text === 'string') {
+    $.NSFileHandle.fileHandleWithStandardOutput.writeData($(text).dataUsingEncoding($.NSUTF8StringEncoding));
+}
+"#;
+
+fn macos_text_spec(mode: PasteMode) -> CommandSpec {
+    match mode {
+        PasteMode::TextOnly => CommandSpec::stdout(
+            "/usr/bin/osascript",
+            &["-l", "JavaScript", "-e", MACOS_PLAIN_TEXT],
+        ),
+        PasteMode::TextOrImage => CommandSpec::stdout("/usr/bin/pbpaste", &[]),
     }
 }
 
@@ -259,12 +306,18 @@ impl LinuxImageTool {
 }
 
 /// Linux 的文本读取命令，优先级：Wayland → X11（xclip → xsel）。
-fn linux_text_specs() -> Vec<CommandSpec> {
-    vec![
-        CommandSpec::stdout("wl-paste", &["--no-newline"]),
+fn linux_text_specs(mode: PasteMode) -> Vec<CommandSpec> {
+    let mut specs = match mode {
+        PasteMode::TextOnly => ["text/plain;charset=utf-8", "text/plain"]
+            .map(|mime| CommandSpec::stdout("wl-paste", &["--no-newline", "--type", mime]))
+            .to_vec(),
+        PasteMode::TextOrImage => vec![CommandSpec::stdout("wl-paste", &["--no-newline"])],
+    };
+    specs.extend([
         CommandSpec::stdout("xclip", &["-selection", "clipboard", "-o"]),
         CommandSpec::stdout("xsel", &["--clipboard", "--output"]),
-    ]
+    ]);
+    specs
 }
 
 /// Runs one clipboard reader. Injected so the candidate order, the
@@ -468,13 +521,14 @@ fn read_from_clipboard(
     runner: &impl CommandRunner,
     platform: Platform,
     remote: bool,
+    mode: PasteMode,
 ) -> Result<PasteOutcome, PasteFailure> {
     if remote {
         return Err(PasteFailure::Remote);
     }
     match platform {
-        Platform::Macos => read_macos(runner),
-        Platform::Linux => read_linux(runner),
+        Platform::Macos => read_macos(runner, mode),
+        Platform::Linux => read_linux(runner, mode),
         Platform::Other => Err(PasteFailure::Unavailable),
     }
 }
@@ -483,20 +537,22 @@ fn read_from_clipboard(
 ///
 /// 图片失败不阻断文本（纯文本剪贴板是常态）；超限硬拒绝（文件已删，toast 由
 /// 上层给），其余失败保留到最后由 [`settle`] 裁决。
-fn read_macos(runner: &impl CommandRunner) -> Result<PasteOutcome, PasteFailure> {
+fn read_macos(runner: &impl CommandRunner, mode: PasteMode) -> Result<PasteOutcome, PasteFailure> {
     let mut failure: Option<PasteFailure> = None;
-    match read_macos_image(runner) {
-        Ok(Some(bytes)) => {
-            return Ok(PasteOutcome::Image {
-                bytes,
-                mime: "image/png".to_string(),
-            });
+    if mode == PasteMode::TextOrImage {
+        match read_macos_image(runner) {
+            Ok(Some(bytes)) => {
+                return Ok(PasteOutcome::Image {
+                    bytes,
+                    mime: "image/png".to_string(),
+                });
+            }
+            Ok(None) => {}
+            Err(e @ PasteFailure::TooLarge) => return Err(e),
+            Err(e) => failure = Some(e),
         }
-        Ok(None) => {}
-        Err(e @ PasteFailure::TooLarge) => return Err(e),
-        Err(e) => failure = Some(e),
     }
-    match read_text(runner, &CommandSpec::stdout("/usr/bin/pbpaste", &[])) {
+    match read_text(runner, &macos_text_spec(mode)) {
         Ok(Some(text)) => return Ok(PasteOutcome::Text(text)),
         Ok(None) => {}
         Err(e) => failure = failure.or(Some(e)),
@@ -535,15 +591,17 @@ fn read_macos_image(runner: &impl CommandRunner) -> Result<Option<Vec<u8>>, Past
 }
 
 /// Linux：`wl-paste` / `xclip` 图片 → `wl-paste` / `xclip` / `xsel` 文本。
-fn read_linux(runner: &impl CommandRunner) -> Result<PasteOutcome, PasteFailure> {
+fn read_linux(runner: &impl CommandRunner, mode: PasteMode) -> Result<PasteOutcome, PasteFailure> {
     let mut failure: Option<PasteFailure> = None;
-    match read_linux_image(runner) {
-        Ok(Some((mime, bytes))) => return Ok(PasteOutcome::Image { bytes, mime }),
-        Ok(None) => {}
-        Err(e @ PasteFailure::TooLarge) => return Err(e),
-        Err(e) => failure = Some(e),
+    if mode == PasteMode::TextOrImage {
+        match read_linux_image(runner) {
+            Ok(Some((mime, bytes))) => return Ok(PasteOutcome::Image { bytes, mime }),
+            Ok(None) => {}
+            Err(e @ PasteFailure::TooLarge) => return Err(e),
+            Err(e) => failure = Some(e),
+        }
     }
-    match read_linux_text(runner) {
+    match read_linux_text(runner, mode) {
         Ok(Some(text)) => return Ok(PasteOutcome::Text(text)),
         Ok(None) => {}
         Err(e) => failure = failure.or(Some(e)),
@@ -610,9 +668,12 @@ fn image_via_linux_tool(
 /// 文本：`wl-paste` → `xclip` → `xsel`，第一个跑成功的命令是权威的
 /// （它说没有文本就是没有，不再问下一个工具）；全部只是普通失败时收场也是
 /// 「没有文本」（空剪贴板在三个工具上都是一次普通失败），只有缺命令 / 超时才上报。
-fn read_linux_text(runner: &impl CommandRunner) -> Result<Option<String>, PasteFailure> {
+fn read_linux_text(
+    runner: &impl CommandRunner,
+    mode: PasteMode,
+) -> Result<Option<String>, PasteFailure> {
     let mut failure: Option<PasteFailure> = None;
-    for spec in linux_text_specs() {
+    for spec in linux_text_specs(mode) {
         match read_text(runner, &spec) {
             Ok(found) => return Ok(found),
             // 超限是硬拒绝（与图片链 `read_linux_image` 对齐）：后面的工具
@@ -730,12 +791,12 @@ fn remove_temp_file(path: &Path) {
 ///
 /// **读取期间没有「进行中」提示**（取舍：正常路径毫秒级、最坏时长如上已量化，加提示
 /// 要多一份跨窗口状态，收益低）；TUI 侧对连击做合并 —— 一次只跑一条读取链，落地
-/// （成功或失败）后恢复可读，见 `app::runner` 的在飞闸门。
-pub(crate) async fn read_clipboard() -> Result<PasteOutcome, PasteFailure> {
+/// （成功或失败）后恢复可读，见 `app::clipboard` 的在飞闸门。
+pub(crate) async fn read_clipboard(mode: PasteMode) -> Result<PasteOutcome, PasteFailure> {
     let remote = is_remote_session();
     let platform = host_platform();
     tokio::task::spawn_blocking(move || {
-        read_from_clipboard(&ProcessCommandRunner, platform, remote)
+        read_from_clipboard(&ProcessCommandRunner, platform, remote, mode)
     })
     .await
     .unwrap_or_else(|e| {
@@ -808,6 +869,123 @@ mod tests {
         }
     }
 
+    #[test]
+    fn settings_readers_request_plain_text_from_mixed_or_non_text_clipboards() {
+        for platform in [Platform::Macos, Platform::Linux] {
+            for (other_type, plain_mime) in [
+                ("image/png", None),
+                ("text/rtf", None),
+                ("application/postscript", None),
+                ("image/png", Some("text/plain;charset=utf-8")),
+                ("text/rtf", Some("text/plain")),
+            ] {
+                let text = "fixture-text\r\n";
+                let runner = FakeRunner::new(move |spec| {
+                    assert!(spec.image_file.is_none());
+                    let has_text = match (platform, spec.program) {
+                        (Platform::Macos, "/usr/bin/osascript") => {
+                            assert_eq!(&spec.args[..3], ["-l", "JavaScript", "-e"]);
+                            assert!(
+                                spec.args[3].contains("stringForType($.NSPasteboardTypeString)")
+                            );
+                            plain_mime.is_some()
+                        }
+                        (Platform::Linux, "wl-paste") => {
+                            assert_eq!(&spec.args[..2], ["--no-newline", "--type"]);
+                            let mime = spec.args[2].as_str();
+                            assert!(matches!(mime, "text/plain;charset=utf-8" | "text/plain"));
+                            plain_mime == Some(mime)
+                        }
+                        (Platform::Linux, "xclip" | "xsel") => false,
+                        _ => panic!("wrong reader for {other_type}: {}", spec.program),
+                    };
+                    if has_text {
+                        Ok(text.as_bytes().to_vec())
+                    } else {
+                        Err(plain_exit(spec.program))
+                    }
+                });
+                let result =
+                    read_from_clipboard(&runner, platform, false, PasteMode::TextOnly).unwrap();
+                assert_eq!(
+                    result,
+                    plain_mime.map_or(PasteOutcome::Empty, |_| PasteOutcome::Text(text.into()))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clipboard_debug_reports_kind_and_image_size_without_the_payload() {
+        let text = PasteOutcome::Text("fixture-private-helper-output".into());
+        assert_eq!(format!("{text:?}"), "Text(<redacted>)");
+        let image = PasteOutcome::Image {
+            bytes: vec![20, 21, 22],
+            mime: "image/png".into(),
+        };
+        assert_eq!(
+            format!("{image:?}"),
+            r#"Image { mime: "image/png", len: 3 }"#
+        );
+        assert_eq!(format!("{:?}", PasteOutcome::Empty), "Empty");
+    }
+
+    #[test]
+    fn reserved_image_file_can_disappear_before_timeout_cleanup() {
+        let runner = FakeRunner::new(|spec| match spec.program {
+            "/usr/bin/osascript" => {
+                let path = spec.image_file.as_ref().unwrap();
+                std::fs::remove_file(path).unwrap();
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "image helper stopped",
+                ))
+            }
+            "/usr/bin/pbpaste" => Ok(b"plain fallback".to_vec()),
+            other => panic!("unexpected program {other}"),
+        });
+        assert_eq!(
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
+            Ok(PasteOutcome::Text("plain fallback".into())),
+        );
+        assert!(!runner.call(0).image_file.unwrap().exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_the_read_error_when_the_clipboard_temp_path_is_a_directory() {
+        let path =
+            std::env::temp_dir().join(format!("wing-clipboard-cleanup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        let child = path.join("unrelated");
+        std::fs::write(&child, b"keep").unwrap();
+
+        let result = read_and_remove(&path);
+        let retained = std::fs::read(&child);
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(
+            matches!(result, Err(PasteFailure::Failed(message)) if message.starts_with("cannot read the clipboard temp file"))
+        );
+        assert_eq!(retained.unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_failing_plain_text_helper_never_falls_back_to_an_image_reader() {
+        let runner = FakeRunner::new(|spec| {
+            assert_eq!(spec.program, "/usr/bin/osascript");
+            assert!(spec.image_file.is_none());
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "fixture helper denied",
+            ))
+        });
+        let result = read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOnly);
+        assert!(
+            matches!(&result, Err(PasteFailure::Failed(reason)) if reason.contains("fixture helper denied"))
+        );
+        assert_eq!(settings_text(&result), Err("Clipboard read failed".into()));
+        assert_eq!(runner.called(), ["/usr/bin/osascript"]);
+    }
+
     /// osascript 的「没有图片」形态：非零退出 + 0 字节文件（实测）。
     fn osascript_without_picture(spec: &CommandSpec) -> io::Result<Vec<u8>> {
         let path = spec.image_file.as_ref().expect("osascript writes a file");
@@ -831,7 +1009,7 @@ mod tests {
     fn remote_sessions_short_circuit_before_any_spawn() {
         let runner = FakeRunner::new(|spec| panic!("remote must not spawn {}", spec.program));
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, true),
+            read_from_clipboard(&runner, Platform::Macos, true, PasteMode::TextOrImage),
             Err(PasteFailure::Remote)
         );
         assert!(runner.calls().is_empty(), "no child process over SSH");
@@ -986,7 +1164,7 @@ mod tests {
             other => panic!("text must not be asked once the picture landed: {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Image {
                 bytes: png,
                 mime: "image/png".to_string(),
@@ -1012,7 +1190,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Text("hello 粘贴".to_string()))
         );
         assert_eq!(runner.called(), ["/usr/bin/osascript", "/usr/bin/pbpaste"]);
@@ -1029,7 +1207,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Empty)
         );
     }
@@ -1042,7 +1220,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Text("still here".to_string()))
         );
     }
@@ -1060,7 +1238,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Err(PasteFailure::Timeout),
             "空剪贴板不能把一次超时粉饰成 Empty"
         );
@@ -1076,7 +1254,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Err(PasteFailure::Unavailable)
         );
 
@@ -1087,7 +1265,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Text("text".to_string()))
         );
     }
@@ -1105,7 +1283,7 @@ mod tests {
             other => panic!("an oversized picture must not fall through to text: {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Err(PasteFailure::TooLarge)
         );
         let path = runner.call(0).image_file.clone().expect("temp file");
@@ -1126,7 +1304,7 @@ mod tests {
             other => panic!("unexpected command {other:?}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Image {
                 bytes: png,
                 mime: "image/png".to_string(),
@@ -1147,7 +1325,7 @@ mod tests {
             other => panic!("unexpected command {other:?}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Text("hi".to_string())),
             "an undecodable image/* must not shadow text/plain"
         );
@@ -1168,7 +1346,7 @@ mod tests {
             other => panic!("unexpected command {other:?}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Image {
                 bytes: b"PNG-bytes".to_vec(),
                 mime: "image/png".to_string(),
@@ -1186,7 +1364,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Text("last resort".to_string()))
         );
         // 图片阶段先问过 wl-paste / xclip 的类型清单，然后才是文本三档。
@@ -1204,7 +1382,7 @@ mod tests {
             other => panic!("unexpected command {other:?}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Empty)
         );
     }
@@ -1222,7 +1400,7 @@ mod tests {
             other => panic!("unexpected command {other:?}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Text("text wins".to_string()))
         );
         assert_eq!(
@@ -1245,7 +1423,7 @@ mod tests {
             other => panic!("unexpected command {other:?}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Err(PasteFailure::TooLarge)
         );
         assert_eq!(
@@ -1269,7 +1447,7 @@ mod tests {
             other => panic!("unexpected command {other:?}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Err(PasteFailure::TooLarge)
         );
         assert_eq!(
@@ -1285,7 +1463,7 @@ mod tests {
     fn linux_without_a_selection_is_empty_not_a_failure() {
         let runner = FakeRunner::new(|spec| Err(plain_exit(spec.program)));
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Empty)
         );
         assert_eq!(
@@ -1304,7 +1482,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Ok(PasteOutcome::Empty)
         );
     }
@@ -1321,7 +1499,7 @@ mod tests {
             )),
             other => panic!("unexpected program {other}"),
         });
-        match read_from_clipboard(&runner, Platform::Macos, false) {
+        match read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage) {
             Err(PasteFailure::Failed(reason)) => {
                 assert!(reason.contains("not executable"), "{reason}");
             }
@@ -1346,7 +1524,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Err(PasteFailure::TooLarge),
             "超限文本不能落进草稿"
         );
@@ -1357,7 +1535,7 @@ mod tests {
             other => panic!("unexpected program {other}"),
         });
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Macos, false),
+            read_from_clipboard(&runner, Platform::Macos, false, PasteMode::TextOrImage),
             Err(PasteFailure::TooLarge),
             "runner 的 FileTooLarge 归类为 TooLarge"
         );
@@ -1458,7 +1636,7 @@ mod tests {
     fn linux_without_any_reader_reports_unavailable() {
         let runner = FakeRunner::new(|spec| Err(not_found(spec.program)));
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Linux, false),
+            read_from_clipboard(&runner, Platform::Linux, false, PasteMode::TextOrImage),
             Err(PasteFailure::Unavailable)
         );
     }
@@ -1467,7 +1645,7 @@ mod tests {
     fn the_other_platforms_are_unavailable_without_spawning() {
         let runner = FakeRunner::new(|spec| panic!("no helper on this platform: {}", spec.program));
         assert_eq!(
-            read_from_clipboard(&runner, Platform::Other, false),
+            read_from_clipboard(&runner, Platform::Other, false, PasteMode::TextOrImage),
             Err(PasteFailure::Unavailable)
         );
         assert!(runner.calls().is_empty());
@@ -1489,7 +1667,7 @@ mod tests {
             LinuxImageTool::Xclip.read_spec("image/png").args,
             ["-selection", "clipboard", "-t", "image/png", "-o"]
         );
-        let texts = linux_text_specs();
+        let texts = linux_text_specs(PasteMode::TextOrImage);
         let programs: Vec<&str> = texts.iter().map(|spec| spec.program).collect();
         assert_eq!(programs, ["wl-paste", "xclip", "xsel"]);
         assert_eq!(texts[0].args, ["--no-newline"]);
@@ -1587,7 +1765,7 @@ mod tests {
         // 文本往返。
         pbcopy(b"wing clipboard selftest");
         assert_eq!(
-            read_clipboard().await,
+            read_clipboard(PasteMode::TextOrImage).await,
             Ok(PasteOutcome::Text("wing clipboard selftest".to_string()))
         );
 
@@ -1609,7 +1787,7 @@ mod tests {
                 .expect("osascript")
                 .success()
         );
-        match read_clipboard().await {
+        match read_clipboard(PasteMode::TextOrImage).await {
             Ok(PasteOutcome::Image { bytes, mime }) => {
                 assert_eq!(mime, "image/png");
                 assert_eq!(&bytes[..4], b"\x89PNG", "the read bytes are a PNG");

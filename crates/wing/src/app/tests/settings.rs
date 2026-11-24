@@ -1,6 +1,6 @@
 //! 设置面板的 App 接线测试。
 //!
-//! 覆盖：模态优先级 · ask 排队 · overlay 的绘制落点与三者处置
+//! 覆盖：模态优先级 · ask 排队 · 底部设置的布局与指针归属
 //! （`needs_full_redraw` / `images.invalidate()` 的配对）·
 //! 实时预览与快照 · 一键保存两边的四种组合 · 轮次中拒绝重启 ·
 //! `settings_changed` 的指纹比对 · 命令表别名。
@@ -240,6 +240,7 @@ fn gateway_state(values: Value, fingerprint: &str) -> SettingsGetResponse {
         },
     );
     SettingsGetResponse {
+        pending_restart_paths: None,
         values,
         secrets,
         fingerprint: fingerprint.into(),
@@ -348,10 +349,7 @@ fn last_cell_text(app: &App) -> (bool, String) {
 /// 把 Interface 半边记进"等 Gateway 回执"的槽里 —— 生产里是 runner 干的
 /// （`execute_intent` 的 SaveSettings 臂），回执合并读的就是这一份。
 fn record_pending_interface(app: &mut App, report: InterfaceSaveReport) {
-    app.settings_save = Some(crate::app::settings::PendingSettingsSave {
-        interface: report,
-        document: json!({}),
-    });
+    app.settings_save = Some(report);
 }
 
 fn settings_response(
@@ -397,9 +395,10 @@ fn settings_owns_the_app_reserved_keys_and_ctrl_o() {
     }
     // Ctrl+C 永远归应用（双击退出）。
     assert_eq!(app.route_key(&ctrl(KeyCode::Char('c'))), KeyRoute::Quit);
-    // Ctrl+V（粘贴手势，同样是应用保留键）也不例外：面板开着时它不出声 ——
-    // 文本粘贴本就不进面板（`handle_paste` 的第一道挡板），与 bracketed paste 同款。
-    assert_eq!(app.route_key(&ctrl(KeyCode::Char('v'))), KeyRoute::Settings);
+    assert_eq!(
+        app.route_key(&ctrl(KeyCode::Char('v'))),
+        KeyRoute::PasteClipboard
+    );
 }
 
 #[test]
@@ -460,6 +459,173 @@ fn paste_while_the_panel_is_open_does_not_reach_the_draft() {
     assert_eq!(app.input.text(), "hello");
 }
 
+#[test]
+fn settings_paste_inserts_long_unicode_text_at_the_editor_cursor() {
+    let mut app = app_with_settings_panel();
+    app.input.set_text("chat draft");
+    press(&mut app, KeyCode::Char('/'));
+    app.handle_paste("accent\r\n");
+    assert_eq!(panel(&app).search_query(), Some("accent"));
+    assert!(panel(&app).search_hits() > 0);
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Enter);
+    press_event(&mut app, ctrl(KeyCode::Char('u')));
+    type_text(&mut app, "前後");
+    press(&mut app, KeyCode::Left);
+
+    let pasted = "値🙂".repeat(200);
+    app.handle_paste(&pasted);
+    app.handle_settings_fetch(gateway_schema(), gateway_state(sample_values(), "fp-2"));
+    let editor = panel(&app).edit_state().unwrap();
+    assert_eq!(editor.visible_buffer(), format!("前{pasted}後"));
+    assert_eq!(editor.cursor(), 401);
+    assert_eq!(panel(&app).dirty_count(), 0);
+    assert!(panel(&app).is_stale());
+    assert_eq!(app.input.text(), "chat draft");
+    assert!(app.drain_intents().is_empty());
+
+    press(&mut app, KeyCode::Esc);
+    assert_eq!(panel(&app).dirty_count(), 0);
+}
+
+#[test]
+fn settings_paste_routes_to_search_above_open_choices_and_preserves_a_stale_baseline() {
+    let mut app = app_with_settings_panel();
+    goto(&mut app, "preset");
+    press(&mut app, KeyCode::Enter);
+    assert!(panel(&app).choices().is_some());
+    press(&mut app, KeyCode::Char('/'));
+    app.handle_paste("accent");
+    assert_eq!(panel(&app).search_query(), Some("accent"));
+    assert!(panel(&app).search_hits() > 0);
+    app.handle_settings_fetch(gateway_schema(), gateway_state(sample_values(), "fp-2"));
+    assert_eq!(panel(&app).search_query(), Some("accent"));
+    press(&mut app, KeyCode::Esc);
+    assert!(panel(&app).is_stale());
+    assert_eq!(panel(&app).fingerprint(), "fp-1");
+    assert_eq!(panel(&app).dirty_count(), 0);
+}
+
+fn take_clipboard_target(app: &mut App, modifiers: KeyModifiers) -> crate::tui::ClipboardTarget {
+    app.handle_key(KeyEvent::new(KeyCode::Char('v'), modifiers));
+    let target = app
+        .drain_intents()
+        .into_iter()
+        .find_map(|intent| match intent {
+            AppIntent::ReadClipboard(target) => Some(target),
+            _ => None,
+        });
+    target.expect("clipboard request")
+}
+
+#[test]
+fn settings_clipboard_paste_masks_secrets_and_ignores_reopened_targets() {
+    use crate::app::intent::{FetchPayload, FetchResult};
+    use crate::util::clipboard_paste::PasteOutcome;
+
+    let mut app = app_with_settings_panel();
+    goto(&mut app, "api_key");
+    press(&mut app, KeyCode::Enter);
+    let target = take_clipboard_target(&mut app, KeyModifiers::SUPER);
+    let secret = "sk-fixture-ordinary-key-42";
+    let delivered = |target, value: &str| FetchResult {
+        session_id: "prior-session".into(),
+        payload: FetchPayload::ClipboardPaste {
+            target,
+            result: Ok(PasteOutcome::Text(value.into())),
+        },
+    };
+    app.handle_fetch_result(delivered(target, &format!("{secret}\r\n")));
+    let edit = panel(&app).edit_state().unwrap();
+    assert_eq!(edit.visible_buffer(), "•".repeat(secret.len()));
+    assert!(!format!("{edit:?}").contains(secret));
+    let mut terminal = test_terminal(120, 40);
+    draw(&mut app, &mut terminal);
+    let screen = frame_text(terminal.backend().buffer());
+    assert!(!screen.contains(secret));
+    assert!(screen.contains(&"•".repeat(secret.len())));
+
+    let target = take_clipboard_target(&mut app, KeyModifiers::CONTROL);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Enter);
+    app.handle_fetch_result(delivered(target, "late"));
+    assert_eq!(panel(&app).edit_state().unwrap().buffer_len(), 0);
+
+    let target = take_clipboard_target(&mut app, KeyModifiers::CONTROL);
+    app.close_settings_panel(true);
+    app.input.set_text("draft stays");
+    app.handle_fetch_result(delivered(target, "late"));
+    assert_eq!(app.input.text(), "draft stays");
+}
+
+#[test]
+fn settings_terminal_clipboard_paste_is_discarded_after_edit_replacement_or_dismissal() {
+    use crate::tui::ClipboardEvent;
+
+    let mut app = app_with_settings_panel();
+    app.input.set_text("original draft");
+    goto(&mut app, "api_key");
+    press(&mut app, KeyCode::Enter);
+    let target = panel(&app).paste_target().unwrap();
+    let paste = || ClipboardEvent::TextInput {
+        target,
+        result: Ok("fixture-terminal-token".to_owned().into()),
+    };
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Enter);
+    app.handle_clipboard(paste());
+    assert_eq!(panel(&app).edit_state().unwrap().buffer_len(), 0);
+    app.close_settings_panel(false);
+    app.handle_clipboard(paste());
+    assert_eq!(app.input.text(), "original draft");
+}
+
+#[test]
+fn settings_clipboard_paste_allows_an_existing_image_target_to_settle() {
+    use crate::tui::{ClipboardEvent, ClipboardPayload, ClipboardTarget};
+    use crate::util::clipboard_paste::PasteOutcome;
+
+    let mut app = test_app();
+    app.handle_clipboard(ClipboardEvent::ImageReadStarted {
+        mime: "image/png".into(),
+    });
+    let original = *app.image_reads.front().unwrap();
+    app.inject_settings_panel(
+        &gateway_schema(),
+        gateway_state(sample_values(), "fp-1"),
+        None,
+    );
+    app.handle_key(ctrl(KeyCode::Char('v')));
+    assert!(app.drain_intents().is_empty());
+    app.handle_clipboard(ClipboardEvent::Delivered(ClipboardPayload::Image {
+        bytes: vec![1, 2, 3],
+        mime: "image/png".into(),
+        name: None,
+    }));
+    assert!(app.drain_intents().iter().any(|intent| matches!(
+        intent, AppIntent::CompressClipboardImage { target, .. } if *target == original
+    )));
+    let draft = app.input.text().to_owned();
+    app.handle_clipboard(ClipboardEvent::ImageReadStarted {
+        mime: "image/png".into(),
+    });
+    app.on_clipboard_paste(
+        ClipboardTarget::Default,
+        Ok(PasteOutcome::Image {
+            bytes: vec![1],
+            mime: "image/png".into(),
+        }),
+    );
+    app.close_settings_panel(false);
+    app.handle_clipboard(ClipboardEvent::Delivered(ClipboardPayload::Image {
+        bytes: vec![9],
+        mime: "image/png".into(),
+        name: None,
+    }));
+    assert_eq!(app.input.text(), draft);
+    assert!(app.drain_intents().is_empty());
+}
+
 /// 设置面板开着时，粘贴**先**被面板丢掉 —— 哪怕队列里正躺着一条
 /// ask（面板开着时到达的 ask 入队但不弹）。顺序反过来的话，`Ctrl+V` 会写进
 /// 那条**看不见**的 ask 内联编辑器里。
@@ -500,8 +666,24 @@ fn paste_is_dropped_before_it_can_reach_a_queued_ask() {
     );
     assert_eq!(app.input.text(), "", "也不落到 composer");
 
-    // 关面板后同一条 ask 照旧吃粘贴（挡板只属于面板）。
+    press(&mut app, KeyCode::Char('/'));
+    let target = take_clipboard_target(&mut app, KeyModifiers::CONTROL);
     app.close_settings_panel(false);
+    app.on_clipboard_paste(
+        target,
+        Ok(crate::util::clipboard_paste::PasteOutcome::Text(
+            "late".into(),
+        )),
+    );
+    let crate::tui::ClipboardTarget::TextOnly(target) = target else {
+        panic!("settings search owns the clipboard request");
+    };
+    app.handle_clipboard(crate::tui::ClipboardEvent::TextInput {
+        target,
+        result: Ok("late terminal paste".to_owned().into()),
+    });
+    assert_eq!(app.ask_panels.front().unwrap().states[0].draft, "");
+
     app.handle_paste("ok");
     assert_eq!(
         app.ask_panels.front().expect("队列前端").states[0].draft,
@@ -562,110 +744,61 @@ fn an_ask_arriving_while_the_panel_is_open_waits_in_the_queue() {
     assert_eq!(sent, Some(("y".to_string(), Some("ask-9".into()))));
 }
 
-// ── 3. overlay 的绘制落点 + 三者处置 ────────────────────
+// ── 3. Settings frame and composer restoration ──────────────────────────
 
 #[test]
-fn the_open_panel_floats_over_the_chat_and_leaves_the_background_visible() {
-    let mut app = test_app();
-    app.chat.push(ChatCell::UserMessage("hello world".into()));
-    app.input.set_text("draft text");
-    let mut terminal = test_terminal(100, 30);
+fn the_bottom_settings_frame_preserves_chat_and_restores_the_draft() {
+    for (width, height) in [(32, 12), (120, 32)] {
+        let mut app = test_app();
+        app.chat.push(ChatCell::UserMessage("chat marker".into()));
+        app.input.set_text("draft text");
+        app.input.move_left();
+        let cursor = (app.input.cursor_row, app.input.cursor_col);
+        let mut terminal = test_terminal(width, height);
+        draw(&mut app, &mut terminal);
+        let original_composer = app.geometry.composer_rect();
 
-    app.draw(&mut terminal).expect("draw");
-    let before = frame_text(terminal.backend().buffer());
-    assert!(before.contains("hello world"));
-    assert!(before.contains("draft text"));
-
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(interface_source("magenta")),
-    );
-    // 打开面板要求整屏重画一次：卡片底下的图片像素要擦掉（与关闭时对称）。
-    assert!(app.needs_full_redraw, "打开面板 = 一次整屏重画");
-    app.draw(&mut terminal).expect("draw");
-    let buf = terminal.backend().buffer().clone();
-    let after = frame_text(&buf);
-    assert!(after.contains("Settings"), "卡片的标题在场：\n{after}");
-
-    // 卡片几何：min(终端宽-4, 110) × min(终端高-4, 32)，居中。
-    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 100, 30));
-    assert_eq!(card, ratatui::layout::Rect::new(2, 2, 96, 26));
-    assert_eq!(buf[(card.x, card.y)].symbol(), "┌", "卡片左上角");
-    assert_eq!(
-        buf[(card.right() - 1, card.bottom() - 1)].symbol(),
-        "┘",
-        "卡片右下角"
-    );
-
-    // 四周露出背景：状态栏与 composer 都还在（v1 的全屏 overlay 会把它们抹掉）。
-    assert!(after.contains("test-session"), "状态栏可见：\n{after}");
-    assert!(after.contains("draft text"), "composer 可见：\n{after}");
-    // 卡片内部不透底：被它盖住的那条消息不见了。
-    assert!(!after.contains("hello world"), "卡片内部不透底：\n{after}");
-}
-
-#[test]
-fn a_small_terminal_degrades_the_panel_to_full_screen() {
-    // < 80×24：浮层比全屏更难读，直接铺满。
-    for (width, height) in [(79u16, 30u16), (80, 23), (60, 48), (40, 10)] {
-        let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, width, height));
-        assert_eq!(
-            card,
-            ratatui::layout::Rect::new(0, 0, width, height),
-            "{width}x{height} 应当铺满"
+        app.inject_settings_panel(
+            &gateway_schema(),
+            gateway_state(sample_values(), "fp-1"),
+            Some(interface_source("magenta")),
         );
+        draw(&mut app, &mut terminal);
+        let buf = terminal.backend().buffer();
+        let text = frame_text(buf);
+        let top = app.geometry.chat_band().bottom();
+        assert_eq!(app.geometry.composer_rect(), ratatui::layout::Rect::ZERO);
+        assert_eq!(buf[(0, top)].symbol(), "S");
+        assert!(text.lines().next().unwrap().contains("-session"), "{text}");
+        assert!(text.contains("chat marker"), "{text}");
+        assert!(!text.contains("draft text"), "{text}");
+
+        press(&mut app, KeyCode::Enter);
+        draw(&mut app, &mut terminal);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Esc);
+        draw(&mut app, &mut terminal);
+        assert!(app.settings_panel.is_none());
+        assert_eq!(app.input.text(), "draft text");
+        assert_eq!((app.input.cursor_row, app.input.cursor_col), cursor);
+        assert_eq!(app.geometry.composer_rect(), original_composer);
+        assert!(frame_text(terminal.backend().buffer()).contains("draft text"));
     }
-    // ≥ 80×24：浮层，且不超过 110×32。
-    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 80, 24));
-    assert_eq!(card, ratatui::layout::Rect::new(2, 2, 76, 20));
-    let card = crate::ui::settings::card_area(ratatui::layout::Rect::new(0, 0, 200, 60));
-    assert_eq!(card, ratatui::layout::Rect::new(45, 14, 110, 32));
 }
 
 #[test]
-fn the_open_panel_suppresses_pictures_and_closing_invalidates_them() {
-    let dir = TempDir::new("settings-overlay");
-    let plot = dir.file("plot.png");
-    write_png(&plot, 800, 600);
-    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
-    app.chat
-        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
-    let mut terminal = test_terminal(60, 48);
-    draw_until(&mut app, &mut terminal, "the picture", |_, buf| {
-        has_placeholder(buf)
-    });
-    assert_eq!(app.images.stats().expect("lane").cached, 1);
-
-    // 面板开着：这一帧不画图片（overlay 是最后写入者）。
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(interface_source("magenta")),
-    );
-    let buf = super::images::frame(&mut app, &mut terminal);
-    assert!(
-        !has_placeholder(&buf),
-        "卡片挡住的图片这一帧不画（打开面板时还整屏擦过一次）"
-    );
-
-    // 关闭：整屏重画 + 图片句柄失效（两者的配对）。
-    app.close_settings_panel(false);
-    assert!(app.needs_full_redraw, "关闭后面板要求整屏重画");
-    // `invalidate` 在**关闭那一刻**就已经生效（不是靠下一次 draw 的兜底）——
-    // 下一帧的 `needs_full_redraw` 分支会把它再做一遍，只有在这里读才分得清。
-    assert_eq!(
-        app.images.stats().expect("lane").cached,
-        0,
-        "关闭动作自己调了 images.invalidate()（不等 draw）"
-    );
-    let buf = super::images::frame(&mut app, &mut terminal);
-    assert!(!has_placeholder(&buf), "失效的编码不会再画");
-    assert_eq!(
-        app.images.stats().expect("lane").cached,
-        0,
-        "关闭面板时 images.invalidate() 被调用（编码被丢掉）"
-    );
+fn settings_controls_stay_reachable_in_an_empty_short_session() {
+    let mut app = app_with_settings_panel();
+    let mut terminal = test_terminal(32, 5);
+    draw(&mut app, &mut terminal);
+    assert!(frame_text(terminal.backend().buffer()).contains("providers"));
+    press(&mut app, KeyCode::End);
+    draw(&mut app, &mut terminal);
+    assert!(frame_text(terminal.backend().buffer()).contains("Interface"));
+    press(&mut app, KeyCode::Enter);
+    draw(&mut app, &mut terminal);
+    assert_eq!(panel(&app).view(), View::Tree);
+    assert!(frame_text(terminal.backend().buffer()).contains("colors"));
 }
 
 #[test]
@@ -918,6 +1051,9 @@ fn a_full_save_reports_both_sides_in_one_notice() {
     response.changed = vec!["gateway.port".into(), "gateway.auth.enabled".into()];
     response.restart_required = vec!["gateway.port".into()];
     response.reload = Some(wing_api_client::models::ReloadResponse {
+        diagnostics_redacted: true,
+        pending_restart_paths: Some(vec!["gateway.port".into()]),
+        new_session_defaults_changed: true,
         ok: true,
         results: vec![wing_api_client::models::ReloadResultItem {
             name: "provider".into(),
@@ -942,12 +1078,9 @@ fn a_full_save_reports_both_sides_in_one_notice() {
         text.contains("✓ Interface   /home/u/.wing/tui/config.yaml（3 项）"),
         "{text}"
     );
+    assert!(text.contains("✓ Gateway     2 项变更已写入"), "{text}");
     assert!(
-        text.contains("✓ Gateway     2 项变更 · provider rebuilt 2 provider(s)"),
-        "{text}"
-    );
-    assert!(
-        text.contains("⚠ gateway.port 需重启网关才生效 — Ctrl+R 立即重启"),
+        text.contains("⚠ gateway.port 待重启 · Ctrl+R 重启网关"),
         "重启提示的文案：{text}"
     );
     assert!(
@@ -1068,10 +1201,7 @@ fn a_conflict_marks_the_panel_stale_and_points_at_reload() {
         conflict: true,
     });
     let (_, text) = last_cell_text(&app);
-    assert!(
-        text.contains("配置已被其它客户端修改，按 R 重新载入"),
-        "{text}"
-    );
+    assert!(text.contains("设置文件已更改，按 R 重新读取文件"), "{text}");
     assert!(panel(&app).is_stale(), "409 让面板亮起横幅");
 }
 
@@ -1082,7 +1212,7 @@ fn an_interface_only_save_closes_the_receipt_without_a_gateway_line() {
         path: "/home/u/.wing/tui/config.yaml".into(),
         changed: 2,
     };
-    let text = save_notice_text(&interface, &GatewaySaveReport::Skipped);
+    let text = save_notice_text(&interface, &GatewaySaveReport::Skipped, false);
     assert!(text.starts_with("设置已保存"), "{text}");
     assert!(text.contains("✓ Interface"), "{text}");
     assert!(!text.contains("Gateway"), "{text}");
@@ -1109,7 +1239,7 @@ fn a_save_that_lost_secrets_reports_the_backend_warnings() {
     );
     assert_eq!(
         app.toast.as_ref().map(|t| t.message.as_str()),
-        Some("设置已保存 · 1 条说明（见回执）"),
+        Some("设置已保存\n1 条说明（见回执）"),
         "回执压在面板下面：toast 要指出还有说明可看"
     );
 
@@ -1220,6 +1350,325 @@ fn a_settings_changed_with_the_panel_closed_drops_the_cache() {
     );
 }
 
+#[test]
+fn an_equal_fingerprint_change_and_reconnect_refresh_runtime_settings() {
+    let mut app = app_with_settings_panel();
+    goto(&mut app, "enabled");
+    press(&mut app, KeyCode::Tab);
+    assert!(panel(&app).dirty_count() > 0);
+
+    let original_id = app.settings_fetch_id;
+    app.note_settings_changed("fp-1");
+    assert!(!panel(&app).is_stale());
+    assert!(app.settings_cache.is_none());
+    assert_ne!(app.settings_fetch_id, original_id);
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+
+    let mut state = gateway_state(sample_values(), "fp-1");
+    state.pending_restart_paths = Some(vec!["gateway.port".into()]);
+    app.handle_settings_fetch(gateway_schema(), state);
+    assert_eq!(panel(&app).restart_required(), &["gateway.port"]);
+    assert!(panel(&app).dirty_count() > 0);
+
+    app.refresh_settings_snapshot();
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+    let mut state = gateway_state(sample_values(), "fp-1");
+    state.pending_restart_paths = Some(vec![]);
+    app.handle_settings_fetch(gateway_schema(), state);
+    assert!(panel(&app).restart_required().is_empty());
+    assert!(panel(&app).dirty_count() > 0);
+}
+
+#[test]
+fn system_reload_reports_restart_and_hides_legacy_failure_details() {
+    let mut app = app_with_settings_panel();
+    app.close_settings_panel(false);
+    let pending =
+        serde_json::from_value(json!({"ok": true, "pending_restart_paths": ["gateway.port"]}))
+            .unwrap();
+    app.note_system_reload(&pending);
+    assert!(app.settings_cache.is_none());
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("gateway.port 待重启")
+    );
+
+    let legacy = serde_json::from_value(json!({"ok": false, "results": [{
+        "name": "provider", "ok": false, "detail": "fixture-secret"
+    }]}))
+    .unwrap();
+    app.note_system_reload(&legacy);
+    let toast = app.toast.as_ref().unwrap();
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert!(toast.message.contains("provider 加载失败"));
+    assert!(!toast.message.contains("fixture-secret"));
+
+    let clean = serde_json::from_value(json!({"ok":true,"pending_restart_paths":[]})).unwrap();
+    app.note_system_reload(&clean);
+    let toast = app.toast.as_ref().unwrap();
+    assert_eq!(toast.kind, ToastKind::Info);
+    assert_eq!(toast.message, "已重新读取网关配置");
+
+    let diagnosed = serde_json::from_value(json!({"ok":false,"diagnostics_redacted":true,
+        "results":[{"name":"provider","ok":false,"detail":"provider unavailable\nretry later"}]
+    }))
+    .unwrap();
+    app.note_system_reload(&diagnosed);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("provider 加载失败 · provider unavailable retry later")
+    );
+}
+
+fn deliver_settings_reply(app: &mut App, payload: crate::app::intent::FetchPayload) {
+    app.handle_fetch_result(crate::app::intent::FetchResult {
+        session_id: "previous-chat".into(),
+        payload,
+    });
+}
+
+#[test]
+fn settings_read_errors_release_only_the_current_foreground_request() {
+    use crate::app::intent::FetchPayload;
+
+    let mut app = app_with_settings_panel();
+    app.settings_reload_pending = true;
+    app.refresh_settings_snapshot();
+    let current = app.settings_fetch_id;
+    let error = |id, message: &str| FetchPayload::SettingsFetchError {
+        id,
+        message: message.into(),
+    };
+
+    deliver_settings_reply(&mut app, error(current - 1, "superseded read"));
+    assert!(app.settings_reload_pending);
+    assert!(app.toast.is_none());
+    deliver_settings_reply(&mut app, error(current, "explicit reread failed"));
+    assert!(!app.settings_reload_pending);
+    assert_eq!(
+        app.toast.as_ref().unwrap().message,
+        "explicit reread failed"
+    );
+    assert_eq!(app.toast.as_ref().unwrap().kind, ToastKind::Warning);
+    assert_eq!(panel(&app).fingerprint(), "fp-1");
+
+    deliver_settings_reply(&mut app, error(current, "background refresh failed"));
+    assert_eq!(
+        app.toast.as_ref().unwrap().message,
+        "explicit reread failed"
+    );
+
+    app.close_settings_panel(false);
+    app.open_settings_panel();
+    assert!(app.settings_pending);
+    let opening = app.settings_fetch_id;
+    deliver_settings_reply(&mut app, error(opening, "initial settings read failed"));
+    assert!(!app.settings_pending);
+    assert!(app.settings_panel.is_none());
+    assert_eq!(
+        app.toast.as_ref().unwrap().message,
+        "initial settings read failed"
+    );
+}
+
+#[test]
+fn confirmed_rejections_and_lost_save_replies_keep_the_gateway_draft() {
+    use crate::app::intent::FetchPayload;
+    use crate::cmd::settings_api::SettingsSaveFailure;
+
+    for (failure, local_saved, heading, detail, invalidates_cache, stale) in [
+        (
+            SettingsSaveFailure::Conflict,
+            false,
+            "设置未保存",
+            "按 R 重新读取文件",
+            true,
+            true,
+        ),
+        (
+            SettingsSaveFailure::Rejected("write refused".into()),
+            false,
+            "设置未保存",
+            "write refused",
+            false,
+            false,
+        ),
+        (
+            SettingsSaveFailure::Unconfirmed("HTTP 504".into()),
+            false,
+            "Gateway 保存未确认",
+            "核对磁盘文件",
+            true,
+            false,
+        ),
+        (
+            SettingsSaveFailure::Unconfirmed("HTTP 504".into()),
+            true,
+            "Interface 已保存，Gateway 保存未确认",
+            "核对磁盘文件",
+            true,
+            false,
+        ),
+    ] {
+        let mut app = app_with_settings_panel();
+        goto(&mut app, "enabled");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(panel(&app).dirty_count(), 1);
+        record_pending_interface(
+            &mut app,
+            if local_saved {
+                InterfaceSaveReport::Ok {
+                    path: "fixture-tui.yaml".into(),
+                    changed: 1,
+                }
+            } else {
+                InterfaceSaveReport::Skipped
+            },
+        );
+        deliver_settings_reply(&mut app, FetchPayload::SettingsSaveError(failure));
+        assert!(app.settings_save.is_none());
+        assert_eq!(app.settings_cache.is_none(), invalidates_cache);
+        assert_eq!(panel(&app).dirty_count(), 1);
+        assert_eq!(panel(&app).fingerprint(), "fp-1");
+        assert_eq!(panel(&app).is_stale(), stale);
+        let (info, report) = last_cell_text(&app);
+        assert!(!info);
+        assert_eq!(report.lines().next(), Some(heading));
+        assert!(report.contains(detail), "{report}");
+        let toast = app.toast.unwrap();
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert!(toast.message.starts_with(heading));
+        if heading.contains("未确认") {
+            assert!(toast.message.contains("请核对磁盘文件"));
+        }
+    }
+}
+
+#[test]
+fn save_receipts_respect_legacy_disk_changes_and_setup_retry_semantics() {
+    use crate::app::intent::FetchPayload;
+
+    let mut app = app_with_settings_panel();
+    let response: SettingsSetResponse = serde_json::from_value(json!({
+        "ok": true, "fingerprint": "fp-2", "restart_required": ["gateway.port"],
+        "reload": {"ok": false, "results": [{"name":"runtime", "ok":false, "detail":"private fixture detail"}]}
+    })).unwrap();
+    let setup = save_notice_text(
+        &InterfaceSaveReport::Skipped,
+        &GatewaySaveReport::Saved(response.clone()),
+        true,
+    );
+    assert!(setup.contains("启动时读取的设置已更改 · gateway.port"));
+    assert!(setup.contains("runtime"));
+    assert!(setup.contains("检查初始化失败项后按 s 重试"));
+    assert!(!setup.contains("Ctrl+R"));
+    assert!(!setup.contains("private fixture detail"));
+
+    let mut response = response;
+    let reload = response.reload.as_mut().unwrap();
+    reload.pending_restart_paths = Some(vec![]);
+    reload.results.clear();
+    deliver_settings_reply(&mut app, FetchPayload::SettingsSaved(Box::new(response)));
+    assert_eq!(panel(&app).fingerprint(), "fp-2");
+    assert!(app.settings_cache.is_none());
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+    let (_, report) = last_cell_text(&app);
+    assert!(report.contains("已保存，部分设置未生效"));
+    assert!(!report.contains("gateway.port"));
+    assert!(app.toast.as_ref().unwrap().message.contains("网关应用失败"));
+
+    record_pending_interface(
+        &mut app,
+        InterfaceSaveReport::Err {
+            message: "read-only file".into(),
+        },
+    );
+    app.settle_gateway_save(GatewaySaveReport::Skipped);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("Interface 写入失败，按 s 重试")
+    );
+}
+
+#[test]
+fn a_change_event_retires_an_older_fetch_without_overwriting_the_draft() {
+    use crate::app::intent::{FetchPayload, FetchResult};
+
+    for dirty in [false, true] {
+        let mut app = app_with_settings_panel();
+        if dirty {
+            goto(&mut app, "enabled");
+            press(&mut app, KeyCode::Enter);
+            assert!(panel(&app).dirty_count() > 0);
+        }
+        let original_id = app.settings_fetch_id;
+        app.note_settings_changed("fp-2");
+        assert!(panel(&app).is_stale());
+        assert!(matches!(
+            app.drain_intents().as_slice(),
+            [AppIntent::FetchSettings]
+        ));
+
+        let fetch = |app: &mut App, id, fingerprint| {
+            app.handle_fetch_result(FetchResult {
+                session_id: app.session_id.clone(),
+                payload: FetchPayload::Settings {
+                    id,
+                    schema: Box::new(gateway_schema()),
+                    state: Box::new(gateway_state(sample_values(), fingerprint)),
+                },
+            });
+        };
+        fetch(&mut app, original_id, "fp-1");
+        assert!(app.settings_cache.is_none());
+        assert!(panel(&app).is_stale());
+        let new_id = app.settings_fetch_id;
+        fetch(&mut app, new_id, "fp-2");
+        assert_eq!(panel(&app).is_stale(), dirty);
+        assert_eq!(
+            panel(&app).fingerprint(),
+            if dirty { "fp-1" } else { "fp-2" }
+        );
+    }
+}
+
+#[test]
+fn invalid_disk_keeps_the_restart_debt_and_disables_ctrl_r() {
+    let mut app = app_with_settings_panel();
+    let mut invalid = gateway_state(sample_values(), "fp-2");
+    invalid.pending_restart_paths = Some(vec!["gateway.port".into()]);
+    invalid.problems.push(SettingProblem {
+        path: None,
+        kind: "invalid_value".into(),
+        message: "bad YAML".into(),
+        hint: None,
+    });
+    app.handle_settings_fetch(gateway_schema(), invalid.clone());
+    assert_eq!(panel(&app).restart_required(), &["gateway.port"]);
+    assert!(!panel(&app).can_restart_gateway());
+    invalid.problems.clear();
+    app.handle_settings_fetch(gateway_schema(), invalid);
+    assert!(panel(&app).can_restart_gateway());
+}
+
 // ── 8. 打开 / 刷新 / 重载的三条落地口径 ─────────────────────
 
 #[test]
@@ -1296,7 +1745,7 @@ fn closing_the_panel_drops_the_open_and_reload_flags() {
     app.settings_reload_pending = true;
     app.close_settings_panel(false);
     assert!(!app.settings_pending && !app.settings_reload_pending);
-    assert!(app.interface_catalog.is_none());
+    assert!(app.settings_panel.is_none());
 }
 
 // ── 9. 保存载荷：密文红线（接线级） ────────────────────────
@@ -1390,34 +1839,36 @@ fn changed_leaf_paths_counts_added_removed_and_modified_leaves() {
 // ── 12. 缓存回写与面板基线 ────────────────────────────────
 
 #[test]
-fn a_successful_gateway_save_writes_the_document_back_to_the_cache() {
+fn a_successful_gateway_save_invalidates_cache_until_masked_get() {
     let mut app = app_with_settings_panel();
-    let document = json!({"gateway": {"port": 9999}});
-    app.settings_save = Some(crate::app::settings::PendingSettingsSave {
-        interface: InterfaceSaveReport::Skipped,
-        document: document.clone(),
-    });
+    app.settings_save = Some(InterfaceSaveReport::Skipped);
     app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
         true,
         "fp-2",
         vec![],
     )));
-    let (_, cached) = app.settings_cache.as_ref().expect("cache");
-    assert_eq!(cached.values, document);
-    assert_eq!(cached.fingerprint, "fp-2");
+    assert!(app.settings_cache.is_none());
     assert!(app.settings_save.is_none());
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+
+    let mut masked = sample_values();
+    masked["providers"][0]["api_key"] = Value::Null;
+    app.handle_settings_fetch(gateway_schema(), gateway_state(masked.clone(), "fp-2"));
+    let (_, cached) = app.settings_cache.as_ref().expect("masked GET cache");
+    assert_eq!(cached.values, masked);
+    assert_eq!(cached.fingerprint, "fp-2");
 }
 
 #[test]
-fn a_failed_gateway_save_keeps_the_cached_values() {
+fn a_failed_gateway_save_keeps_the_cached_snapshot_and_draft() {
     let mut app = app_with_settings_panel();
-    app.settings_save = Some(crate::app::settings::PendingSettingsSave {
-        interface: InterfaceSaveReport::Skipped,
-        document: json!({"gateway": {"port": 9999}}),
-    });
+    app.settings_save = Some(InterfaceSaveReport::Skipped);
     app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
         false,
-        "fp-1",
+        "new-fingerprint",
         vec![SettingProblem {
             path: Some("gateway.port".into()),
             kind: "invalid_value".into(),
@@ -1426,12 +1877,46 @@ fn a_failed_gateway_save_keeps_the_cached_values() {
         }],
     )));
     let (_, cached) = app.settings_cache.as_ref().expect("cache");
-    assert_eq!(
-        cached.values,
-        sample_values(),
-        "ok=false 时文件没变，缓存的值照旧"
+    assert_eq!(cached.values, sample_values());
+    assert_eq!(cached.fingerprint, "fp-1");
+    assert_eq!(panel(&app).fingerprint(), "fp-1");
+    assert_eq!(panel(&app).view(), View::Problems);
+}
+
+#[test]
+fn persisted_with_failed_application_warns_above_the_open_panel() {
+    let mut app = app_with_settings_panel();
+    let mut response = settings_response(true, "fp-2", vec![]);
+    response.reload = Some(wing_api_client::models::ReloadResponse {
+        diagnostics_redacted: true,
+        pending_restart_paths: Some(vec![]),
+        new_session_defaults_changed: false,
+        ok: false,
+        results: vec![wing_api_client::models::ReloadResultItem {
+            name: "provider".into(),
+            ok: false,
+            detail: Some("InvalidURL".into()),
+        }],
+    });
+    app.settle_gateway_save(GatewaySaveReport::Saved(response));
+    let toast = app.toast.as_ref().expect("visible save feedback");
+    assert_eq!(toast.kind, ToastKind::Warning);
+    assert!(
+        toast
+            .message
+            .contains("已保存，部分设置未生效\nprovider 加载失败")
     );
-    assert_eq!(cached.problems.len(), 1);
+    let mut terminal = test_terminal(32, 16);
+    app.draw(&mut terminal).expect("draw");
+    let screen = frame_text(terminal.backend().buffer());
+    let glyphs = screen.replace(' ', "");
+    assert!(glyphs.contains("已保存，部分设置未生效"), "{screen}");
+    assert!(glyphs.contains("provider加载失败"), "{screen}");
+    let (info, text) = last_cell_text(&app);
+    assert!(!info);
+    assert!(text.contains("provider：InvalidURL"));
+    assert!(text.contains("wing reload"));
+    assert_eq!(panel(&app).fingerprint(), "fp-2");
 }
 
 // ── 13. 接口签名探针（编译期契约，防止上游漂移） ─────────────
@@ -1490,144 +1975,513 @@ async fn restart_without_a_transport_warns_and_keeps_the_endpoint() {
     assert!(app.drain_intents().is_empty(), "早退不产出任何副作用");
 }
 
-// ── 浮层的两条边界────────────────────────────
+async fn connect_settings_fixture(
+    routes: Vec<(&'static str, u16, Value)>,
+) -> (
+    crate::app::GatewayEndpoint,
+    crate::app::Transport,
+    tokio::sync::mpsc::UnboundedReceiver<(String, Value)>,
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::Message;
 
-/// 一张带链接的聊天 + 一台 100×30 的终端：链接的 hit box 落在卡片底下。
-fn app_with_link_under_the_card() -> App {
+    let ws = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let http = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = crate::app::GatewayEndpoint {
+        ws_url: format!("ws://{}/ws", ws.local_addr().unwrap()),
+        http_base: format!("http://{}", http.local_addr().unwrap()),
+        api_key: Some("private-fixture-credential".into()),
+    };
+    let (seen, requests) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let (stream, _) = ws.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket
+            .send(Message::Text(
+                r#"{"type":"connected","client_id":"settings-fixture"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        while socket.next().await.is_some() {}
+    });
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = http.accept().await {
+            let mut stream = BufReader::new(stream);
+            let mut line = String::new();
+            stream.read_line(&mut line).await.unwrap();
+            let Some(target) = line.split_whitespace().nth(1).map(str::to_owned) else {
+                continue;
+            };
+            let mut size = 0;
+            loop {
+                line.clear();
+                if stream.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    size = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; size];
+            stream.read_exact(&mut body).await.unwrap();
+            let (status, payload) = routes
+                .iter()
+                .find(|(path, _, _)| *path == target.split('?').next().unwrap())
+                .map_or((404, Value::Null), |(_, status, payload)| {
+                    (*status, payload.clone())
+                });
+            let _ = seen.send((target, serde_json::from_slice(&body).unwrap_or_default()));
+            let payload = payload.to_string();
+            let reply = format!(
+                "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{payload}",
+                payload.len()
+            );
+            stream.get_mut().write_all(reply.as_bytes()).await.unwrap();
+        }
+    });
+    let transport = crate::app::transport::connect_transport(&endpoint)
+        .await
+        .unwrap();
+    (endpoint, transport, requests)
+}
+
+#[tokio::test]
+async fn restart_is_blocked_by_unverifiable_status_or_a_conflicting_fingerprint() {
+    let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    drop(target);
+    for (status, data, post, message) in [
+        (
+            200,
+            json!({"valid":true,"setup_mode":false}),
+            false,
+            "网关未提供可验证的重启地址",
+        ),
+        (
+            503,
+            json!({"error":"fixture-failure"}),
+            false,
+            "无法确认磁盘配置",
+        ),
+        (
+            200,
+            json!({"valid":true,"setup_mode":false,"fingerprint":"validated-fp", "restart_listener":{"host":"127.0.0.1", "port":target_port}}),
+            true,
+            "设置文件已更改",
+        ),
+    ] {
+        let (mut endpoint, transport, mut requests) = connect_settings_fixture(vec![
+            ("/api/settings/status", status, data),
+            ("/api/shutdown", 409, json!({"error":"conflict"})),
+        ])
+        .await;
+        let original = endpoint.http_base.clone();
+        let mut transport = Some(transport);
+        let mut app = app_with_settings_panel();
+        crate::app::settings::restart_gateway(&mut app, &mut transport, &mut endpoint).await;
+        assert_eq!(requests.try_recv().unwrap().0, "/api/settings/status");
+        if post {
+            assert_eq!(
+                requests.try_recv().unwrap().0,
+                "/api/shutdown?settings_fingerprint=validated-fp"
+            );
+            assert!(matches!(
+                app.drain_intents().as_slice(),
+                [AppIntent::FetchSettings]
+            ));
+        }
+        assert!(requests.try_recv().is_err());
+        assert!(transport.is_some());
+        assert_eq!(endpoint.http_base, original);
+        let toast = app.toast.unwrap();
+        assert_eq!(toast.kind, ToastKind::Warning);
+        assert!(toast.message.contains(message), "{}", toast.message);
+    }
+}
+
+#[tokio::test]
+async fn settings_intents_drive_http_and_keep_an_unconfirmed_save_draft() {
+    use crate::app::runner::execute_intent;
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::layout::Rect;
+    use ratatui::{TerminalOptions, Viewport};
+
+    let (mut endpoint, transport, mut requests) = connect_settings_fixture(vec![
+        (
+            "/api/settings/schema",
+            200,
+            serde_json::to_value(gateway_schema()).unwrap(),
+        ),
+        (
+            "/api/settings/get",
+            503,
+            json!({"error":"fixture-read-failure"}),
+        ),
+        (
+            "/api/settings/set",
+            504,
+            json!({"error":"fixture-save-timeout"}),
+        ),
+        (
+            "/api/system/reload",
+            200,
+            json!({"ok":true,"pending_restart_paths":[]}),
+        ),
+    ])
+    .await;
+    let mut terminal = crate::tui::WingTerminal::with_options(
+        crate::tui::CursorGate::new(CrosstermBackend::new(std::io::stdout())),
+        TerminalOptions {
+            viewport: Viewport::Fixed(Rect::new(0, 0, 32, 12)),
+        },
+    )
+    .unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut transport = Some(transport);
+    let mut send_chain = None;
+    let mut app = app_with_settings_panel();
+    app.settings_reload_pending = true;
+    execute_intent(
+        &mut app,
+        &mut transport,
+        &mut endpoint,
+        &mut terminal,
+        AppIntent::ReloadSettings,
+        &tx,
+        &mut send_chain,
+    )
+    .await;
+    app.handle_fetch_result(
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    assert!(!app.settings_reload_pending);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("读取设置文件失败")
+    );
+    let mut paths = [
+        requests.try_recv().unwrap().0,
+        requests.try_recv().unwrap().0,
+    ];
+    paths.sort();
+    assert_eq!(paths, ["/api/settings/get", "/api/settings/schema"]);
+
+    goto(&mut app, "enabled");
+    press(&mut app, KeyCode::Enter);
+    press(&mut app, KeyCode::Char('s'));
+    let mut intents = app.drain_intents();
+    assert_eq!(intents.len(), 1);
+    let intent = intents.pop().unwrap();
+    let diagnostic = format!("{intent:?}");
+    assert!(diagnostic.contains("<redacted>") && !diagnostic.contains("providers"));
+    let endpoint_debug = format!("{endpoint:?}");
+    assert!(
+        endpoint_debug.contains(&endpoint.http_base) && endpoint_debug.contains(&endpoint.ws_url)
+    );
+    assert!(!endpoint_debug.contains("private-fixture-credential"));
+    execute_intent(
+        &mut app,
+        &mut transport,
+        &mut endpoint,
+        &mut terminal,
+        intent,
+        &tx,
+        &mut send_chain,
+    )
+    .await;
+    app.handle_fetch_result(
+        tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+    );
+    let (path, request) = requests.try_recv().unwrap();
+    assert_eq!(path, "/api/settings/set");
+    assert_eq!(request["base"], "fp-1");
+    assert_eq!(request["document"]["gateway"]["auth"]["enabled"], false);
+    assert!(app.settings_save.is_none());
+    assert_eq!(panel(&app).dirty_count(), 1);
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("Gateway 保存未确认")
+    );
+
+    execute_intent(
+        &mut app,
+        &mut transport,
+        &mut endpoint,
+        &mut terminal,
+        AppIntent::ReloadSystem,
+        &tx,
+        &mut send_chain,
+    )
+    .await;
+    assert_eq!(requests.try_recv().unwrap().0, "/api/system/reload");
+    assert_eq!(app.toast.as_ref().unwrap().message, "已重新读取网关配置");
+    assert_eq!(panel(&app).dirty_count(), 1);
+    assert!(matches!(
+        app.drain_intents().as_slice(),
+        [AppIntent::FetchSettings]
+    ));
+
+    app.settings_reload_pending = true;
+    execute_intent(
+        &mut app,
+        &mut None,
+        &mut endpoint,
+        &mut terminal,
+        AppIntent::ReloadSettings,
+        &tx,
+        &mut send_chain,
+    )
+    .await;
+    assert!(!app.settings_reload_pending);
+    assert!(app.toast.as_ref().unwrap().message.contains("网关未连接"));
+}
+
+// ── Visible chat retains its frame geometry while settings owns clicks ──
+
+#[test]
+fn visible_chat_links_keep_their_geometry_and_settings_blocks_clicks() {
     let mut app = test_app();
     app.chat.push(ChatCell::AssistantMessage(
         "see [docs](https://example.com) for details".into(),
     ));
-    app
-}
-
-/// 链接 hit box 的左上角（屏幕坐标）。
-fn link_cell(app: &App) -> (u16, u16) {
-    let (row, links) = app.chat.frame_links().first().expect("帧里有链接").clone();
-    (links[0].start, row)
-}
-
-#[test]
-fn a_click_on_the_card_does_not_open_the_link_underneath() {
-    let mut app = app_with_link_under_the_card();
     let mut terminal = test_terminal(100, 30);
-    draw(&mut app, &mut terminal);
-    let at = link_cell(&app);
-    let card = crate::ui::settings::card_area(terminal.backend().buffer().area);
-    assert!(
-        card.contains(ratatui::layout::Position::new(at.0, at.1)),
-        "夹具前提：链接在卡片底下（{at:?} vs {card:?}）"
-    );
-
     app.inject_settings_panel(
         &gateway_schema(),
         gateway_state(sample_values(), "fp-1"),
         Some(interface_source("magenta")),
     );
     draw(&mut app, &mut terminal);
-    // 卡片盖住的 hit box 已经作废（看不见的不许点得着）。
-    assert!(
-        app.chat.frame_links().is_empty(),
-        "卡片下的链接 hit box 要作废：{:?}",
-        app.chat.frame_links()
-    );
-    // 再点同一格：不产生 OpenLink，也不产生任何意图。
-    app.handle_mouse(mouse_press(at));
-    app.handle_mouse(mouse_release(at));
-    assert!(
-        app.drain_intents().is_empty(),
-        "浮层期间背景不接指针（审查 S1）"
-    );
-    // 滚轮是**独立通道**（`app::mouse` 的模块 doc：永远滚聊天视图，不被任何浮层认领）——
-    // 背景滚一下不改面板的任何状态，v1 就是这个口径，这里不动。
-}
-
-#[test]
-fn a_drag_on_the_card_does_not_copy_a_stale_snapshot() {
-    let mut app = app_with_link_under_the_card();
-    let mut terminal = test_terminal(100, 30);
-    draw(&mut app, &mut terminal);
-    let at = link_cell(&app);
-
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(interface_source("magenta")),
-    );
-    draw(&mut app, &mut terminal);
+    let (row, links) = app
+        .chat
+        .frame_links()
+        .first()
+        .expect("visible chat link")
+        .clone();
+    let at = (links[0].start, row);
+    assert!(app.geometry.chat_band().contains(at.into()));
     app.handle_mouse(mouse_press(at));
     app.handle_mouse(mouse_drag((at.0 + 4, at.1)));
     app.handle_mouse(mouse_release((at.0 + 4, at.1)));
-    // 选区绘制被浮层挡掉、`capture_visible_rows` 也不跑：与其复制到打开面板前
-    // 那一帧的快照，不如根本不认领这个手势。
-    assert!(app.drain_intents().is_empty(), "浮层期间不产生复制意图");
-    assert!(!app.selection.is_press_active(), "没有留下半截选区");
+    assert!(app.drain_intents().is_empty());
+    assert!(!app.selection.is_press_active());
 }
 
 #[test]
-fn a_picture_outside_the_card_is_still_painted() {
-    // 浮层只挡它盖住的那张图；露在外面的背景照画（masks 写成整块区域就退化成 v1）。
-    let dir = TempDir::new("settings-card-mask");
-    let plot = dir.file("plot.png");
-    write_png(&plot, 120, 60);
-    let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
-    app.chat
-        .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
-    // 200 列：卡片 110 列居中（x 45..155），小图的盒子在最左边，两者不相交。
-    let mut terminal = test_terminal(200, 40);
-    let buf = draw_until(&mut app, &mut terminal, "the picture", |_, buf| {
-        has_placeholder(buf)
-    });
-    let before = placeholder_rect(&buf).expect("画出来了");
-    let card = crate::ui::settings::card_area(buf.area);
-    assert!(
-        !card.intersects(before),
-        "夹具前提：图在卡片之外（{before:?} vs {card:?}）"
-    );
-
-    app.inject_settings_panel(
-        &gateway_schema(),
-        gateway_state(sample_values(), "fp-1"),
-        Some(interface_source("magenta")),
-    );
-    // 打开面板会整屏重画一次（`needs_full_redraw` ⇒ `terminal.clear()` +
-    // `images.invalidate()`），编码要过一两个 worker 轮次才回来 —— 所以这里等到它回来，
-    // 断言的是"背景那张图最终照画"，而不是"同一帧内不闪"。
-    let buf = draw_until(&mut app, &mut terminal, "the picture is back", |_, buf| {
-        has_placeholder(buf)
-    });
-    assert_eq!(
-        placeholder_rect(&buf),
-        Some(before),
-        "同一张图、同一个盒子（没有被重排或撕成半张）"
-    );
-}
-
-#[test]
-fn a_picture_under_the_card_is_skipped_whole() {
-    // 上一条的另一半：盖住的那张整张跳过（半张覆盖会撕碎图形协议）。
-    let dir = TempDir::new("settings-card-mask");
-    let plot = dir.file("plot.png");
-    write_png(&plot, 800, 600);
+fn a_picture_inside_the_chat_band_is_painted_and_invalidated_on_close() {
+    let dir = TempDir::new("settings-chat-picture");
+    write_png(&dir.file("plot.png"), 120, 60);
     let mut app = app_with_images(ImagesMode::Auto, kitty(), Some(dir.path()));
     app.chat
         .push(ChatCell::AssistantMessage("![plot](plot.png)".into()));
     let mut terminal = test_terminal(120, 40);
-    let buf = draw_until(&mut app, &mut terminal, "the picture", |_, buf| {
-        has_placeholder(buf)
-    });
-    let before = placeholder_rect(&buf).expect("画出来了");
-    let card = crate::ui::settings::card_area(buf.area);
-    assert!(
-        card.intersects(before),
-        "夹具前提：图被卡片盖住（{before:?} vs {card:?}）"
-    );
-
     app.inject_settings_panel(
         &gateway_schema(),
         gateway_state(sample_values(), "fp-1"),
         Some(interface_source("magenta")),
     );
-    let buf = super::images::frame(&mut app, &mut terminal);
-    assert!(!has_placeholder(&buf), "被卡片盖住的那张整张不画");
+    let buf = draw_until(&mut app, &mut terminal, "visible chat picture", |_, buf| {
+        has_placeholder(buf)
+    });
+    let picture = placeholder_rect(&buf).expect("painted picture");
+    assert!(picture.bottom() <= app.geometry.chat_band().bottom());
+    assert_eq!(app.images.stats().expect("lane").cached, 1);
+    app.close_settings_panel(false);
+    assert!(app.needs_full_redraw);
+    assert_eq!(app.images.stats().expect("lane").cached, 0);
+}
+
+#[test]
+fn settings_can_close_while_saving_without_applying_a_receipt_to_a_new_panel() {
+    let mut app = app_with_settings_panel();
+    goto(&mut app, "enabled");
+    press(&mut app, KeyCode::Tab);
+    assert!(panel(&app).dirty_count() > 0);
+    record_pending_interface(&mut app, InterfaceSaveReport::Skipped);
+
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Esc);
+    assert!(panel(&app).is_confirming_close());
+    press(&mut app, KeyCode::Enter);
+    assert!(app.settings_panel.is_none());
+    assert!(app.settings_save.is_some());
+
+    app.open_settings_panel();
+    assert!(app.settings_panel.is_none());
+    assert!(app.drain_intents().is_empty());
+    app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
+        true,
+        "saved",
+        vec![],
+    )));
+    assert!(app.settings_save.is_none());
+    assert!(last_cell_text(&app).1.contains("设置已保存"));
+}
+
+#[test]
+fn a_gateway_save_holds_the_model_draft_until_the_receipt_and_retries_failure() {
+    use crate::shared::panels::settings::ValueText;
+    use crate::shared::panels::settings::test_support as model_fixture;
+
+    let mut app = test_app();
+    let mut schema = gateway_schema();
+    schema.root = model_fixture::mixed_model_catalog();
+    schema.groups.clear();
+    app.inject_settings_panel(
+        &schema,
+        gateway_state(model_fixture::mixed_model_values(), "fp-1"),
+        None,
+    );
+    goto(&mut app, "Image input");
+    press(&mut app, KeyCode::Tab);
+    press(&mut app, KeyCode::Char('s'));
+    let [
+        AppIntent::SaveSettings {
+            gateway,
+            base,
+            gateway_dirty: true,
+            ..
+        },
+    ]: [AppIntent; 1] = app.drain_intents().try_into().expect("one Gateway save")
+    else {
+        panic!("expected a Gateway save");
+    };
+    assert_eq!(base, "fp-1");
+    assert_eq!(
+        gateway["providers"][0]["models"][0]["capabilities"]["vision"],
+        true
+    );
+    record_pending_interface(&mut app, InterfaceSaveReport::Skipped);
+    for key in [KeyCode::Tab, KeyCode::Char('s')] {
+        press(&mut app, key);
+    }
+    assert!(app.drain_intents().is_empty());
+    assert!(app.settings_save.is_some());
+    assert_eq!(
+        panel(&app).current_row().unwrap().value,
+        ValueText::Text("enabled".into())
+    );
+    assert_eq!(panel(&app).dirty_count(), 1);
+
+    app.settle_gateway_save(GatewaySaveReport::Failed {
+        message: "fake transport failure".into(),
+        conflict: false,
+    });
+    assert!(app.settings_save.is_none());
+    assert_eq!(panel(&app).dirty_count(), 1);
+    press(&mut app, KeyCode::Char('s'));
+    let [AppIntent::SaveSettings { gateway: retry, .. }]: [AppIntent; 1] =
+        app.drain_intents().try_into().expect("one retry")
+    else {
+        panic!("expected a retry");
+    };
+    assert_eq!(*gateway, *retry);
+    record_pending_interface(&mut app, InterfaceSaveReport::Skipped);
+    app.settle_gateway_save(GatewaySaveReport::Saved(settings_response(
+        true,
+        "fp-2",
+        vec![],
+    )));
+    assert!(
+        app.drain_intents()
+            .into_iter()
+            .all(|intent| matches!(intent, AppIntent::FetchSettings))
+    );
+    assert!(app.settings_save.is_none());
+    assert_eq!(panel(&app).dirty_count(), 0);
+    assert_eq!(
+        panel(&app).current_row().unwrap().value,
+        ValueText::Text("enabled".into())
+    );
+    press(&mut app, KeyCode::Tab);
+    assert_eq!(
+        panel(&app).current_row().unwrap().value,
+        ValueText::Text("disabled".into())
+    );
+    press(&mut app, KeyCode::Char('s'));
+    let [AppIntent::SaveSettings { gateway, base, .. }]: [AppIntent; 1] =
+        app.drain_intents().try_into().expect("one follow-up save")
+    else {
+        panic!("expected a follow-up Gateway save");
+    };
+    assert_eq!(base, "fp-2");
+    assert_eq!(
+        gateway["providers"][0]["models"][0],
+        json!({"name": "legacy/model", "capabilities": {"vision": false}})
+    );
+}
+
+#[test]
+fn cold_open_and_settings_notifications_cannot_cover_short_frame_editing() {
+    use crate::ui::toast::Toast;
+    use ratatui::style::Modifier;
+
+    let mut app = test_app();
+    app.open_settings_panel();
+    let loading_message = app.toast.as_ref().expect("loading toast").message.clone();
+    app.handle_settings_fetch(gateway_schema(), gateway_state(sample_values(), "fp-1"));
+    assert!(
+        app.toast
+            .as_ref()
+            .is_none_or(|toast| toast.message != loading_message)
+    );
+    let mut terminal = test_terminal(32, 5);
+    draw(&mut app, &mut terminal);
+    assert!(frame_text(terminal.backend().buffer()).contains("❯ providers"));
+
+    goto(&mut app, "gateway.port");
+    press(&mut app, KeyCode::Enter);
+    press_event(&mut app, ctrl(KeyCode::Char('u')));
+    type_text(&mut app, &format!("{}abcdef", "long value ".repeat(8)));
+    let warning = "Warning from settings while the editor is active";
+    app.show_toast(Toast::warning(warning, std::time::Duration::from_secs(30)));
+    for (width, height) in [(32, 5), (120, 32)] {
+        let mut terminal = test_terminal(width, height);
+        draw(&mut app, &mut terminal);
+        let buf = terminal.backend().buffer();
+        let text = frame_text(buf);
+        assert!(text.contains("Warning from settings"), "{text}");
+        if width == 120 {
+            assert!(text.contains(warning), "{text}");
+        }
+        assert!(text.contains("abcdef"), "{text}");
+        assert!(
+            buf.content
+                .iter()
+                .any(|cell| cell.modifier.contains(Modifier::REVERSED)),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn pending_restart_is_visible_in_the_compact_settings_footer() {
+    let mut app = app_with_settings_panel();
+    app.settings_panel
+        .as_mut()
+        .unwrap()
+        .set_pending_restart_paths(vec!["gateway.port".into()]);
+    goto(&mut app, "gateway.port");
+    press(&mut app, KeyCode::Enter);
+    press_event(&mut app, ctrl(KeyCode::Char('u')));
+    type_text(&mut app, "1234");
+    press(&mut app, KeyCode::Enter);
+    let mut terminal = test_terminal(32, 5);
+    draw(&mut app, &mut terminal);
+    let text = frame_text(terminal.backend().buffer());
+    assert!(text.contains("Ctrl+R"), "{text}");
+    assert!(text.contains("port") && text.contains("1234"), "{text}");
 }

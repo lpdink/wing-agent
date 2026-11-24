@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal, NamedTuple, get_args
 
 import yaml
@@ -168,6 +169,13 @@ class ConfigDocumentError(ValueError):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def invalid_yaml_message(exc: Exception) -> str:
+    mark = getattr(exc, "problem_mark", None)
+    if mark is not None:
+        return f"config.yaml 不是合法 YAML（第 {mark.line + 1} 行，第 {mark.column + 1} 列）"
+    return "config.yaml 不是合法 YAML 或 UTF-8 文本"
+
+
 def read_document(
     *, catalog: SettingNode | None = None
 ) -> tuple[SparseDocument, ConfigFingerprint]:
@@ -181,19 +189,22 @@ def read_document(
         ConfigDocumentError: 文件存在但不是合法 YAML / 顶层不是映射（带指纹）。
             文件**缺席**不是错误：``data={}`` + 指纹 ``absent``。
     """
-    path = get_config_path()
+    parsed, fingerprint = read_raw_document(get_config_path())
+    return sparse_document(parsed, catalog or build_catalog()), fingerprint
+
+
+def read_raw_document(path: Path) -> tuple[dict[Any, Any], ConfigFingerprint]:
+    """Read one fingerprinted YAML snapshot before normalizing unknown keys."""
     try:
         raw = path.read_bytes()
     except FileNotFoundError:
-        return SparseDocument(data={}), ConfigFingerprint(value=ABSENT_FINGERPRINT)
+        return {}, ConfigFingerprint(value=ABSENT_FINGERPRINT)
 
     fingerprint = ConfigFingerprint(value=hashlib.sha256(raw).hexdigest())
     try:
         parsed = yaml.safe_load(raw.decode("utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError) as exc:
-        raise ConfigDocumentError(
-            f"config.yaml 不是合法 YAML：{exc}", fingerprint.value
-        ) from exc
+        raise ConfigDocumentError(invalid_yaml_message(exc), fingerprint.value) from exc
     if parsed is None:
         parsed = {}
     if not isinstance(parsed, dict):
@@ -202,9 +213,13 @@ def read_document(
             fingerprint.value,
         )
 
+    return parsed, fingerprint
+
+
+def sparse_document(parsed: dict[Any, Any], catalog: SettingNode) -> SparseDocument:
     extra: list[ExtraKey] = []
-    data = _split_known(catalog or build_catalog(), parsed, "", extra)
-    return SparseDocument(data=data, extra=extra), fingerprint
+    data = _split_known(catalog, parsed, "", extra)
+    return SparseDocument(data=data, extra=extra)
 
 
 def _split_known(

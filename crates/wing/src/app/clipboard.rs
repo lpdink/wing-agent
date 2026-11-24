@@ -35,15 +35,17 @@ pub(crate) const MAX_PENDING_IMAGES: usize = 8;
 pub(crate) const MAX_PENDING_IMAGE_BYTES: usize = 64 * 1024 * 1024;
 
 use crate::app::intent::AppIntent;
+use crate::shared::text_edit::TextInputId;
 use crate::tui::ClipboardEvent;
 use crate::tui::ClipboardFailure;
 use crate::tui::ClipboardPayload;
+use crate::tui::ClipboardTarget;
 use crate::ui::input_area::ImageChipTarget;
 use crate::ui::input_area::ImageStage;
 use crate::ui::toast::Toast;
 use crate::util::clipboard_paste::PasteFailure;
 use crate::util::clipboard_paste::PasteOutcome;
-use crate::util::image_compress::CompressedImage;
+use crate::util::image_compress::{CompressedImage, KNOWN_IMAGE_MIMES};
 
 use super::App;
 
@@ -61,17 +63,61 @@ pub struct PendingClipboardImage {
 }
 
 impl App {
+    pub(super) fn clipboard_target(&self) -> ClipboardTarget {
+        match &self.settings_panel {
+            Some(panel) => panel
+                .paste_target()
+                .map_or(ClipboardTarget::Ignore, ClipboardTarget::TextOnly),
+            None => ClipboardTarget::Default,
+        }
+    }
+
+    pub(super) fn request_clipboard_paste(&mut self) {
+        let target = self.clipboard_target();
+        if target != ClipboardTarget::Ignore && !self.clipboard_read_in_flight {
+            self.clipboard_read_in_flight = true;
+            self.push_intent(AppIntent::ReadClipboard(target));
+        }
+    }
+
+    pub(super) fn paste_into_settings(
+        &mut self,
+        target: TextInputId,
+        result: Result<&str, String>,
+    ) {
+        let Some(panel) = &mut self.settings_panel else {
+            return;
+        };
+        if panel.paste_target() != Some(target) {
+            return;
+        }
+        let outcome =
+            result.and_then(|text| panel.insert_paste(target, text).map_err(str::to_owned));
+        if let Err(message) = outcome {
+            self.show_toast(Toast::warning(message, Duration::from_secs(4)));
+        }
+    }
+
     /// `TermEvent::Clipboard` 的分派：读的生命周期五态（见 [`ClipboardEvent`]）。
     pub(crate) fn handle_clipboard(&mut self, event: ClipboardEvent) {
         match event {
             ClipboardEvent::ImageReadStarted { mime } => self.on_clipboard_image_started(mime),
             ClipboardEvent::ReadProgress { received } => self.on_clipboard_image_progress(received),
             ClipboardEvent::Delivered(payload) => match payload {
-                ClipboardPayload::Text(text) => self.handle_paste(&text),
+                ClipboardPayload::Text(text) => self.paste_outside_settings(&text),
                 ClipboardPayload::Image { bytes, mime, name } => {
                     self.on_clipboard_image_delivered(bytes, mime, name)
                 }
             },
+            ClipboardEvent::TextInput { target, result } => {
+                let result = match &result {
+                    Ok(text) => Ok(text.as_str()),
+                    Err(ClipboardFailure::NoRepresentation) => Err("Clipboard has no text".into()),
+                    Err(ClipboardFailure::Status(_)) => Err("Clipboard read failed".into()),
+                    Err(failure) => Err(failure.message()),
+                };
+                self.paste_into_settings(target, result);
+            }
             // 在途读的失败：占位符就地翻成 `✗`（**只在它还在的时候**：用户可能已经
             // 把占位符删了 —— 那正是「这张我不要了」的动作）。只有图片读有占位符，
             // 所以 MIME 决定要不要动草稿。
@@ -83,10 +129,22 @@ impl App {
         }
     }
 
-    /// 本地剪贴板读取（L1，`Ctrl+V` / `super+v`）的回执落点：文本 → 与 bracketed
-    /// paste 同一个入口（模态挡板自动继承）；图片 → 同一条单并发流水线；空 / 失败 →
-    /// 定向 toast（与 OSC 5522 通道同一条「不静默」红线）。
-    pub(crate) fn on_clipboard_paste(&mut self, result: Result<PasteOutcome, PasteFailure>) {
+    pub(crate) fn on_clipboard_paste(
+        &mut self,
+        target: ClipboardTarget,
+        result: Result<PasteOutcome, PasteFailure>,
+    ) {
+        self.clipboard_read_in_flight = false;
+        if let ClipboardTarget::TextOnly(target) = target {
+            self.paste_into_settings(target, crate::util::clipboard_paste::settings_text(&result));
+            return;
+        }
+        if target == ClipboardTarget::Ignore {
+            return;
+        }
+        if self.settings_panel.is_some() {
+            return;
+        }
         match result {
             Ok(PasteOutcome::Text(text)) => self.handle_paste(&text),
             // 本地读取的通道不带文件名（OSC 5522 也不带），也**没有「读开始」信号**：
@@ -105,12 +163,21 @@ impl App {
         }
     }
 
+    fn paste_outside_settings(&mut self, text: &str) {
+        if self.settings_panel.is_none() {
+            self.handle_paste(text);
+        }
+    }
+
     /// 5522 通道：一条图片读开始了（协议机已选定图片 MIME，字节还没到）。
     ///
     /// 占位符就在这一刻落地 —— 这是「粘贴已受理」对用户唯一的证据，也是整个特性的
     /// 起点（见 [`Self::on_clipboard_local_image`] 对「本地通道没这一步」的说明）。
     /// 句柄入队，与随后的交付 / 失败配对（见 `App::image_reads`）。
     fn on_clipboard_image_started(&mut self, mime: String) {
+        if self.settings_panel.is_some() {
+            return;
+        }
         let target = self
             .input
             .insert_pending_image(ImageStage::Receiving { bytes: 0 });
@@ -148,9 +215,16 @@ impl App {
     /// 用户眼里早已作废，重新插一个 chip 才是意外（删占位符 = 「这张我不要了」）。
     fn on_clipboard_image_delivered(&mut self, bytes: Vec<u8>, mime: String, name: Option<String>) {
         let Some(target) = self.image_reads.pop_front() else {
-            // 没有在途读却收到图片字节（不该发生）：按本地通道处理，至少让字节落地。
-            tracing::debug!(mime = %mime, "clipboard image arrived with no read in flight");
-            self.on_clipboard_local_image(bytes, mime);
+            let mime = if KNOWN_IMAGE_MIMES.contains(&mime.as_str()) {
+                mime.as_str()
+            } else {
+                "image/unknown"
+            };
+            tracing::debug!(
+                mime,
+                bytes = bytes.len(),
+                "orphan OSC clipboard image dropped"
+            );
             return;
         };
         if !self.input.image_target_is_live(target) {

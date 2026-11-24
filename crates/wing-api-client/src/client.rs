@@ -113,6 +113,11 @@ impl GatewayClient {
         })
     }
 
+    /// Rebuild this client for the same endpoint with a different credential.
+    pub fn with_api_key(&self, api_key: Option<&str>) -> Result<Self, ApiClientError> {
+        Self::new(&self.base_url, api_key)
+    }
+
     /// 使用默认地址 (`http://127.0.0.1:{DEFAULT_PORT}`) 创建 client。
     pub fn localhost(api_key: Option<&str>) -> Result<Self, ApiClientError> {
         Self::new(format!("http://127.0.0.1:{DEFAULT_PORT}"), api_key)
@@ -774,11 +779,22 @@ impl GatewayClient {
 
     /// 优雅关闭 Gateway。
     pub async fn shutdown(&self) -> Result<(), ApiClientError> {
-        let resp = self
-            .http
-            .post(format!("{}{}", self.base_url, "/api/shutdown"))
-            .send()
-            .await?;
+        self.shutdown_request(None).await
+    }
+
+    pub async fn shutdown_if_config_unchanged(
+        &self,
+        fingerprint: &str,
+    ) -> Result<(), ApiClientError> {
+        self.shutdown_request(Some(fingerprint)).await
+    }
+
+    async fn shutdown_request(&self, fingerprint: Option<&str>) -> Result<(), ApiClientError> {
+        let mut request = self.http.post(format!("{}/api/shutdown", self.base_url));
+        if let Some(fingerprint) = fingerprint {
+            request = request.query(&[("settings_fingerprint", fingerprint)]);
+        }
+        let resp = request.send().await?;
 
         if !resp.status().is_success() {
             return Err(extract_api_error(resp).await);
@@ -898,7 +914,8 @@ fn build_auth_headers(api_key: Option<&str>) -> Result<HeaderMap, ApiClientError
     if let Some(key) = api_key
         && !key.is_empty()
     {
-        let value = format!("Bearer {key}").parse()?;
+        let mut value: reqwest::header::HeaderValue = format!("Bearer {key}").parse()?;
+        value.set_sensitive(true);
         headers.insert(AUTHORIZATION, value);
     }
     Ok(headers)
@@ -1171,6 +1188,51 @@ mod tests {
         for req in &recorded {
             assert_eq!(req.authorization.as_deref(), Some("Bearer secret-key"));
         }
+    }
+
+    #[tokio::test]
+    async fn rebinding_settings_credentials_preserves_the_endpoint_without_mutating_the_original() {
+        let gateway = MockGateway::start(vec![(
+            "/api/settings/status",
+            200,
+            r#"{
+            "valid":true,"setup_mode":false,"fingerprint":"validated-fp",
+            "restart_listener":{"host":"127.0.0.1","port":43721}}
+        "#,
+        )])
+        .await;
+        let original = GatewayClient::new(&gateway.url, Some("fixture-old")).unwrap();
+        let rotated = original.with_api_key(Some("fixture-new")).unwrap();
+        let unauthenticated = rotated.with_api_key(None).unwrap();
+        assert!(matches!(
+            rotated.with_api_key(Some("invalid\nfixture")),
+            Err(ApiClientError::InvalidApiKey(_))
+        ));
+        for client in [&original, &rotated, &unauthenticated] {
+            let status = client.settings_status().await.unwrap();
+            assert!(status.valid);
+            assert_eq!(status.fingerprint.as_deref(), Some("validated-fp"));
+            let listener = status.restart_listener.unwrap();
+            assert_eq!(
+                (listener.host.as_str(), listener.port),
+                ("127.0.0.1", 43721)
+            );
+        }
+        let requests = gateway.recorded();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.path.as_str())
+                .collect::<Vec<_>>(),
+            ["/api/settings/status"; 3]
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.authorization.as_deref())
+                .collect::<Vec<_>>(),
+            [Some("Bearer fixture-old"), Some("Bearer fixture-new"), None]
+        );
     }
 
     #[tokio::test]

@@ -176,6 +176,7 @@ pub(super) fn document() -> Value {
 
 pub(super) fn get_response(values: Value) -> SettingsGetResponse {
     SettingsGetResponse {
+        pending_restart_paths: None,
         values,
         secrets: HashMap::new(),
         fingerprint: "fp-1".to_string(),
@@ -270,6 +271,7 @@ impl FakeBackend {
             }),
             get: Ok(get_response(values)),
             status: Ok(SettingsStatusResponse {
+                restart_listener: None,
                 valid: true,
                 setup_mode: false,
                 problems: Vec::new(),

@@ -84,6 +84,7 @@ async def test_port_change_needs_a_restart_and_does_not_rebind(probe: Probe) -> 
     assert receipt["restart_required"] == ["gateway.port"], receipt
     # 配置本身是应用的（reload 照常六项），要重启的只是监听端口。
     assert receipt["reload"]["ok"] is True, receipt["reload"]
+    assert receipt["reload"]["pending_restart_paths"] == ["gateway.port"]
     assert [item["name"] for item in receipt["reload"]["results"]] == RELOAD_ITEMS, (
         receipt["reload"]
     )
@@ -138,9 +139,7 @@ async def test_cors_origins_change_names_the_restart_path(probe: Probe) -> None:
     （``origins[0]``）也要被点名：标量列表元素继承列表声明的生效域，否则这条
     信号会被静默吞掉（面板的 Ctrl+R 提示因此永远不出现）。
 
-    「重启后真的生效」由单测覆盖（``test_gateway_cors.py`` 用配置文件构造 app，
-    预检放通新来源）；probe 侧不重启——``ProbeEnv`` 重启会按旋钮重新生成配置，
-    文件里的保存结果不跨重启保留，这是 env 的已知语义。
+    重启时保留保存后的配置版本，验证真实预检和待重启状态。
     """
     http = probe.driver_required.http
     current = await http.request("GET", "/api/settings/get")
@@ -165,3 +164,96 @@ async def test_cors_origins_change_names_the_restart_path(probe: Probe) -> None:
     # 保存是真的：盘上文件里已经有新来源（生效时机才是重启）。
     written = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
     assert written["gateway"]["cors"]["origins"] == [CORS_ORIGIN], written["gateway"]
+
+    probe.env.config_text = probe.env.config_path.read_text(encoding="utf-8")
+    await probe.env.restart_gateway()
+    restarted = DriverHttp(probe.env.gateway_url)
+    async with restarted:
+        headers = await _preflight_headers(restarted, preflight)
+        assert headers.get("access-control-allow-origin") == CORS_ORIGIN
+        assert (await restarted.reload())["pending_restart_paths"] == []
+        status = await restarted.request("GET", "/api/settings/status")
+        assert status["restart_listener"]["port"] == probe.env.port
+        file = yaml.safe_load(probe.env.config_path.read_text(encoding="utf-8"))
+        file_port = file["gateway"]["port"]
+        assert file_port != probe.env.port
+        file["gateway"]["port"] = _free_port()
+        probe.env.config_path.write_text(yaml.safe_dump(file), encoding="utf-8")
+        status = await restarted.request("GET", "/api/settings/status")
+        assert status["restart_listener"]["port"] == file["gateway"]["port"]
+
+
+@pytest.mark.asyncio
+async def test_manual_restart_changes_persist_across_reloads_and_invalid_config(
+    probe: Probe,
+) -> None:
+    http = probe.driver_required.http
+    config_path = probe.env.config_path
+    original = config_path.read_text(encoding="utf-8")
+    assert (await http.reload())["pending_restart_paths"] == []
+    config = yaml.safe_load(original)
+    config["gateway"]["port"] = _free_port()
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    first = await http.reload()
+    assert first["ok"] and first["pending_restart_paths"] == ["gateway.port"], first
+    assert (await http.reload())["pending_restart_paths"] == ["gateway.port"]
+
+    current = await http.request("GET", "/api/settings/get")
+    assert current["pending_restart_paths"] == ["gateway.port"]
+    current["values"]["log"] = {"level": "INFO"}
+    saved = await http.request(
+        "POST",
+        "/api/settings/set",
+        body={"base": current["fingerprint"], "document": current["values"]},
+    )
+    assert saved["restart_required"] == []
+    assert saved["reload"]["pending_restart_paths"] == ["gateway.port"]
+
+    marker = "fake-secret-in-bad-yaml"
+    config_path.write_text(f"providers: [{marker}", encoding="utf-8")
+    invalid = await http.reload()
+    assert not invalid["ok"]
+    assert [item["name"] for item in invalid["results"]] == ["config.yaml"]
+    assert marker not in str(invalid)
+    assert invalid["pending_restart_paths"] == ["gateway.port"]
+    invalid_get = await http.request("GET", "/api/settings/get")
+    assert invalid_get["pending_restart_paths"] == ["gateway.port"]
+    assert marker not in str(invalid_get)
+
+    config_path.write_text(original, encoding="utf-8")
+    restored = await http.reload()
+    assert restored["ok"] and restored["pending_restart_paths"] == [], restored
+
+
+@pytest.mark.asyncio
+async def test_restart_rejects_a_file_that_cannot_cold_boot(probe: Probe) -> None:
+    http = probe.driver_required.http
+    path = probe.env.config_path
+    current = yaml.safe_load(path.read_text(encoding="utf-8"))
+    current["gateway"]["port"] = _free_port()
+    clean = yaml.safe_dump(current)
+    path.write_text(clean, encoding="utf-8")
+    assert (await http.reload())["pending_restart_paths"] == ["gateway.port"]
+    validated = await http.request("GET", "/api/settings/status")
+    assert validated["valid"]
+    for invalid in (
+        f"123: unknown root key\n{clean}",
+        yaml.safe_dump({**current, "gateway": {"port": 70000}}),
+    ):
+        path.write_text(invalid, encoding="utf-8")
+        status = await http.request("GET", "/api/settings/status")
+        assert not status["valid"] and not status["setup_mode"]
+        assert status["problems"] and status["restart_listener"] is None
+        view = await http.request("GET", "/api/settings/get")
+        assert view["problems"] and view["values"]["providers"]
+        assert view["pending_restart_paths"] == ["gateway.port"]
+        with pytest.raises(DriverHttpError) as refusal:
+            await http.request(
+                "POST", f"/api/shutdown?settings_fingerprint={validated['fingerprint']}"
+            )
+        assert refusal.value.status == 409
+        assert (await http.health())["status"] == "ok"
+    path.write_text(clean, encoding="utf-8")
+    repaired = await http.request("GET", "/api/settings/status")
+    assert repaired["valid"] and repaired["fingerprint"] == validated["fingerprint"]
+    assert repaired["restart_listener"]["port"] == current["gateway"]["port"]

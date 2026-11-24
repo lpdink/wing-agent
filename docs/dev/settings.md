@@ -1,7 +1,7 @@
 # 设置面（Setting API · TUI 设置面板 · 首次运行向导 · `wing config`）
 
 本页是**配置这条产品线**的机制级文档：一份声明（`S(...)`）怎么变成目录 / 模板 / 校验，配置怎么经
-API 保存与生效，配置不可用时网关怎么活着（setup mode），以及三个消费入口（TUI 浮层面板 /
+API 保存与生效，配置不可用时网关怎么活着（setup mode），以及三个消费入口（TUI 单栏设置 /
 首次运行向导 / `wing config` CLI）各自长什么样、改它们要注意什么。
 
 涉及两个文件（都叫 `config.yaml`，语义完全不同）：
@@ -86,7 +86,7 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | 消费方 | 读什么 |
 |---|---|
 | `GET /api/settings/schema` | `groups[]`（id / title / doc / members）——**前端左列锚点的唯一来源**，前端零硬编码 |
-| catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（面板左栏锚点的说明；不进 config.yaml） |
+| catalog 节点 | `build_catalog()` 最后一步把 `section = group.title` 盖到 root 的直接子节点上，`section_doc = group.doc` 只盖在**声明序首成员**上（设置分类的说明；不进 config.yaml） |
 | `emit.py` | 按 `section` 分段发分隔行；**键序恒为模型声明序**（分组表管界面顺序，不管文件顺序；同组成员必须连续，见门禁） |
 
 门禁（`tests/test_config_groups.py`）：id / title 唯一、成员非空且都是真实顶层字段、
@@ -189,7 +189,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 | 方法 | 路径 | 语义 | 鉴权 | setup mode |
 |---|---|---|---|---|
 | GET | `/api/settings/schema` | 设置目录（catalog 树）+ **业务分组 `groups[]`**（§1.1）+ 版本 + `config.yaml` 绝对路径；纯静态 | 常规 | ✅ |
-| GET | `/api/settings/get` | 稀疏文档（密文叶子 = `null`）+ 密文状态表 + 指纹 + 全部问题 | 常规 | ✅ |
+| GET | `/api/settings/get` | 稀疏文档（密文叶子 = `null`）+ 密文状态表 + 指纹 + 全部问题 + `pending_restart_paths` | 常规 | ✅ |
 | GET | `/api/settings/status` | `{valid, setup_mode, problems, fingerprint}`——启动路径上的最便宜预检 | 常规 | ✅ |
 | POST | `/api/settings/set` | 保存事务（见下） | **admin**（`tool_runtime` 403） | ✅（唯一修复路径） |
 
@@ -205,7 +205,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 ④ 字段级 + 跨字段校验（全有或全无）             ← 有 problem → 200 + ok=false，一个字节都不写
 ⑤ 备份 config.yaml.bak（字节级原子写，覆盖式）
 ⑥ emit_config_yaml(incoming) → 原子写 config.yaml
-⑦ 生效：正常模式 = 热重载六项；setup mode = 就地转入正常模式（§8）
+⑦ 应用刚写入的版本（正常模式走六项热重载，setup mode 就地装配，见 §8）
 ⑧ changed_paths / restart_required（只读**叶子**的 apply，P13）
 ⑨ 广播 SettingsChangedEvent（global）
 ⑩ 回执 SettingsSetResponse
@@ -214,7 +214,8 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 **校验失败走 HTTP 200 + `ok=false` + `problems`（不是 4xx）**——这是刻意的取舍，别"修好"它：
 请求本身完全合法，是**用户填的内容**不合法；把它当业务结果返回，让前端保存路径永远拿到同一个响应类型
 （`ok` 决定成败、`problems` 逐条驱动标红）。HTTP 错误码只留给协议级失败：
-**409**（指纹不匹配，`error="conflict"`，`detail` 带当前指纹）、**401/403**（鉴权）、**500**（写盘 `OSError`）。
+**409**（指纹不匹配，`error="conflict"`，`detail` 带当前指纹）、**401/403**（鉴权）、
+**500 `settings_write_failed`**（写盘失败，配置文件未被替换）。缺失或不完整的回执无法确认是否已写盘。
 
 回执字段：
 
@@ -224,7 +225,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 | `fingerprint` | 落盘后的 sha256（文件不存在时字面量 `"absent"`） |
 | `problems` | 校验问题（path / kind / message / hint） |
 | `changed` / `restart_required` | 相对保存前的变更路径；其中 `apply == restart` 的（只读叶子） |
-| `reload` | 逐项热重载结果（`name` / `ok` / `detail`，与 `/api/system/reload` 同形） |
+| `reload` | 逐项运行期结果（`name` / `ok` / `detail`，与 `/api/system/reload` 同形）。`ok=true` 且 `reload.ok=false` 表示文件已写入，部分运行期步骤失败 |
 | `setup_mode_exited` | 这次保存是否把网关从 setup mode 推进正常模式 |
 | `backup_path` | `.bak` 路径；磁盘上原来没有文件时为 `null` |
 | `warnings` | 非致命告知（与 `problems` 的区别：problems 让保存失败，warnings 只是提醒） |
@@ -233,6 +234,11 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 逐个记成 modified——这是"N 项变更"的展示粒度，不是三方合并）、类型敏感（`True != 1`、`300 != 300.0`）、
 缺席与空容器等价。`restart_required` 只读**非结构节点**的 `apply`（容器节点的 apply 是"子树最粗"，
 不能用来判定；解析不出的路径跳过——宁可漏报也不误报）。
+
+`pending_restart_paths` 是当前已加载配置与实际启动设置的差异。监听地址兼容启动时的显式参数覆盖，
+CORS 按允许来源比较，扫描间隔按后台任务装配值比较。它保留到恢复原值并重新加载，或按新值重启为止。
+外部编辑尚未重载时，GET 的文档仍来自磁盘，待重启状态仍来自网关已加载的配置。设置保存和显式重载串行执行。
+
 
 保存时写一行结构化 INFO 日志：`settings changed: paths=[…] restart_required=[…] fingerprint=<old>→<new>`
 ——**只有路径，没有值**（值一律不落日志，密文自然脱敏）。不新增审计文件：配置变更史就是
@@ -302,7 +308,8 @@ git-tracked 的 `config.yaml` + `.bak`。
 | 路径 | apply | 依据（读取点） |
 |---|---|---|
 | `providers[].name` | `next_session` | 池按 name 懒建实例；改名 = 旧 name 从配置消失、新 name 出现。retire 语义保留已移除 name 的旧实例（钉在它上面的会话不被拆解），旧会话可用到重启，新会话用新 name |
-| `providers[].protocol` / `base_url` / `api_key` / `timeout_first_chunk` / `timeout_total` / `max_connections` / `max_retries` / `max_retry_delay` / `explicit_cache_mode` / `reasoning_effort` / `max_tokens` / `extra_body` / `anthropic_version` / `models[]`（窗口字段除外，见下一行）/ `image_delivery` / `image_max_bytes` | `hot` | 热重载第 4 项 `reset_providers()` 重建共享池（先建后换，旧实例在途计数归零后退场） |
+| `providers[].protocol` / `base_url` / `api_key` / `timeout_first_chunk` / `timeout_total` / `max_connections` / `max_retries` / `max_retry_delay` / `explicit_cache_mode` / `reasoning_effort` / `max_tokens` / `extra_body` / `anthropic_version` / `models[]` 的展示名、描述和能力（目录查询也即时使用新声明）/ `image_delivery` / `image_max_bytes` | `hot` | 热重载第 4 项 `reset_providers()` 重建共享池（先建后换，旧实例在途计数归零后退场） |
+| `providers[].models[].id` / `name` | `next_session` | 模型目录与 ID 查询即时更新，已加载会话保留调用名，显式切换模型或重新水合时再绑定 |
 | `providers[].models[].context_window_tokens` / `keep_recent_tokens` | `next_session` | 模型级是压缩双阈值的唯一来源：会话 / 模板构造时读（`AgentTemplate.from_config` → `Compactor`），换模型时按目标模型重绑定（`WingAgent.set_model`）。已在内存的会话在换模型 / 换模板前保持自己的阈值快照——不做运行期热改窗口 |
 | `agents[].*`（`name` / `model` / `default` / `system_prompt` / `tools` / `skills` / `rules` / `max_turns` / `yolo`） | `next_session` | `SessionManager.reload_templates()` 重建模板；已在内存的会话保持自己的 agent。`skills` / `rules` 另外在 `ContextManager` 构造时快照 patterns，热重载时按**会话自己的** patterns 重新 glob |
 | `safe_command_patterns[]` | `hot` | `tools/internal/shell_safety.py` 每调用 `get_config()` |
@@ -330,6 +337,11 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
 
 `POST /api/system/reload` 与保存事务的第 ⑦ 步走**同一条管道**：config 项失败立即中止（后续项不再尝试），
 其余项失败继续，逐项 `ok` / `detail` 如实上报；失败**不回滚文件**（配置本身合法）。
+Hook 或命令文件局部加载失败时，可用文件仍然继续加载，步骤回执报告受影响的文件数。
+
+`wing reload` 让已运行的网关重新读取手工修改的文件。找不到网关时命令失败，可单独运行 `wing start`。
+修改监听地址后可用 `wing reload --host <旧地址> --port <旧端口>` 联系原有进程。已打开的面板可以按 `R` 重新读取状态。
+磁盘无效时保留最后加载成功的配置和待重启状态。`new_session_defaults_changed` 表示默认模板或默认会话参数实际更新。
 
 已知边界：**对象 / 联合形态的元素模板（`[]` 节点）是合成节点**，apply 取子树最粗、**不**继承列表声明
 （`providers[]` 显示 `next_session`）；**标量**元素模板（`list[str]` 等）继承列表声明的 apply
@@ -386,8 +398,8 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
   ——守门中间件是主闸，替身 + `app.py` 的异常处理器（503 + `error="setup_mode"`）是万一可达时的安全网。
 - **`_enter_operational()` = 六步，幂等**：① `config.yaml`（现读或由调用方给）② `log level`
   ③ `prompt commands` ④ 建 `WingRuntime`（hooks 随之加载）⑤ 逐出 job + 后台任务（lifespan 已跑过时补启）
-  ⑥ auth 锁死警告。**任一步失败 ⇒ 停在 setup mode**（`_runtime` 与布尔在同一同步块里翻转，请求之间看不到
-  中间态）、文件**不回滚**（它本身是合法配置）、回执如实报明细；下次保存或重启再试。
+  ⑥ auth 锁死警告。核心装配失败时留在 setup mode，保留已写入的文件，可再次保存重试。
+  命令与 hook 文件允许部分加载，个别文件失败时报告 `reload.ok=false`，核心装配完成后仍可正常建会话。
   启动路径上转入失败**不许静默降级**：记 ERROR 日志 + 写一条 `path=None` 的 boot problem
   （否则会出现 503 说"共 0 条问题"而 `valid=true` 的自相矛盾）。
   **终端横幅覆盖两条降级路径**（`cli.py`）：横幅条件不是 `boot.ok`，而是构造完 server 之后的
@@ -405,99 +417,41 @@ config.yaml → hooks → prompt commands → provider → skills & rules → lo
   默认，与 Rust `cmd/backend_config.rs` 的 `#[serde(default)]` 语义对齐）——TUI / CLI 与降级启动的网关
   因此落在同一个端口上。
 
-## 9. TUI 设置面板（v2：浮层卡片 + 双栏）
+## 9. TUI 设置面板
 
-**落点：居中浮层卡片（不是聊天流里的 cell，也不再是全屏 overlay）**。设置是"去一个地方"而不是
-"transcript 里的一条消息"；需要不随滚动漂移的框架（标题栏 / 副标题行 / 键位栏）；一节可能十几个字段，
-聊天流的 5 行窗口会窒息；且不扰动 transcript 的滚动位置、选区锚点、图片放置表。
-v2 把"全屏"改成"浮层"：四周露出聊天背景，用户始终知道自己还在会话里。
+`/settings`（也可用 `/set`、`/config`）在聊天下方打开通栏列表。状态栏和可见的聊天留在上方，
+小终端优先留出设置操作行。关闭后恢复输入框、草稿及光标。设置打开时由面板接管按键和点击，滚轮继续滚动聊天。
 
-几何（`ui/settings/mod.rs::card_area` 是唯一实现，App 与测试共用）：
+第一层显示业务分类。分组与顺序来自 Gateway 和 Interface 的目录声明（§1.1）。`Enter` 进入当前分类，
+再用同一列浏览和展开嵌套设置。当前行就近显示值与简短说明。编辑长值时，列表底部用整行显示输入框，
+并随光标水平移动。密文只显示配置状态或掩码。
 
-| 规则 | 值 |
+| 按键 | 用途 |
 |---|---|
-| 卡片尺寸 | `min(终端宽-4, 110) × min(终端高-4, 32)`，居中 |
-| 退化 | 终端 `< 80×24` → 铺满（浮层比全屏更难读的尺寸就别浮了） |
-| 左栏宽度 | `clamp(内容宽 × 22%, 14, 22)`，且保证右栏 ≥ 24 列（否则**不出左栏**，右栏独占） |
-| 详情栏 | 右栏 ≥ 78 列时竖切出来（树 58% / 详情 42%）；否则右栏末行退化为当前行的 doc 提示 |
-| 键位栏 | 按内容装箱 1~2 行（装得下一行就把省下的行还给主体） |
+| `↑` `↓`，`PageUp` `PageDown`，`Home` `End` | 选择、翻页、跳到首尾 |
+| `Enter` | 进入分类，展开结构，编辑或提交字段，确认选择 |
+| `Tab` | 切换当前布尔项或循环枚举值。编辑、搜索和确认时忽略 |
+| `←` `→` | 折叠、展开，或在枚举项上循环取值。编辑时移动字符光标 |
+| `/` | 在一个列表中搜索全部分类，匹配目录路径、标题、说明和可选值。`Enter` 进入所选结果的分类，`Esc` 恢复搜索前的位置 |
+| `p` | 打开全局问题清单。`Enter` 跳到可定位的问题，`Esc` 或 `p` 返回 |
+| `a`，`d`，`J` `K` | 给最近的列表新增一项，确认后删除列表项或清空值，上下移动列表项 |
+| `r` | 移除显式字段值，恢复默认 |
+| `s` | 保存 Gateway 和 Interface 中已修改的部分 |
+| `R` | 从磁盘读取设置。有草稿时先确认 |
+| `Ctrl+R` | 重启网关。当前网关报告有待重启的设置且磁盘配置通过校验时可用 |
+| `?` | 打开键位帮助，`↑` `↓` 滚动 |
 
-**双栏：左栏 = 业务分组锚点，右栏 = 当前分组的设置项**。锚点表由 `shared/panels/settings/groups.rs`
-从两份声明拼出（后端 `schema.groups[]` + Rust 侧 `config/catalog.rs::interface_groups()`），
-**前端零硬编码**：组名 / 顺序 / 成员全在声明层（§1.1），加组并组改名不用碰 Rust。
-Interface 是**最后一个锚点**（不再有 v1 的"切根"概念，两个根只是锚点表里的两段）；
-老网关不发 `groups[]` 时按 root 子节点的 `section` 推导兜底（`SettingGroup::derive_from_sections`），
-没被任何组认领的顶层键进一个兜底锚点——**任何情况下都不会有设置项在界面里消失**。
+`Esc` 先取消编辑、确认、搜索、帮助或枚举选择。设置项列表再按 `Esc` 返回分类，问题清单返回打开它的页面。
+在分类页按 `Esc` 关闭。有未保存改动时需要确认放弃。编辑时 `Enter` 提交，打开编辑器后原样提交不会写入字段。
+`Ctrl+U` 清空编辑缓冲。空密文提交保留原值。`Ctrl+C` 双击退出 TUI。
 
-进入一个分组会展开它的顶层成员（右栏一进来就有内容），换组时右栏光标回到首行；
-`providers[0]` 这类列表层级只出现在右栏。左栏的锚点带三种徽标：脏（`●`）/ 问题数 / 搜索命中数。
+在 Providers 的模型列表中，两种配置形态都能编辑 `Model name` 和 `Image input`，后者位于模型的 capabilities 下。
+新模型直接进入名称编辑。已有短写改名后仍使用短写，修改图片输入等高级字段时会转成对象并保留原名称。
+本次草稿里若撤掉所有触发转换的字段，条目会恢复短写。未改动的模型保留原有配置形态。
 
-**提交语义 = 实时预览 + 显式保存**（v1 原样保留）：Interface 根的任何提交**立即**产生一次
-`PreviewInterface(整份稀疏文档)`（App 换掉自己的 `config` / 调色板 → 整屏重绘；改颜色当场变色，
-`Esc` 放弃时回退快照）；Gateway 根的改动只标脏、攒到 `s` 一次保存。`s` **保存两边**、各自成败、
-回执合并成一条 notice（`✓ Interface …` / `✓ Gateway …` / `⚠ gateway.port 需重启网关才生效 — Ctrl+R 立即重启`）。
-只有真的改了的那一边才会发请求 / 写文件（`gateway_dirty` / `interface_dirty`）。
-
-键位表（`shared/panels/settings/mod.rs` 是唯一实现，`ui/settings/**` 只渲染）：
-
-| 键 | 左栏（分组） | 右栏（设置项） | 编辑器激活 | 问题清单 | 选择项展开 |
-|---|---|---|---|---|---|
-| `↑` `↓` | 选分组（钳制） | 移动光标（钳制） | **忽略**（模态：必须 Enter / Esc 收口） | 选择（左栏焦点时选分组） | 内项光标 |
-| `PageUp` `PageDown` / `Home` `End` | 按锚点可见行数翻页 / 首尾 | 翻页 / 首尾 | `Home`/`End` 行首尾 | 翻页 / 首尾 | — |
-| `Tab` | 进右栏 | 回左栏 | 忽略 | 切栏 | 切栏 |
-| `←` | 无操作（已在最左） | 折叠 / 已折叠则跳父行 / **depth 0 无处可去则回左栏**；enum 行循环切值（往前） | 左移字符 | 无操作（回树用 `Esc` / `p`） | 折叠（不选） |
-| `→` | 进右栏 | 展开；enum 行循环切值（往后） | 右移字符 | 跳到该行（左栏焦点时 = 进那一组的树） | — |
-| `Enter` | 进右栏 | 按行类型分派（展开 / 切换 / 选择项 / 编辑 / 新增 / 选中 / 只读） | 提交（**不改 = 无操作**） | 跳到该行 | 选中并折叠 |
-| `Space` | — | bool 切换 | 插入空格 | — | 选中 |
-| `a` | — | 给最近的列表祖先新增一项（union 列表先选形态） | 输入字符 | — | — |
-| `d` | — | 列表项删除 / 标量字段清空（二次确认） | — | — | — |
-| `J` `K` | — | 列表项下移 / 上移（顺序有意义：模型目录 / glob 序） | — | — | — |
-| `r` | — | 叶子复位（从稀疏文档移除 = 跟随默认）；列表项 / 结构行无操作 | — | — | — |
-| `s` | 保存两边 | 保存两边 | — | 保存 | — |
-| `/` | 搜索（焦点自动进右栏） | 搜索 | — | 回树 + 搜索 | — |
-| `p` | 问题清单（焦点进右栏） | 问题清单 | — | 返回树 | — |
-| `?` | 帮助浮层 | 帮助浮层 | — | 帮助 | — |
-| `R` | **重新载入**（丢弃本地全部改动、重拉 `get`；脏则先确认） | 同 | — | 同树 | — |
-| `Ctrl+R` | **立即重启网关**（仅在 `restart_required` 非空时被接受、也只在键位栏显示；脏则先确认；轮次进行中由 App 拒绝） | 同 | — | 同树 | — |
-| `Esc` | 阶梯 7–8（脏改动确认 → 关闭） | 阶梯 5–6（折叠选择项 → 回左栏） | 取消编辑 | 返回树 | 折叠 |
-| `Ctrl+C` | **面板不吞**（应用保留手势：双击退出 TUI） | 同 | 同 | 同 | 同 |
-
-`s` / `R` / `Ctrl+R` / `/` / `p` / `?` / `Tab` / `Esc` 在**两栏共用**（先于焦点分派处理）。
-
-`Esc` 阶梯（命中即停）：① 编辑器激活 → 取消编辑；② 模态提示 → 取消；③ 搜索 → 退出 + 清 query +
-恢复搜索前的**展开快照与分组**；④ 帮助 → 关闭；⑤ 右栏 + enum 选择项 → 折叠；⑥ 右栏 → **回左栏**
-（v2 新增的一级：一次误触不该把用户送出面板）；⑦ 左栏 + 有脏改动 → "放弃 N 项未保存的改动？"
-二次确认 → `Close{discard:true}`；⑧ 左栏 → `Close{discard:false}`。**关闭动作由 App 执行**（面板只产出意图）。
-
-其余交互口径：
-
-- **编辑器提交是无操作的**：打开 → 不改 → Enter 不写入、不标脏（预填用有效展示值——缺席时就是声明默认值，
-  用户看到的与将要得到的一致）；
-- **enum** 的选择项**内联展开为子行**（不切视图），`←`/`→` 在 enum 行上循环切值（power user 快捷键）；
-- **密文行**渲染 `•••••••• ab12` / `(empty)` / `(not set)`，编辑器缓冲永不明文渲染（§6）；
-- **问题清单是同一个组件的三个场景**：setup 首屏（初始视图 = 问题清单，焦点在右栏）、保存失败
-  （`ok=false` 自动切过去）、随时用 `p` 查看。清单**不按分组过滤**（它是全局的），左栏只显示每组的问题数；
-  `Enter` 会**切到问题所在的那一组**、展开祖先并把光标落到该行；文档级问题（`path == null`）不可导航、
-  也不归任何组（标题栏的总数仍然算它）。本地按目录约束生成的问题（`min_items` / 必填缺席）与后端返回的
-  问题合并去重（同 `(根, 路径, kind)` 为同一条；`message` 取后端的、`hint` 取两者中非空的那个），
-  排序按严重度（`missing_required` > `unknown_reference` > `duplicate` > `empty_list` > `invalid_value` > `unknown_key`，
-  未知种类最后）再按路径；
-- **搜索跨全部分组**：子串匹配 `path` / `title` / `doc` / `notes` / `choices`（值 + 含义），命中项的祖先
-  自动展开、命中的结构节点连带显示直接子节点。右栏一次只显示一组，所以**当前组零命中而别的组有命中时
-  自动跳到第一个有命中的组**（左栏的命中数徽标同时告诉你还有哪些组），`Esc` 恢复搜索前的分组与展开快照；
-- **模态优先级**：`ModalOwner::Settings` 最高，且是**唯一连应用保留键也接管的层**——面板开着时
-  `Esc` / `PageUp` / `PageDown` / `Ctrl+O` 全部交给面板（`Ctrl+O` 被面板忽略，比让它穿透去改看不见的
-  聊天状态安全），**只有 `Ctrl+C` 永远归应用**。面板开着时到达的 `ask` 排队不弹出，关闭后照旧弹出；
-- **浮层期间的三件事**（改渲染顺序时最容易漏）：卡片挡住的图片**整张跳过**（`images.paint` 的 `masks`
-  里同时有卡片与 toast；半张覆盖会撕碎图形协议），卡片之外的背景图片照画；选区被取消；滚动条不画且清掉
-  hover / drag 态（`┃` / `█` 是滚动条独有码位，测试按"整帧扫这两个码位"判定）。
-  **开面板与关面板各整屏重画一次**（`needs_full_redraw = true`，与 `images.invalidate()` 是既有配对）：
-  卡片底下那张图已经画到屏幕上了，"这一帧不画它"不会让它消失（sixel 尤其如此），只有 `terminal.clear()` 会；
-- 保存回执同时弹一条摘要 toast（面板压在 transcript 上，notice 在它底下看不见）；
-  `settings_changed` 事件的指纹与本地不同时，副标题行出横幅「配置已被其它客户端修改，按 R 重新载入」
-  ——**不自动覆盖**本地未保存的改动（v1 把它画在树的第一行，v2 给了它常驻的副标题行，
-  优先级：**搜索行 > 横幅 > `/ 搜索…` 占位**——query 是输入回显，被顶掉就等于"敲了字看不见"，
-  所以搜索态下横幅退化成同一行尾部的一段 `⚠ 已被其它客户端修改`，放不下时先丢横幅）。
+Interface 编辑提交后即时预览。保存将预览写入配置，确认放弃后恢复之前的设置。Gateway 修改累积到 `s`，
+保存请求进行中暂缓设置操作，收到结果后可继续编辑。
+其它客户端修改文件后，面板提示通过 `R` 从磁盘读取，草稿仍留在面板中。
 
 ## 10. 首次运行向导（setup TUI）
 
@@ -511,7 +465,7 @@ Interface 是**最后一个锚点**（不再有 v1 的"切根"概念，两个根
 
 setup 循环（`crates/wing/src/cmd/setup.rs`）的定位：**不是把 `App` 改成可无 session，而是在 `App` 之前
 放一个更小的东西**——没有 session、没有 WS、没有意图队列、没有重连、没有图片 / 选区 / 滚动条；
-前景就是同一个 `SettingsPanel` + `SettingsOverlay`（首屏 = 问题清单），背板复用
+向导使用同一个 `SettingsPanel` 和通栏列表，先显示问题清单。背板复用
 `ui/welcome/{art,sprite,wordmark}` 的帧数据与绘制原语（`Welcome` 结构体本身绑定 chat header，不复用）。
 `s` 保存后：网关转入正常模式（`setup_mode_exited` 或复检 `status.valid`）→ 背板显示
 `✓ 配置就绪，正在启动…` → 返回 `Ready`，启动链继续；否则留在问题清单。
@@ -561,11 +515,8 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 `POST /api/settings/set` 成功后广播 `SettingsChangedEvent`：
 `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（所有已连接客户端），
 `persist = False` 且**不进 `FACT_EVENTS`**——它是网关级**时点通知**（没有 `session_id`、不进任何会话链），
-重连后的正解是重新 `GET /api/settings/status`，重放一条旧通知只会误导。
-
-消费侧**不判断"这是不是我自己刚触发的那一次"**：比指纹就够了——自己的保存会更新本地指纹，
-指纹相同即忽略；不同则面板出横幅 / 缓存的 `(values, fingerprint)` 直接作废（避免"旧文档 + 新指纹"
-被乐观并发当成 base，造成丢失更新）。
+重连或收到 `settings_changed` 后用 `GET /api/settings/get` 刷新已保存文件和运行网关的待重启状态。
+文件指纹用于比对草稿基线，未提交的编辑留在面板中。
 
 ## 13. 已知边界
 
@@ -595,7 +546,7 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
   `build_groups()` 当场抛（界面里它会无处可去），`test_config_groups.py` 也会红。
 - 改界面分类（加组 / 并组 / 改名 / 调顺序）：只动 `SETTING_GROUPS` 一张表（§1.1）；
   `config.yaml` 零迁移（顶层键不动，只有分隔注释跟着变）。前端**不许**出现组名字面量——
-  左栏锚点全部来自 `schema.groups[]`（Interface 的那一份在 `config/catalog.rs::interface_groups()`）。
+  分类列表来自 `schema.groups[]`（Interface 的那一份在 `config/catalog.rs::interface_groups()`）。
 - **给 LIST 字段加密文叶子前先想配对**：只要元素子树里有可达的 `secret=True` 叶子，就必须同时声明
   `identity_field`（元素里那个唯一的非密文标量字段名）——否则列表结构一变，`null` 哨兵配不上，
   密钥只能被丢弃（回执警告 + 用户重填），或者更糟：**按下标错配**（§6 的不变量）。
@@ -608,14 +559,7 @@ dispatch 之前）。传输 / 协议级错误一律 stderr，`--json` 只影响"
 - 改保存 / 生效语义：唯一写盘路径是 `runtime.apply_settings`，唯一热重载实现是 `system.reload_system`
   （其逐项名字序是对外契约，只许在末尾追加）；面板 / CLI / curl 三个入口都在它们之上，不许各自写第二份。
 - 改 `SETUP_ALLOWED_PATHS`：它是"修复模式能做什么"的全部定义——加一个路径前先问"配置坏掉时它真的可用吗"。
-- 改键位：`shared/panels/settings/mod.rs` 的 `handle_*_key` 是唯一实现（模块 doc 的表要与它同步改），
-  `ui/settings/**` 只渲染；`r`/`R`/`Ctrl+R` 的三分是刻意设计（复位 / 重载 / 重启），别再合成一个键。
-  **两栏共用的键**（`s` / `R` / `Ctrl+R` / `/` / `p` / `?` / `Tab` / `Esc`）在焦点分派**之前**处理，
-  加新键时先想清楚它属于哪一栏。
-- 改面板几何：`ui/settings/mod.rs` 的 `card_area`（浮层尺寸，**只有 App 与测试用**——setup 向导有自己的
-  三块布局，把面板整块渲染进 `panel_area`，不是浮层）与 `Regions::new`（内部切分，三个入口共用）；
-  `tree_viewport_rows` / `anchors_viewport_rows` / `has_anchor_column` 必须与实际画出来的东西一致
-  （翻页步长与"左栏存不存在"），每帧喂回面板（`set_viewport_rows` / `set_anchor_viewport_rows` /
-  `set_anchors_visible`），`the_viewport_contract_holds_at_every_size` 钉住这条。
+- 改键位时同步更新本页的键位表。`shared/panels/settings/mod.rs` 管理按键和导航，`ui/settings/**` 绘制共享列表。
+  `r` 复位当前项，`R` 从磁盘读取设置，`Ctrl+R` 重启网关。
 - 排查用户现场：`wing config doctor`（不需要网关正常）→ `wing config list` → `~/.wing/core/logs/`
   的 `settings changed:` 行（只有路径，没有值）；两个 `.bak` 是最近一次保存前的原文。

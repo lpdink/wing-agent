@@ -95,12 +95,13 @@ wing stop    # stop the gateway if it was already running
 wing         # start fresh
 ```
 
-> **Note:** The gateway loads config at startup. After editing `config.yaml`, run `/reload` in the TUI (or `wing stop` then `wing`) to pick up changes.
-
 ## Configuration
 
-Backend config: `~/.wing/core/config.yaml` — generated on first run from the declaration layer, fully annotated (see `docs/dev/settings.md`).
-Frontend config: `~/.wing/tui/config.yaml`
+Open `/settings` in the TUI to edit settings below the conversation. Use `/` to search, `Tab` to toggle a switch, and `s` to save. Terminal paste works in text fields, including masked API keys.
+
+Saving gateway settings also applies changes that the running gateway can use. After editing `~/.wing/core/config.yaml` by hand, run `wing reload` or `/reload` in the TUI. The report identifies changes that still need a gateway restart, such as a new listening port. If the file points to a new address, use `wing reload --host <old-host> --port <old-port>` to reach the running gateway.
+
+Wing generates an annotated `~/.wing/core/config.yaml` on first run. The TUI stores its own settings in `~/.wing/tui/config.yaml`. [Settings reference](docs/dev/settings.md)
 
 ## Built-in Tools
 

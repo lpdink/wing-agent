@@ -19,7 +19,7 @@
 //!
 //! 背板复用 [`crate::ui::welcome`] 的**帧数据与绘制原语**（`art` 的字母网格、`sprite` 的半格渲染、
 //! `wordmark` 的渐变大字），**不复用** `Welcome` 结构体——它绑定 chat header 的宽度阶梯与可见性门控。
-//! 前景就是同一个 [`SettingsPanel`] + [`SettingsOverlay`]，首屏 = 问题清单。
+//! 设置区域复用 [`SettingsPanel`] 和会话 TUI 的单栏列表，首屏 = 问题清单。
 //!
 //! 三个前端共用这里的预检（[`preflight_config`] / [`preflight_or_report`]）。**stdout 一个字节都不
 //! 写**（stdio / ACP 的协议帧通道就是这条 stdout 的语义）：本模块唯一的打印点是降级报告的 `eprint!`。
@@ -48,14 +48,16 @@ use ratatui::widgets::Paragraph;
 use serde_json::Value;
 use wing_api_client::ApiClientError;
 use wing_api_client::GatewayClient as GatewayApiClient;
+#[cfg(test)]
 use wing_api_client::models::SettingNode;
 use wing_api_client::models::SettingProblem;
+#[cfg(test)]
 use wing_api_client::models::SettingsSchemaResponse;
 use wing_api_client::models::SettingsSetRequest;
 use wing_api_client::models::SettingsSetResponse;
 use wing_api_client::models::SettingsStatusResponse;
 
-use super::settings_api::SettingsApi;
+use super::settings_api::{SettingsApi, SettingsSaveFailure};
 use crate::app::transport::GatewayEndpoint;
 use crate::config::AppConfig;
 use crate::config::ThemePalette;
@@ -67,17 +69,13 @@ use crate::shared::panels::settings::SaveOutcome;
 use crate::shared::panels::settings::SettingsAction;
 use crate::shared::panels::settings::SettingsPanel;
 use crate::shared::panels::settings::View;
-use crate::tui::TermEvent;
-use crate::ui::settings::SettingsCatalogs;
-use crate::ui::settings::SettingsOverlay;
-use crate::ui::settings::anchors_viewport_rows;
-use crate::ui::settings::has_anchor_column;
-use crate::ui::settings::tree_viewport_rows;
+use crate::tui::{TermEvent, is_paste_clipboard_key};
 use crate::ui::shimmer::to_rgb;
 use crate::ui::welcome::art;
 use crate::ui::welcome::sprite;
 use crate::ui::welcome::wordmark;
 use crate::ui::welcome::{ART_GAP, ART_TERM_ROWS, PERCHED_TOP_PAD};
+use crate::util::clipboard_paste::{PasteFailure, PasteMode, PasteOutcome};
 
 /// `sysexits.h` 的 `EX_CONFIG`：让编排器判别"这是配置问题不是网络问题"。
 pub(crate) const EX_CONFIG: u8 = 78;
@@ -238,7 +236,14 @@ pub async fn run_setup_tui<B: Backend>(
     config: &mut AppConfig,
     endpoint: &GatewayEndpoint,
 ) -> Result<SetupOutcome> {
-    run_setup_tui_with(terminal, http, config, endpoint, &mut TerminalEvents).await
+    run_setup_tui_with(
+        terminal,
+        http,
+        config,
+        endpoint,
+        &mut TerminalEvents::default(),
+    )
+    .await
 }
 
 /// 循环本体：三个依赖都可注入（**单测的全部入口**；生产入口只多接了一个事件源）。
@@ -271,29 +276,50 @@ where
 
     // 2. Interface 根（本地读写；读失败 = 树里没有这个根，不拿默认值冒充）。
     let interface = http.read_interface();
-    let mut interface_catalog: Option<SettingNode> =
-        interface.as_ref().map(|source| source.catalog.clone());
 
     // 3. 面板：首屏 = 问题清单（同一个组件服务 setup / 保存失败 / 随时查看）。
     let mut panel = SettingsPanel::new(&schema, state, interface, View::Problems);
-    let mut schema = schema;
 
     let mut note = baseline_note(panel.problems());
+    let mut readiness = Readiness::Unready;
+    let mut replacement = None;
     let mut ctrl_c_at: Option<Instant> = None;
+    let mut clipboard_read = None;
 
     loop {
-        draw_setup_frame(
-            terminal,
-            &mut panel,
-            &schema,
-            interface_catalog.as_ref(),
-            config,
-            &note,
-            true,
-        )?;
+        draw_setup_frame(terminal, &mut panel, config, &note, true)?;
 
-        let key = match next_setup_input(terminal, events).await? {
+        let input = tokio::select! {
+            input = next_setup_input(terminal, events) => input?,
+            result = async {
+                match clipboard_read.as_mut() {
+                    Some((_, read)) => read.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let (target, _) = clipboard_read.take().expect("clipboard read completed");
+                if panel.paste_target() == Some(target) {
+                    note = baseline_note(panel.problems());
+                    let outcome = crate::util::clipboard_paste::settings_text(&result)
+                        .and_then(|text| panel.insert_paste(target, text).map_err(str::to_owned));
+                    if let Err(message) = outcome {
+                        note = Note::error(message);
+                    }
+                }
+                continue;
+            }
+        };
+        let key = match input {
             SetupInput::Key(key) => key,
+            SetupInput::Paste(text) => {
+                if let Some(target) = panel.paste_target() {
+                    note = baseline_note(panel.problems());
+                    if let Err(message) = panel.insert_paste(target, &text) {
+                        note = Note::error(message);
+                    }
+                }
+                continue;
+            }
             SetupInput::StreamClosed => return Ok(SetupOutcome::Quit),
             SetupInput::Handled => continue,
         };
@@ -317,7 +343,25 @@ where
         // 任何其它按键把瞬态提示换回基线（保存回执 / Ctrl+C 提示都只挂到下一次按键）。
         note = baseline_note(panel.problems());
 
+        if is_paste_clipboard_key(&key) {
+            if clipboard_read.is_none()
+                && let Some(target) = panel.paste_target()
+            {
+                clipboard_read = Some((target, Box::pin(http.read_clipboard())));
+            }
+            continue;
+        }
+
         match panel.handle_key(key) {
+            SettingsAction::None
+                if readiness == Readiness::Unconfirmed
+                    && key.code == KeyCode::Char('s')
+                    && key.modifiers.is_empty()
+                    && !panel_input_active(&panel) =>
+            {
+                readiness = check_readiness(replacement.as_ref().unwrap_or(http)).await;
+                note = readiness.note();
+            }
             SettingsAction::None => {}
             SettingsAction::PreviewInterface(doc) => {
                 // 实时预览：背板的调色板每帧从 `config` 现算，下一帧就是新颜色。
@@ -330,8 +374,8 @@ where
                 gateway_dirty,
                 interface_dirty,
             } => {
-                let (save_note, ready) = save_once(
-                    http,
+                let result = save_once(
+                    replacement.as_ref().unwrap_or(http),
                     &mut panel,
                     gateway,
                     base,
@@ -340,20 +384,17 @@ where
                     interface_dirty,
                 )
                 .await;
-                note = save_note;
-                if ready {
-                    // 关闭 overlay（背板 + 就绪行），短暂停留让用户看见，然后交还启动链。
-                    draw_setup_frame(
-                        terminal,
-                        &mut panel,
-                        &schema,
-                        interface_catalog.as_ref(),
-                        config,
-                        &note,
-                        false,
-                    )?;
-                    tokio::time::sleep(READY_DWELL).await;
-                    return Ok(SetupOutcome::Ready);
+                note = result.note;
+                if let Some(client) = result.replacement {
+                    replacement = Some(client);
+                }
+                if let Some(status) = result.readiness {
+                    readiness = status;
+                } else if readiness == Readiness::Unconfirmed && panel.dirty_count() == 0 {
+                    readiness = check_readiness(replacement.as_ref().unwrap_or(http)).await;
+                    note = readiness.note();
+                } else if readiness == Readiness::Ready && panel.dirty_count() == 0 {
+                    note = readiness.note();
                 }
             }
             // setup 里没有可重启的会话/连接，网关此刻正服务着这条修复请求；忽略——
@@ -365,28 +406,40 @@ where
             // 面板是 setup 唯一的 UI：关掉它 = 退出。
             SettingsAction::Close { .. } => return Ok(SetupOutcome::Quit),
             SettingsAction::Reload => {
-                let (new_schema, new_state) = tokio::join!(http.schema(), http.get());
+                let current = replacement.as_ref().unwrap_or(http);
+                let (new_schema, new_state) = tokio::join!(current.schema(), current.get());
                 match (new_schema, new_state) {
                     (Ok(new_schema), Ok(new_state)) => {
                         panel.apply_snapshot(&new_schema, new_state);
-                        schema = new_schema;
                     }
-                    _ => note = Note::error("重新载入失败：网关不可达"),
+                    _ => note = Note::error("读取设置文件失败：网关不可达"),
                 }
                 if let Some(source) = http.read_interface() {
                     *config = crate::config::store::appconfig_from_doc(&source.doc);
-                    panel.set_interface(source.clone());
-                    interface_catalog = Some(source.catalog);
+                    panel.set_interface(source);
+                }
+                if readiness == Readiness::Unconfirmed {
+                    readiness = check_readiness(current).await;
+                    note = readiness.note();
                 }
             }
+        }
+        if readiness == Readiness::Ready && panel.dirty_count() == 0 {
+            if let Some(saved) = panel.saved_interface() {
+                *config = crate::config::store::appconfig_from_doc(saved);
+            }
+            draw_setup_frame(terminal, &mut panel, config, &note, false)?;
+            tokio::time::sleep(READY_DWELL).await;
+            return Ok(SetupOutcome::Ready);
         }
     }
 }
 
-/// 循环关心的三种输入（[`next_setup_input`] 的产物）。
+/// Input consumed by the setup loop.
 enum SetupInput {
     /// 该转给面板的按键。
     Key(KeyEvent),
+    Paste(String),
     /// 事件源断了（真实环境只在 fatal 时）——循环当退出，不空转。
     StreamClosed,
     /// 已经在归一里处理掉了（Resize 已重画；鼠标 / tick 不消费）——继续循环。
@@ -406,7 +459,8 @@ async fn next_setup_input<B: Backend, E: SetupEvents>(
 ) -> Result<SetupInput> {
     match events.next_event().await {
         Some(TermEvent::Key(key)) if key.kind == KeyEventKind::Press => Ok(SetupInput::Key(key)),
-        // 其余的 `Key`（Release / Repeat）、鼠标、粘贴、focus、tick：setup 不消费。
+        Some(TermEvent::Paste(text)) => Ok(SetupInput::Paste(text)),
+        // 其余的 `Key`（Release / Repeat）、鼠标、focus、tick：setup 不消费。
         Some(TermEvent::Resize(_, _)) => {
             if let Err(e) = terminal.clear() {
                 tracing::warn!("terminal clear after resize failed: {e}");
@@ -426,15 +480,52 @@ fn q_is_quit(panel: &SettingsPanel, key: &KeyEvent) -> bool {
     if key.code != KeyCode::Char('q') || !key.modifiers.is_empty() {
         return false;
     }
-    let panel_busy = panel.edit_state().is_some()
+    !panel_input_active(panel)
+}
+
+fn panel_input_active(panel: &SettingsPanel) -> bool {
+    panel.edit_state().is_some()
         || panel.prompt().is_some()
         || panel.search_query().is_some()
         || panel.choices().is_some()
-        || panel.view() == View::Help;
-    !panel_busy
+        || panel.view() == View::Help
 }
 
-/// 一次 `s`：两半各自执行 + 合并回执；返回 `(状态行, 是否就绪)`。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    Ready,
+    Unready,
+    Unconfirmed,
+}
+
+impl Readiness {
+    fn note(self) -> Note {
+        match self {
+            Self::Ready => Note::ok("✓ 配置就绪，正在启动…"),
+            Self::Unready => Note::error("已保存，网关仍未就绪"),
+            Self::Unconfirmed => Note {
+                compact: Some("已保存 · 按 s 重查就绪状态".into()),
+                ..Note::error("已保存，就绪状态未确认 · 按 s 重查")
+            },
+        }
+    }
+}
+
+async fn check_readiness(http: &impl SetupBackend) -> Readiness {
+    match http.status().await {
+        Ok(status) if status.valid => Readiness::Ready,
+        Ok(_) => Readiness::Unready,
+        Err(_) => Readiness::Unconfirmed,
+    }
+}
+
+struct SetupSave<H> {
+    note: Note,
+    readiness: Option<Readiness>,
+    replacement: Option<H>,
+}
+
+/// 一次 `s`：两半各自执行，再合并回执与网关就绪状态。
 ///
 /// 回执是**一行**，但两半的结论谁都不能被谁盖掉：TUI 写入失败、Gateway 失败 /
 /// 未就绪 / 后端 warnings 都进同一个 `parts`，按发生顺序拼起来。
@@ -446,7 +537,7 @@ async fn save_once<H: SetupBackend>(
     interface: Value,
     gateway_dirty: bool,
     interface_dirty: bool,
-) -> (Note, bool) {
+) -> SetupSave<H> {
     /// 一句话里最多拼几条 —— 再多也读不过来（且会被面板宽度裁掉）。
     const MAX_PARTS: usize = 3;
     let mut parts: Vec<String> = Vec::new();
@@ -458,14 +549,18 @@ async fn save_once<H: SetupBackend>(
             Ok(_) => interface_ok = Some(true),
             Err(e) => {
                 interface_ok = Some(false);
-                parts.push(format!("TUI 配置写入失败：{e}"));
+                parts.push(format!("TUI 配置写入失败：{e}。修复后按 s 重试"));
             }
         }
     }
 
     // Gateway 半边。
+    let was_setup = panel.setup_mode();
+    let mut apply_failed = false;
     let mut gateway_saved: Option<SettingsSetResponse> = None;
-    let mut ready = false;
+    let mut readiness = gateway_dirty.then_some(Readiness::Unready);
+    let mut replacement = None;
+    let mut compact = None;
     if gateway_dirty {
         let request = SettingsSetRequest {
             base: Some(base),
@@ -473,19 +568,75 @@ async fn save_once<H: SetupBackend>(
         };
         match http.set(&request).await {
             Ok(response) => {
-                // 就绪判定：回执的 `setup_mode_exited` 是规范路径，`status.valid` 是兜底
-                // （保存成功 ⇒ 网关就地转入正常模式）。
-                ready = response.ok
-                    && (response.setup_mode_exited
-                        || matches!(http.status().await, Ok(status) if status.valid));
+                if response.ok {
+                    let saved_interface = if interface_ok == Some(true) {
+                        Some(&interface)
+                    } else {
+                        panel.saved_interface()
+                    };
+                    let rebound = saved_interface.map(|doc| http.rebind(doc)).transpose();
+                    readiness = Some(match rebound {
+                        Ok(client) => {
+                            replacement = client.flatten();
+                            if response.setup_mode_exited {
+                                Readiness::Ready
+                            } else {
+                                check_readiness(replacement.as_ref().unwrap_or(http)).await
+                            }
+                        }
+                        Err(_) => Readiness::Unconfirmed,
+                    });
+                }
+                let ready = readiness == Some(Readiness::Ready);
                 if !response.ok {
                     parts.push(format!(
                         "设置未保存：{} 个问题，见问题清单",
                         response.problems.len()
                     ));
-                } else if !ready {
-                    // 文件写了但网关没就绪（A12）：绝不放行到"没有会话能力"的启动链。
-                    parts.push("保存成功，但网关仍未就绪 — 修完问题再按 s".into());
+                } else {
+                    if let Some(reload) = response.reload.as_ref().filter(|reload| !reload.ok) {
+                        apply_failed = true;
+                        let status = if was_setup && ready {
+                            "已保存，初始化中有步骤失败"
+                        } else if was_setup {
+                            "已保存，初始化失败"
+                        } else {
+                            "已保存，部分设置未生效"
+                        };
+                        let failed = reload
+                            .results
+                            .iter()
+                            .filter(|item| !item.ok)
+                            .collect::<Vec<_>>();
+                        compact = failed
+                            .first()
+                            .map(|item| format!("已保存 · {} 失败", item.name));
+                        let mut summary = status.to_string();
+                        for item in &failed {
+                            summary.push_str(&format!(" · {}", item.name));
+                        }
+                        let action = match readiness {
+                            Some(Readiness::Unconfirmed) => "就绪状态未确认 · 按 s 重查",
+                            Some(Readiness::Unready) if was_setup => "按 s 重试",
+                            _ => "检查后运行 wing reload 重试",
+                        };
+                        summary.push_str(&format!(" · {action}"));
+                        if let Some(detail) =
+                            failed.first().and_then(|item| reload.display_detail(item))
+                        {
+                            summary.push_str(&format!(
+                                " · {}",
+                                crate::cmd::common::single_line(detail)
+                            ));
+                        }
+                        parts.insert(0, summary);
+                    } else if let Some(status) = readiness.filter(|_| !ready) {
+                        let mut summary = status.note().text;
+                        if status == Readiness::Unready && was_setup {
+                            summary.push_str(" · 按 s 重试");
+                        }
+                        parts.insert(0, summary);
+                    }
                 }
                 // 后端的非致命说明（"旧密钥没有保留"之类）必须让用户看见 ——
                 // 回执就一行，但它是这一屏唯一的出口。
@@ -493,19 +644,29 @@ async fn save_once<H: SetupBackend>(
                     parts.push(format!("⚠ {warning}"));
                 }
                 // 要重启才生效的键（Ctrl+R 在 setup 里是 no-op）：告诉用户去哪儿按。
-                if !response.restart_required.is_empty() {
-                    // 动作在前（一行会被 CJK 宽度裁掉尾巴）：先在 setup 里说清"去哪儿按"。
-                    parts.push(format!(
-                        "需重启网关（进 TUI 后 Ctrl+R）：{}",
-                        response.restart_required.join("、")
-                    ));
+                if let Some(paths) = response
+                    .reload
+                    .as_ref()
+                    .and_then(|r| r.pending_restart_paths.as_ref())
+                    .filter(|paths| !paths.is_empty())
+                {
+                    parts.push(format!("待重启（进 TUI 后 Ctrl+R）：{}", paths.join("、")));
                 }
                 gateway_saved = Some(response);
             }
-            Err(e) => parts.push(format!("保存失败：{e}")),
+            Err(error) => parts.push(match SettingsSaveFailure::from(&error) {
+                SettingsSaveFailure::Conflict => "设置文件已更改，按 R 重新读取文件".into(),
+                SettingsSaveFailure::Rejected(reason) => {
+                    format!("Gateway 未保存：{reason}。修复后按 s 重试")
+                }
+                SettingsSaveFailure::Unconfirmed(reason) => {
+                    format!("Gateway 保存未确认：{reason}。请核对磁盘文件")
+                }
+            }),
         }
     }
 
+    let gateway_saved_ok = gateway_saved.as_ref().is_some_and(|response| response.ok);
     if gateway_saved.is_some() || interface_ok.is_some() {
         // 一次合并两半：`ok=false` 时面板自己会切到问题清单视图（apply_save）。
         panel.apply_save(SaveOutcome {
@@ -521,19 +682,37 @@ async fn save_once<H: SetupBackend>(
         parts.join(" · ")
     };
 
-    if ready {
-        // 就绪 + 有要交代的事：把交代缀在就绪句后面（绝不静默吞掉）。
+    let note = if readiness == Some(Readiness::Ready) && interface_ok == Some(false) {
+        Note::error(format!("Gateway 已就绪 · {caveats}"))
+    } else if readiness == Some(Readiness::Ready) {
         let text = if caveats.is_empty() {
             "✓ 配置就绪，正在启动…".to_string()
         } else {
             format!("✓ 配置就绪，正在启动…（{caveats}）")
         };
-        return (Note::ok(text), true);
+        if apply_failed {
+            Note::error(text)
+        } else {
+            Note::ok(text)
+        }
+    } else if caveats.is_empty() {
+        Note::ok("设置已保存")
+    } else if interface_ok == Some(true) && gateway_dirty && !gateway_saved_ok {
+        Note::error(format!("Interface 已保存 · {caveats}"))
+    } else {
+        Note::error(caveats)
+    };
+    if !gateway_dirty && interface_ok == Some(true) {
+        replacement = http.rebind(&interface).ok().flatten();
     }
-    if caveats.is_empty() {
-        return (Note::ok("设置已保存"), false);
+    if compact.is_none() && readiness == Some(Readiness::Unconfirmed) {
+        compact = Readiness::Unconfirmed.note().compact;
     }
-    (Note::error(caveats), false)
+    SetupSave {
+        note: Note { compact, ..note },
+        readiness,
+        replacement,
+    }
 }
 
 // ===========================================================================
@@ -546,6 +725,10 @@ trait SetupBackend: SettingsApi {
     fn read_interface(&self) -> Option<InterfaceSource>;
     /// Interface 根的本地写盘（原子写 + `.bak`）。
     fn write_interface(&self, doc: &Value) -> Result<WriteOutcome, StoreError>;
+    fn rebind(&self, interface: &Value) -> Result<Option<Self>>
+    where
+        Self: Sized;
+    async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure>;
 }
 
 impl SetupBackend for GatewayApiClient {
@@ -562,6 +745,18 @@ impl SetupBackend for GatewayApiClient {
     fn write_interface(&self, doc: &Value) -> Result<WriteOutcome, StoreError> {
         crate::config::store::write_interface_doc(doc)
     }
+
+    fn rebind(&self, interface: &Value) -> Result<Option<Self>> {
+        let key = interface
+            .get("api_key")
+            .and_then(Value::as_str)
+            .filter(|key| !key.is_empty());
+        Ok(Some(self.with_api_key(key)?))
+    }
+
+    async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure> {
+        crate::util::clipboard_paste::read_clipboard(PasteMode::TextOnly).await
+    }
 }
 
 /// 事件源（生产 = crossterm 直读；测试 = 脚本序列）。
@@ -569,43 +764,44 @@ trait SetupEvents {
     async fn next_event(&mut self) -> Option<TermEvent>;
 }
 
-/// 生产事件源：`spawn_blocking` 里 poll(100ms) + read，**没有常驻读者**——
-/// 退出即静默，不会像长驻任务那样在 `run_app` 的读者起来之前偷走一个按键。
-struct TerminalEvents;
+/// Retain the in-flight poll if a clipboard result wins the setup select.
+#[derive(Default)]
+struct TerminalEvents {
+    poll: Option<tokio::task::JoinHandle<std::io::Result<Option<TermEvent>>>>,
+}
 
 impl SetupEvents for TerminalEvents {
     async fn next_event(&mut self) -> Option<TermEvent> {
-        tokio::task::spawn_blocking(|| {
-            loop {
-                match crossterm::event::poll(Duration::from_millis(100)) {
-                    Ok(true) => match crossterm::event::read() {
-                        Ok(crossterm::event::Event::Key(key))
-                            if key.kind == KeyEventKind::Press =>
-                        {
-                            return Some(TermEvent::Key(key));
-                        }
-                        Ok(crossterm::event::Event::Resize(width, height)) => {
-                            return Some(TermEvent::Resize(width, height));
-                        }
-                        // 鼠标 / 粘贴 / focus：setup 不消费，继续等（不做鼠标）。
-                        Ok(_) => continue,
-                        Err(e) => {
-                            tracing::error!("crossterm read error: {e}");
-                            return None;
-                        }
-                    },
-                    Ok(false) => continue,
-                    Err(e) => {
-                        tracing::error!("crossterm poll error: {e}");
-                        return None;
-                    }
-                }
+        loop {
+            let poll = self
+                .poll
+                .get_or_insert_with(|| tokio::task::spawn_blocking(poll_terminal));
+            let result = poll.await;
+            self.poll = None;
+            match result {
+                Ok(Ok(Some(event))) => return Some(event),
+                Ok(Ok(None)) => continue,
+                Ok(Err(error)) => tracing::error!(%error, "setup terminal input failed"),
+                Err(error) => tracing::error!(%error, "setup terminal poll task failed"),
             }
-        })
-        .await
-        .ok()
-        .flatten()
+            return None;
+        }
     }
+}
+
+fn poll_terminal() -> std::io::Result<Option<TermEvent>> {
+    use crossterm::event::{Event, poll, read};
+
+    if !poll(Duration::from_millis(100))? {
+        return Ok(None);
+    }
+    let event = match read()? {
+        Event::Key(key) if key.kind == KeyEventKind::Press => TermEvent::Key(key),
+        Event::Resize(width, height) => TermEvent::Resize(width, height),
+        Event::Paste(text) => TermEvent::Paste(text),
+        _ => return Ok(None),
+    };
+    Ok(Some(event))
 }
 
 // ===========================================================================
@@ -616,8 +812,6 @@ impl SetupEvents for TerminalEvents {
 fn draw_setup_frame<B: Backend>(
     terminal: &mut Terminal<B>,
     panel: &mut SettingsPanel,
-    schema: &SettingsSchemaResponse,
-    interface_catalog: Option<&SettingNode>,
     config: &AppConfig,
     note: &Note,
     panel_open: bool,
@@ -639,13 +833,7 @@ fn draw_setup_frame<B: Backend>(
         // 小终端里也不该整条消失。
         draw_note(frame, note_area, &palette, note);
         if panel_open {
-            // 契约：每帧同步两栏各自的可见行数与左栏可见性，再 Clear + 整块 render。
-            panel.set_viewport_rows(tree_viewport_rows(panel, panel_area) as usize);
-            panel.set_anchor_viewport_rows(anchors_viewport_rows(panel, panel_area) as usize);
-            panel.set_anchors_visible(has_anchor_column(panel, panel_area));
-            frame.render_widget(Clear, panel_area);
-            let catalogs = SettingsCatalogs::new(&schema.root, interface_catalog);
-            frame.render_widget(SettingsOverlay::new(panel, catalogs, &palette), panel_area);
+            crate::ui::settings::draw(frame, panel, panel_area, &palette);
         } else {
             // 面板已关（就绪帧）：显式清掉那一块，否则 ratatui 的 diff 会留着上一帧的面板。
             frame.render_widget(Clear, panel_area);
@@ -699,7 +887,13 @@ fn draw_note(frame: &mut Frame, area: Rect, palette: &ThemePalette, note: &Note)
         return;
     }
     frame.render_widget(Clear, area);
-    let line = Line::from(Span::styled(note.text.clone(), note.style(palette)));
+    let text =
+        if unicode_width::UnicodeWidthStr::width(note.text.as_str()) > usize::from(area.width) {
+            note.compact.as_ref().unwrap_or(&note.text)
+        } else {
+            &note.text
+        };
+    let line = Line::from(Span::styled(text.as_str(), note.style(palette)));
     frame.render_widget(Paragraph::new(line).alignment(Alignment::Center), area);
 }
 
@@ -767,6 +961,7 @@ fn draw_wordmark(frame: &mut Frame, x: u16, top: u16, accent: sprite::Rgb, light
 /// 背板底行的状态行：一句话 + 语气。
 struct Note {
     text: String,
+    compact: Option<String>,
     kind: NoteKind,
 }
 
@@ -786,6 +981,7 @@ impl Note {
     fn info(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            compact: None,
             kind: NoteKind::Info,
         }
     }
@@ -793,6 +989,7 @@ impl Note {
     fn hint(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            compact: None,
             kind: NoteKind::Hint,
         }
     }
@@ -800,6 +997,7 @@ impl Note {
     fn ok(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            compact: None,
             kind: NoteKind::Ok,
         }
     }
@@ -807,6 +1005,7 @@ impl Note {
     fn error(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
+            compact: None,
             kind: NoteKind::Error,
         }
     }
@@ -1011,6 +1210,7 @@ mod tests {
     /// setup mode 的第一次读：模板刚落地，两个 `empty_list`（`providers` / `agents`）。
     fn first_run_state() -> SettingsGetResponse {
         SettingsGetResponse {
+            pending_restart_paths: None,
             values: json!({}),
             secrets: HashMap::<String, SecretState>::new(),
             fingerprint: "fp-1".into(),
@@ -1047,22 +1247,21 @@ mod tests {
 
     // ── 假后端 / 假事件源 ───────────────────────────────────────
 
-    /// 假后端的 `set` 结果（`ApiClientError` 不可 Clone，用可克隆的替身）。
-    #[derive(Clone)]
-    enum FakeSet {
-        Saved(SettingsSetResponse),
-        Failed,
-    }
-
     /// 假后端的脚本化响应 + 调用记录。
+    #[derive(Clone)]
     struct FakeBackend {
         schema: SettingsSchemaResponse,
         state: SettingsGetResponse,
         status: SettingsStatusResponse,
-        set: FakeSet,
+        status_failures: Cell<usize>,
+        status_checks: Cell<usize>,
+        set_error: u16,
+        set: Option<SettingsSetResponse>,
+        retry_set: Option<SettingsSetResponse>,
         interface: Option<InterfaceSource>,
         /// 让 Interface 半边的原子写失败（两半独立性测试）。
         interface_write_fails: bool,
+        clipboard: PasteOutcome,
         sets: RefCell<Vec<SettingsSetRequest>>,
         written_interface: RefCell<Vec<Value>>,
     }
@@ -1073,14 +1272,20 @@ mod tests {
                 schema: schema(),
                 state: first_run_state(),
                 status: SettingsStatusResponse {
+                    restart_listener: None,
                     valid: false,
                     setup_mode: false,
                     problems: first_run_state().problems,
                     fingerprint: Some("fp-1".into()),
                 },
-                set: FakeSet::Saved(saved_response(true, "fp-2", true, vec![])),
+                status_failures: Cell::new(0),
+                status_checks: Cell::new(0),
+                set_error: 504,
+                set: Some(saved_response(true, "fp-2", true, vec![])),
+                retry_set: None,
                 interface: None,
                 interface_write_fails: false,
+                clipboard: PasteOutcome::Empty,
                 sets: RefCell::new(Vec::new()),
                 written_interface: RefCell::new(Vec::new()),
             }
@@ -1105,6 +1310,15 @@ mod tests {
         }
 
         async fn status(&self) -> Result<SettingsStatusResponse, ApiClientError> {
+            let check = self.status_checks.get();
+            self.status_checks.set(check + 1);
+            if check < self.status_failures.get() {
+                return Err(ApiClientError::Api {
+                    status: 503,
+                    detail: "temporary status failure".into(),
+                    body: None,
+                });
+            }
             Ok(self.status.clone())
         }
 
@@ -1112,12 +1326,18 @@ mod tests {
             &self,
             req: &SettingsSetRequest,
         ) -> Result<SettingsSetResponse, ApiClientError> {
-            self.sets.borrow_mut().push(req.clone());
-            match &self.set {
-                FakeSet::Saved(response) => Ok(response.clone()),
-                FakeSet::Failed => Err(ApiClientError::Api {
-                    status: 500,
-                    detail: "保存服务炸了".into(),
+            let mut sets = self.sets.borrow_mut();
+            sets.push(req.clone());
+            let response = if sets.len() > 1 {
+                self.retry_set.as_ref().or(self.set.as_ref())
+            } else {
+                self.set.as_ref()
+            };
+            match response {
+                Some(response) => Ok(response.clone()),
+                None => Err(ApiClientError::Api {
+                    status: self.set_error,
+                    detail: "fixture save failure".into(),
                     body: None,
                 }),
             }
@@ -1142,6 +1362,16 @@ mod tests {
                 fingerprint: "fp-tui".into(),
                 backup_path: None,
             })
+        }
+
+        fn rebind(&self, interface: &Value) -> Result<Option<Self>> {
+            let client = GatewayApiClient::new(endpoint().http_base, None)?;
+            SetupBackend::rebind(&client, interface)?;
+            Ok(None)
+        }
+
+        async fn read_clipboard(&self) -> Result<PasteOutcome, PasteFailure> {
+            Ok(self.clipboard.clone())
         }
     }
 
@@ -1177,6 +1407,9 @@ mod tests {
 
     impl SetupEvents for ScriptedEvents {
         async fn next_event(&mut self) -> Option<TermEvent> {
+            if matches!(self.queue.front(), Some(TermEvent::Tick)) {
+                tokio::task::yield_now().await;
+            }
             let event = self.queue.pop_front();
             if let (Some(size), Some(TermEvent::Resize(width, height))) = (&self.size, &event) {
                 size.set((*width, *height));
@@ -1424,8 +1657,9 @@ mod tests {
     async fn ready_falls_back_to_status_when_the_receipt_does_not_say_exited() {
         // `setup_mode_exited=false` + `status.valid=true` ⇒ 同样就绪（兜底路径）。
         let mut backend = FakeBackend::first_run();
-        backend.set = FakeSet::Saved(saved_response(true, "fp-2", false, vec![]));
+        backend.set = Some(saved_response(true, "fp-2", false, vec![]));
         backend.status = SettingsStatusResponse {
+            restart_listener: None,
             valid: true,
             setup_mode: false,
             problems: vec![],
@@ -1436,12 +1670,129 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Ready), "{outcome:?}");
     }
 
+    #[tokio::test]
+    async fn operational_repair_retries_confirmed_save_readiness_without_reposting() {
+        for retry in [None, Some('s'), Some('R')] {
+            let mut backend = FakeBackend::first_run();
+            backend.interface = Some(interface_source("light"));
+            backend.set = Some(saved_response(true, "fp-2", false, vec![]));
+            backend.status.valid = true;
+            backend.status_failures.set(1);
+            let mut config = AppConfig::default();
+            let mut events = edit_and_save("enabled");
+            if let Some(retry) = retry {
+                events.push(key(KeyCode::Char(retry)));
+            }
+            let (outcome, terminal) = run(&backend, &mut config, events).await;
+            assert_eq!(backend.sets().len(), 1);
+            assert_eq!(
+                backend.status_checks.get(),
+                if retry.is_some() { 2 } else { 1 }
+            );
+            if retry.is_some() {
+                assert_eq!(outcome, SetupOutcome::Ready);
+                assert!(screen(&terminal).contains("配置就绪"));
+                assert_eq!(config.colors.preset, crate::config::ColorPreset::Light);
+            } else {
+                assert_eq!(outcome, SetupOutcome::Quit);
+                assert!(screen(&terminal).contains("已保存，就绪状态未确认 · 按 s 重查"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_rebind_error_keeps_the_confirmed_save_receipt_and_reports_the_failed_step() {
+        let mut backend = FakeBackend::first_run();
+        let mut interface = interface_source("light");
+        let invalid_key = "fixture-key\ninvalid-header";
+        interface.doc["api_key"] = json!(invalid_key);
+        backend.interface = Some(interface);
+        let mut response = saved_response(true, "fp-2", false, vec![]);
+        response.reload = Some(
+            serde_json::from_value(json!({
+                "ok":false,"diagnostics_redacted":true,"results":[{"name":"provider","ok":false}]
+            }))
+            .unwrap(),
+        );
+        backend.set = Some(response);
+        let (outcome, terminal) = run(
+            &backend,
+            &mut AppConfig::default(),
+            edit_and_save("enabled"),
+        )
+        .await;
+        assert_eq!(outcome, SetupOutcome::Quit);
+        assert_eq!(backend.sets().len(), 1);
+        assert_eq!(backend.status_checks.get(), 0);
+        let screen = screen(&terminal);
+        assert!(
+            screen.contains("已保存，部分设置未生效 · provider"),
+            "{screen}"
+        );
+        assert!(screen.contains("就绪状态未确认 · 按 s 重查"), "{screen}");
+        assert!(!screen.contains("fixture-key"));
+    }
+
+    #[tokio::test]
+    async fn mixed_save_reports_the_confirmed_local_write_when_gateway_refuses() {
+        for (status, explanation) in [(409, "按 R 重新读取文件"), (403, "Gateway 未保存")]
+        {
+            let mut backend = FakeBackend::first_run();
+            backend.interface = Some(interface_source("auto"));
+            backend.set = None;
+            backend.set_error = status;
+            let mut events = vec![key(KeyCode::Char('/'))];
+            events.extend(text("preset"));
+            events.extend([key(KeyCode::Enter), key(KeyCode::Right)]);
+            events.extend(edit_and_save("enabled"));
+            let (outcome, terminal) = run(&backend, &mut AppConfig::default(), events).await;
+            assert_eq!(outcome, SetupOutcome::Quit);
+            assert_eq!(backend.sets().len(), 1);
+            assert_eq!(backend.written_interface().len(), 1);
+            let screen = screen(&terminal);
+            assert!(screen.contains("Interface 已保存"), "{screen}");
+            assert!(screen.contains(explanation), "{screen}");
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_paste_preserves_the_saved_interface_key_for_startup() {
+        let token = "sk-interface-fixture-42";
+        let mut backend = FakeBackend::first_run();
+        backend.clipboard = PasteOutcome::Text(format!("{token}\r\n"));
+        backend.interface = Some(InterfaceSource {
+            groups: crate::config::catalog::interface_groups(),
+            catalog: crate::config::catalog::interface_catalog(),
+            doc: json!({"api_key": "old-fixture-key"}),
+        });
+        let mut config = AppConfig {
+            api_key: Some("old-fixture-key".into()),
+            ..AppConfig::default()
+        };
+        let mut events = vec![
+            key(KeyCode::Char('/')),
+            TermEvent::Paste("api_key\n".into()),
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            TermEvent::Key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)),
+            TermEvent::Tick,
+            key(KeyCode::Enter),
+        ];
+        events.extend(edit_and_save("enabled"));
+        let (outcome, terminal) = run(&backend, &mut config, events).await;
+        assert_eq!(outcome, SetupOutcome::Ready);
+        assert_eq!(backend.written_interface(), [json!({"api_key": token})]);
+        assert_eq!(config.api_key.as_deref(), Some(token));
+        assert!(!format!("{config:?}").contains(token));
+        assert!(!screen(&terminal).contains(token));
+    }
+
     // ── ④ 保存后仍 invalid → 留在循环 ───────────────────────────
 
     #[tokio::test]
     async fn a_rejected_save_stays_in_the_loop_with_fresh_problems() {
         let mut backend = FakeBackend::first_run();
-        backend.set = FakeSet::Saved(saved_response(
+        backend.set = Some(saved_response(
             false,
             "fp-1",
             false,
@@ -1467,12 +1818,96 @@ mod tests {
     async fn a_save_that_cannot_ready_the_gateway_does_not_leave_the_loop() {
         // `ok=true` 但既不 exited 且 status 仍 invalid：绝不放行走正常启动链（A12）。
         let mut backend = FakeBackend::first_run();
-        backend.set = FakeSet::Saved(saved_response(true, "fp-2", false, vec![]));
+        backend.set = Some(saved_response(true, "fp-2", false, vec![]));
         let mut config = AppConfig::default();
         let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
 
         assert!(matches!(outcome, SetupOutcome::Quit));
-        assert!(screen(&terminal).contains("保存成功，但网关仍未就绪"));
+        assert!(screen(&terminal).contains("已保存，网关仍未就绪"));
+    }
+
+    #[tokio::test]
+    async fn failed_initialization_can_retry_the_saved_document() {
+        let mut backend = FakeBackend::first_run();
+        backend.state.setup_mode = true;
+        let mut response = saved_response(true, "fp-2", false, vec![]);
+        response.reload = Some(wing_api_client::models::ReloadResponse {
+            diagnostics_redacted: true,
+            ok: false,
+            results: vec![wing_api_client::models::ReloadResultItem {
+                name: "runtime".into(),
+                ok: false,
+                detail: Some("permission denied".into()),
+            }],
+            pending_restart_paths: None,
+            new_session_defaults_changed: false,
+        });
+        backend.set = Some(response);
+        let mut config = AppConfig::default();
+        let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
+        assert_eq!(outcome, SetupOutcome::Quit);
+        let failure = screen(&terminal);
+        assert!(failure.contains("初始化失败 · runtime"), "{failure}");
+        assert!(failure.contains("permission denied"), "{failure}");
+
+        backend.sets.borrow_mut().clear();
+        backend.retry_set = Some(saved_response(true, "fp-3", true, vec![]));
+        let mut events = edit_and_save("enabled");
+        events.push(key(KeyCode::Char('s')));
+        let (outcome, _) = run(&backend, &mut config, events).await;
+        assert_eq!(outcome, SetupOutcome::Ready);
+        let saves = backend.sets();
+        assert_eq!(saves.len(), 2);
+        assert_eq!(saves[1].base.as_deref(), Some("fp-2"));
+        assert_eq!(saves[1].document, saves[0].document);
+    }
+
+    #[tokio::test]
+    async fn partial_apply_shows_the_failed_step_on_wide_and_narrow_ready_frames() {
+        for was_setup in [false, true] {
+            for (width, height) in [(120, 40), (32, 12)] {
+                let mut backend = FakeBackend::first_run();
+                backend.state.setup_mode = was_setup;
+                backend.status.valid = true;
+                let step = if was_setup {
+                    "prompt commands"
+                } else {
+                    "provider"
+                };
+                let mut response = saved_response(true, "fp-2", was_setup, vec![]);
+                response.reload = Some(wing_api_client::models::ReloadResponse {
+                    diagnostics_redacted: true,
+                    ok: false,
+                    results: vec![wing_api_client::models::ReloadResultItem {
+                        name: step.into(),
+                        ok: false,
+                        detail: None,
+                    }],
+                    pending_restart_paths: Some(vec![]),
+                    new_session_defaults_changed: false,
+                });
+                backend.set = Some(response);
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                let outcome = run_setup_tui_with(
+                    &mut terminal,
+                    &backend,
+                    &mut AppConfig::default(),
+                    &endpoint(),
+                    &mut script(edit_and_save("enabled")),
+                )
+                .await
+                .unwrap();
+                assert_eq!(outcome, SetupOutcome::Ready);
+                let screen = screen(&terminal);
+                for fragment in ["已保存", step, "失败"] {
+                    if !was_setup && width > 32 && fragment == "失败" {
+                        assert!(screen.contains("部分设置未生效"), "{screen}");
+                    } else {
+                        assert!(screen.contains(fragment), "{screen}");
+                    }
+                }
+            }
+        }
     }
 
     // ── ⑤ Ctrl+C 双击 → Quit ────────────────────────────────────
@@ -1598,25 +2033,32 @@ mod tests {
 
     /// 就绪的那次保存带着"TUI 配置没写进去"的交代 —— 不能被就绪句吞掉。
     #[tokio::test]
-    async fn a_ready_save_keeps_the_interface_failure_in_the_receipt() {
+    async fn a_ready_save_keeps_the_unsaved_interface_draft_open() {
         let mut backend = FakeBackend::first_run();
-        backend.interface = Some(interface_source("auto"));
+        backend.interface = Some(InterfaceSource {
+            groups: crate::config::catalog::interface_groups(),
+            catalog: crate::config::catalog::interface_catalog(),
+            doc: json!({"api_key": "old-fixture-key"}),
+        });
         backend.interface_write_fails = true;
-        // 两边都弄脏：Interface 半边写盘会失败，Gateway 半边成功且就绪 —— 就绪句
-        // 必须把失败带上。
-        let mut events = vec![key(KeyCode::Char('/'))];
-        events.extend(text("preset"));
-        events.extend([key(KeyCode::Enter), key(KeyCode::Right)]);
-        events.push(key(KeyCode::Char('/')));
-        events.extend(text("enabled"));
-        events.extend([key(KeyCode::Enter), key(KeyCode::Enter)]);
-        events.push(key(KeyCode::Char('s')));
-        let mut config = AppConfig::default();
+        let mut events = vec![
+            key(KeyCode::Char('/')),
+            TermEvent::Paste("api_key".into()),
+            key(KeyCode::Enter),
+            key(KeyCode::Enter),
+            TermEvent::Paste("unsaved-fixture-key\n".into()),
+            key(KeyCode::Enter),
+        ];
+        events.extend(edit_and_save("enabled"));
+        let mut config = AppConfig {
+            api_key: Some("old-fixture-key".into()),
+            ..AppConfig::default()
+        };
         let (outcome, terminal) = run(&backend, &mut config, events).await;
 
-        assert_eq!(outcome, SetupOutcome::Ready, "网关半边就绪 ⇒ 进正常 TUI");
+        assert_eq!(outcome, SetupOutcome::Quit, "Interface 写入失败时留在向导");
         let screen = screen(&terminal);
-        assert!(screen.contains("✓ 配置就绪"), "{screen}");
+        assert!(screen.contains("Gateway 已就绪"), "{screen}");
         assert!(
             screen.contains("TUI 配置写入失败"),
             "写入失败必须跟着就绪句一起露面：\n{screen}"
@@ -1629,8 +2071,14 @@ mod tests {
         let mut backend = FakeBackend::first_run();
         let mut response = saved_response(true, "fp-2", true, vec![]);
         response.warnings = vec!["原配置文件无法解析，其中的密钥无法保留，请重新填写".into()];
-        response.restart_required = vec!["gateway.port".into()];
-        backend.set = FakeSet::Saved(response);
+        response.reload = Some(wing_api_client::models::ReloadResponse {
+            diagnostics_redacted: true,
+            ok: true,
+            results: vec![],
+            pending_restart_paths: Some(vec!["gateway.port".into()]),
+            new_session_defaults_changed: false,
+        });
+        backend.set = Some(response);
         let mut config = AppConfig::default();
         let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
 
@@ -1649,7 +2097,7 @@ mod tests {
         let mut backend = FakeBackend::first_run();
         backend.interface = Some(interface_source("auto"));
         backend.interface_write_fails = true;
-        backend.set = FakeSet::Failed;
+        backend.set = None;
         // 先把 Interface 半边弄脏（enum 右切），再把 Gateway 半边弄脏（bool 切换）。
         let mut events = vec![key(KeyCode::Char('/'))];
         events.extend(text("preset"));
@@ -1664,19 +2112,19 @@ mod tests {
         assert!(matches!(outcome, SetupOutcome::Quit));
         let screen = screen(&terminal);
         assert!(screen.contains("TUI 配置写入失败"), "{screen}");
-        assert!(screen.contains("保存失败"), "{screen}");
+        assert!(screen.contains("Gateway 保存未确认"), "{screen}");
     }
 
     #[tokio::test]
     async fn a_transport_failure_reports_and_stays_in_the_loop() {
         let mut backend = FakeBackend::first_run();
-        backend.set = FakeSet::Failed;
+        backend.set = None;
         let mut config = AppConfig::default();
         let (outcome, terminal) = run(&backend, &mut config, edit_and_save("enabled")).await;
 
         assert!(matches!(outcome, SetupOutcome::Quit), "传输失败不构成就绪");
         assert!(
-            screen(&terminal).contains("保存失败"),
+            screen(&terminal).contains("Gateway 保存未确认"),
             "{}",
             screen(&terminal)
         );
@@ -1731,6 +2179,7 @@ mod tests {
         // 配置可用。
         assert!(matches!(
             classify_preflight(Ok(SettingsStatusResponse {
+                restart_listener: None,
                 valid: true,
                 setup_mode: false,
                 problems: vec![],
@@ -1741,6 +2190,7 @@ mod tests {
 
         // 配置不可用（降级启动）。
         match classify_preflight(Ok(SettingsStatusResponse {
+            restart_listener: None,
             valid: false,
             setup_mode: false,
             problems: vec![problem("providers", "empty_list", "空")],
@@ -1947,6 +2397,70 @@ mod tests {
         assert_eq!((panel.height, note.height), (0, 1));
         let (_, panel, note) = split_setup_areas(Rect::new(0, 0, 20, 0));
         assert_eq!((panel.height, note.height), (0, 0));
+    }
+
+    #[test]
+    fn returning_from_an_enum_to_the_setup_categories_releases_q() {
+        let backend = FakeBackend::first_run();
+        let mut panel = SettingsPanel::new(
+            &backend.schema,
+            backend.state.clone(),
+            Some(InterfaceSource {
+                catalog: crate::config::catalog::interface_catalog(),
+                groups: crate::config::catalog::interface_groups(),
+                doc: serde_json::json!({}),
+            }),
+            View::Categories,
+        );
+        let press = |panel: &mut SettingsPanel, code| {
+            panel.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
+        };
+        press(&mut panel, KeyCode::Char('/'));
+        for ch in "colors.preset".chars() {
+            press(&mut panel, KeyCode::Char(ch));
+        }
+        press(&mut panel, KeyCode::Enter);
+        press(&mut panel, KeyCode::Enter);
+        assert!(panel.choices().is_some());
+        press(&mut panel, KeyCode::Home);
+        press(&mut panel, KeyCode::Left);
+        press(&mut panel, KeyCode::Left);
+        assert_eq!(panel.view(), View::Categories);
+        press(&mut panel, KeyCode::Home);
+        press(&mut panel, KeyCode::Enter);
+        assert!(q_is_quit(
+            &panel,
+            &KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)
+        ));
+    }
+
+    #[test]
+    fn setup_draws_the_shared_problem_list_and_keeps_its_status() {
+        let backend = FakeBackend::first_run();
+        for (width, height) in [(32, 10), (120, 40)] {
+            let mut panel =
+                SettingsPanel::new(&backend.schema, backend.state.clone(), None, View::Problems);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let note = Note::hint("setup marker");
+            draw_setup_frame(
+                &mut terminal,
+                &mut panel,
+                &AppConfig::default(),
+                &note,
+                true,
+            )
+            .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains("Settings"), "{text}");
+            assert!(text.contains("setup marker"), "{text}");
+            assert!(text.contains('❯'), "{text}");
+        }
     }
 
     /// `Resize` 必须被当成"重排 + 重画"，不是退出 —— 用户在 setup 阶段拉窗口

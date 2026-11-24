@@ -518,6 +518,21 @@ pub struct ReloadResponse {
     pub ok: bool,
     #[serde(default)]
     pub results: Vec<ReloadResultItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_restart_paths: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_session_defaults_changed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diagnostics_redacted: bool,
+}
+
+impl ReloadResponse {
+    /// Older gateways can include raw configuration values in failure text.
+    pub fn display_detail<'a>(&self, item: &'a ReloadResultItem) -> Option<&'a str> {
+        (self.diagnostics_redacted || item.ok)
+            .then_some(item.detail.as_deref())
+            .flatten()
+    }
 }
 
 /// 单个可分叉/回退的消息节点信息。
@@ -1654,6 +1669,14 @@ pub struct SettingsGetResponse {
     #[serde(default)]
     pub setup_mode: bool,
     pub config_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_restart_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestartListener {
+    pub host: String,
+    pub port: u16,
 }
 
 /// GET /api/settings/status 响应——启动路径上的最便宜预检。
@@ -1666,10 +1689,12 @@ pub struct SettingsStatusResponse {
     pub problems: Vec<SettingProblem>,
     #[serde(default)]
     pub fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_listener: Option<RestartListener>,
 }
 
 /// POST /api/settings/set 请求——全文档替换 + 乐观并发指纹。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingsSetRequest {
     /// 保存基线指纹。`None` ⇒ **不做并发检查**（CLI `--force` 的路径）。
     ///
@@ -1678,6 +1703,14 @@ pub struct SettingsSetRequest {
     pub base: Option<String>,
     /// 稀疏文档（密文三态：`null` = 保留现值 / 字符串 = 设为该值 / 缺键 = 不被覆盖）。
     pub document: serde_json::Value,
+}
+
+impl std::fmt::Debug for SettingsSetRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SettingsSetRequest")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
+    }
 }
 
 /// POST /api/settings/set 响应——保存回执。
@@ -2966,6 +2999,21 @@ mod settings_tests {
         assert_eq!(
             resp.backup_path.as_deref(),
             Some("/home/u/.wing/core/config.yaml.bak")
+        );
+    }
+
+    #[test]
+    fn settings_save_debug_exposes_the_fingerprint_without_the_document() {
+        let request = SettingsSetRequest {
+            base: Some("validated-fingerprint".into()),
+            document: json!({"providers":[{"api_key":"private-fixture-value"}]}),
+        };
+        let text = format!("{request:?}");
+        assert!(text.contains("SettingsSetRequest") && text.contains("validated-fingerprint"));
+        assert!(!text.contains("api_key") && !text.contains("private-fixture-value"));
+        assert_eq!(
+            serde_json::to_value(&request).unwrap()["document"],
+            request.document
         );
     }
 

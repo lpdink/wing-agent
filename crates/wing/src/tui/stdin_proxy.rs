@@ -97,7 +97,23 @@
 use std::time::{Duration, Instant};
 
 /// 一条完整的 OSC 5522 负载：`ESC]5522;` 之后、终止符（BEL / ST）之前的原始字节。
-pub type Sequence = Vec<u8>;
+pub struct Sequence {
+    pub(super) bytes: Vec<u8>,
+    pub(super) route:
+        Option<tokio::sync::oneshot::Receiver<super::clipboard_protocol::ClipboardTarget>>,
+}
+
+impl AsRef<[u8]> for Sequence {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl From<Vec<u8>> for Sequence {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self { bytes, route: None }
+    }
+}
 
 /// 触发「远端档」的环境变量：SSH / mosh 的转发会把同一次 `write` 拆到多个 read。
 const SSH_ENV: [&str; 4] = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "MOSH_CONNECTION"];
@@ -175,10 +191,18 @@ pub(crate) struct Feed {
     /// 原样交给 crossterm 的字节（顺序与输入一致）。
     pub passthrough: Vec<u8>,
     /// 提取出的 OSC 5522 负载（可一次多个）。
-    pub sequences: Vec<Sequence>,
+    pub sequences: Vec<Vec<u8>>,
+    sequence_offsets: Vec<usize>,
     /// 提取出的 DECRPM 应答参数段（`Pa;Ps`，如 `5522;2`；可一次多个）。**绝不透传**：
     /// crossterm 对 `ESC[?…y` 会永久挂在半截序列上（见模块文档）。
     pub reports: Vec<Vec<u8>>,
+}
+
+impl Feed {
+    fn push_sequence(&mut self, payload: Vec<u8>) {
+        self.sequence_offsets.push(self.passthrough.len());
+        self.sequences.push(payload);
+    }
 }
 
 /// 超时产生的结果。
@@ -343,6 +367,7 @@ impl Default for Holds {
 pub(crate) struct Splitter {
     hold: Hold,
     holds: Holds,
+    ordered: bool,
 }
 
 impl Splitter {
@@ -376,6 +401,13 @@ impl Splitter {
                     bytes.push(chunk[i]);
                     i += 1;
                     *since = now;
+                    if self.ordered && bytes.as_slice() == [ESC, ESC] {
+                        // Keep the first Escape distinct from the start of an OSC announcement.
+                        out.passthrough.extend_from_slice(b"\x1b[27u");
+                        bytes.clear();
+                        bytes.push(ESC);
+                        continue;
+                    }
                     match classify(bytes) {
                         Candidate::Partial => {}
                         Candidate::Sequence | Candidate::ColorQuery => {
@@ -430,7 +462,7 @@ impl Splitter {
                         if *overflow || *discard {
                             payload.clear(); // 超限包已 warn，这里只把槽位还给下一个候选
                         } else {
-                            out.sequences.push(std::mem::take(payload));
+                            out.push_sequence(std::mem::take(payload));
                         }
                         self.hold = Hold::None;
                         continue;
@@ -452,7 +484,7 @@ impl Splitter {
                             payload.clear();
                         } else {
                             payload.truncate(payload.len() - 2);
-                            out.sequences.push(std::mem::take(payload));
+                            out.push_sequence(std::mem::take(payload));
                         }
                         self.hold = Hold::None;
                     } else if !*overflow && payload.len() > SEQUENCE_BODY_MAX {
@@ -583,11 +615,12 @@ pub(crate) fn parse_decrmp(params: &[u8]) -> Option<(u32, u8)> {
 
 #[cfg(unix)]
 mod imp {
+    use super::super::clipboard_protocol::{Announcements, is_announcement};
     use super::*;
     use std::io;
     use std::io::Write;
     use std::os::fd::RawFd;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
 
     use tokio::sync::mpsc;
@@ -616,6 +649,7 @@ mod imp {
     struct Shared {
         proxy: Option<Proxy>,
         seq_rx: Option<mpsc::Receiver<Sequence>>,
+        announcements: Option<Arc<Announcements>>,
         probe: Option<Probe>,
         /// 判定缓存（`settle_paste_channel` 幂等；`paste_channel` 读这里）。
         settled: Option<PasteChannel>,
@@ -625,6 +659,7 @@ mod imp {
     static SHARED: Mutex<Shared> = Mutex::new(Shared {
         proxy: None,
         seq_rx: None,
+        announcements: None,
         probe: None,
         settled: None,
     });
@@ -761,9 +796,16 @@ mod imp {
 
             // 超时（或这一轮凑巧有别的就绪）都推进一次持有超时：代价可忽略，杜绝
             // 「只有 master 可写」这种 rc≥1 的轮次把到期的持有拖住。
-            let mut feed = Feed::default();
+            let announcements = lock().announcements.clone();
+            splitter.ordered = announcements.is_some();
             match splitter.expire(Instant::now()) {
-                Some(Expiry::Flush(bytes)) => feed.passthrough.extend_from_slice(&bytes),
+                Some(Expiry::Flush(bytes)) => {
+                    if splitter.ordered && bytes == [ESC] {
+                        pending.extend_from_slice(b"\x1b[27u");
+                    } else {
+                        pending.extend_from_slice(&bytes);
+                    }
+                }
                 Some(Expiry::Drop) => {
                     tracing::warn!("stdin proxy: dropping unterminated OSC 5522 sequence")
                 }
@@ -779,11 +821,10 @@ mod imp {
                 if n > 0 {
                     let n = n as usize;
                     let part = splitter.feed(&buf[..n], Instant::now());
-                    feed.passthrough.extend_from_slice(&part.passthrough);
-                    feed.sequences.extend(part.sequences);
                     for report in &part.reports {
                         record_report(report);
                     }
+                    enqueue_feed(part, &mut pending, &tx, announcements.as_deref());
                 } else if n == 0 {
                     tracing::warn!("stdin proxy: input stream closed");
                     break;
@@ -796,18 +837,6 @@ mod imp {
                             break;
                         }
                     }
-                }
-            }
-
-            pending.extend_from_slice(&feed.passthrough);
-            for seq in feed.sequences {
-                match tx.try_send(seq) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        tracing::warn!("stdin proxy: clipboard sequence dropped (channel full)")
-                    }
-                    // 接收端没了（进程收尾）：静默。
-                    Err(mpsc::error::TrySendError::Closed(_)) => {}
                 }
             }
 
@@ -845,6 +874,32 @@ mod imp {
     }
 
     /// 泵线程每次读到一条 DECRPM 应答时登记（只认 5522 的、只认第一条）。
+    fn enqueue_feed(
+        feed: Feed,
+        pending: &mut Vec<u8>,
+        tx: &mpsc::Sender<Sequence>,
+        announcements: Option<&Announcements>,
+    ) {
+        let mut offset = 0;
+        for (bytes, end) in feed.sequences.into_iter().zip(feed.sequence_offsets) {
+            pending.extend_from_slice(&feed.passthrough[offset..end]);
+            offset = end;
+            match tx.try_reserve() {
+                Ok(permit) => {
+                    let route = announcements
+                        .filter(|_| is_announcement(&bytes))
+                        .map(|announcements| announcements.mark(pending));
+                    permit.send(Sequence { bytes, route });
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    tracing::warn!("stdin proxy: clipboard sequence dropped (channel full)");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {}
+            }
+        }
+        pending.extend_from_slice(&feed.passthrough[offset..]);
+    }
+
     fn record_report(params: &[u8]) {
         let Some((mode, ps)) = parse_decrmp(params) else {
             tracing::debug!("stdin proxy: swallowed a malformed DECRPM-shaped reply");
@@ -1054,6 +1109,7 @@ mod imp {
             // seq_rx 一并清掉：拆接驳后 `take_sequences()` 不许再给出一个残端
             // （阴性判定后协议机不许起）。
             shared.seq_rx = None;
+            shared.announcements = None;
             shared.proxy.take()
         };
         let Some(mut proxy) = proxy else { return };
@@ -1079,8 +1135,55 @@ mod imp {
         lock().proxy.is_some()
     }
 
+    pub(in crate::tui) fn take_ordered_sequences(
+        announcements: Arc<Announcements>,
+    ) -> Option<mpsc::Receiver<Sequence>> {
+        let mut shared = lock();
+        let rx = shared.seq_rx.take()?;
+        shared.announcements = Some(announcements);
+        Some(rx)
+    }
+
     pub fn take_sequences() -> Option<mpsc::Receiver<Sequence>> {
         lock().seq_rx.take()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_dropped_clipboard_sequence_does_not_leave_an_announcement_in_keyboard_input() {
+            let (tx, mut rx) = mpsc::channel(1);
+            let announcements = Announcements::new();
+            let mut splitter = Splitter::new();
+            let start = b"a\x1b]5522;type=read:status=OK:pw=b3Rw\x07b";
+            assert!(tx.try_send(b"already queued".to_vec().into()).is_ok());
+
+            let mut pending = Vec::new();
+            enqueue_feed(
+                splitter.feed(start, Instant::now()),
+                &mut pending,
+                &tx,
+                Some(&announcements),
+            );
+            assert_eq!(pending, b"ab");
+            assert_eq!(rx.try_recv().unwrap().as_ref(), b"already queued");
+            assert!(matches!(
+                rx.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+
+            drop(rx);
+            pending.clear();
+            enqueue_feed(
+                splitter.feed(start, Instant::now()),
+                &mut pending,
+                &tx,
+                Some(&announcements),
+            );
+            assert_eq!(pending, b"ab");
+        }
     }
 }
 
@@ -1103,6 +1206,12 @@ mod imp {
         false
     }
 
+    pub(in crate::tui) fn take_ordered_sequences(
+        _: std::sync::Arc<super::super::clipboard_protocol::Announcements>,
+    ) -> Option<tokio::sync::mpsc::Receiver<Sequence>> {
+        None
+    }
+
     pub fn take_sequences() -> Option<tokio::sync::mpsc::Receiver<Sequence>> {
         None
     }
@@ -1123,6 +1232,7 @@ pub use imp::is_installed;
 pub use imp::paste_channel;
 pub use imp::restore;
 pub use imp::settle_paste_channel;
+pub(super) use imp::take_ordered_sequences;
 pub use imp::take_sequences;
 pub use imp::wake_reader;
 
@@ -1145,6 +1255,7 @@ mod tests {
     fn local() -> Splitter {
         Splitter {
             hold: Hold::None,
+            ordered: false,
             holds: Holds {
                 escape: ESC_HOLD,
                 prefix: PREFIX_HOLD,
@@ -1156,6 +1267,7 @@ mod tests {
     fn remote() -> Splitter {
         Splitter {
             hold: Hold::None,
+            ordered: false,
             holds: Holds::detect(|key| (key == "SSH_CONNECTION").then(String::new)),
         }
     }

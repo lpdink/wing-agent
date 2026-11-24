@@ -40,9 +40,12 @@ pub mod cursor;
 pub mod stdin_proxy;
 
 pub use appearance::detected_appearance;
+pub use clipboard_protocol::ClipboardAnnouncement;
 pub use clipboard_protocol::ClipboardEvent;
 pub use clipboard_protocol::ClipboardFailure;
 pub use clipboard_protocol::ClipboardPayload;
+pub use clipboard_protocol::ClipboardTarget;
+pub use clipboard_protocol::ClipboardText;
 pub use cursor::CursorGate;
 
 /// 唯一的终端类型：`CursorGate` 是出帧口的 backend 装饰，让**稳态**的一帧只以一次 write
@@ -50,7 +53,6 @@ pub use cursor::CursorGate;
 pub type WingTerminal = Terminal<CursorGate<CrosstermBackend<Stdout>>>;
 
 /// Events from the terminal (keyboard, mouse, resize, paste, focus).
-#[derive(Debug)]
 pub enum TermEvent {
     Key(KeyEvent),
     Mouse(crossterm::event::MouseEvent),
@@ -58,9 +60,25 @@ pub enum TermEvent {
     /// OSC 5522 通道的一条事件（读的生命周期 / 丢弃）——见 [`clipboard_protocol`]。
     /// 文本与 bracketed paste 走同一个入口（`App::handle_paste`）。
     Clipboard(ClipboardEvent),
+    ClipboardAnnouncement(ClipboardAnnouncement),
     Resize(u16, u16),
     Focus(bool),
     Tick,
+}
+
+impl std::fmt::Debug for TermEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Key(key) => f.debug_tuple("Key").field(key).finish(),
+            Self::Mouse(mouse) => f.debug_tuple("Mouse").field(mouse).finish(),
+            Self::Paste(_) => f.write_str("Paste(<redacted>)"),
+            Self::Clipboard(event) => f.debug_tuple("Clipboard").field(event).finish(),
+            Self::ClipboardAnnouncement(_) => f.write_str("ClipboardAnnouncement"),
+            Self::Resize(w, h) => f.debug_tuple("Resize").field(w).field(h).finish(),
+            Self::Focus(focused) => f.debug_tuple("Focus").field(focused).finish(),
+            Self::Tick => f.write_str("Tick"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +474,16 @@ fn enable_paste_events(w: &mut impl io::Write) -> io::Result<()> {
 ///
 /// 必须在 crossterm 事件源首次创建之前调用（fd 0 在此时已经确定：阳性时是 pty slave）。
 pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
+    spawn_event_stream_inner(false)
+}
+
+/// Start the TUI input stream with ordered clipboard ownership requests.
+/// Respond to each [`TermEvent::ClipboardAnnouncement`] with the current input target.
+pub fn spawn_event_stream_with_clipboard() -> mpsc::Receiver<TermEvent> {
+    spawn_event_stream_inner(true)
+}
+
+fn spawn_event_stream_inner(ordered: bool) -> mpsc::Receiver<TermEvent> {
     let mut slot = event_task_slot();
     // 全进程只调一次（真实调用点只有 `app::run_app`）：第二次 spawn 要么覆盖旧 handle
     // （旧任务永远停不下来），要么（收尾过之后再 spawn）踩上不复位的 `EVENT_STOP`——新流
@@ -467,14 +495,21 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
         "spawn_event_stream must run once per process"
     );
     let (tx, rx) = mpsc::channel(128);
-    if stdin_proxy::paste_channel() == stdin_proxy::PasteChannel::Supported
-        && let Some(sequences) = stdin_proxy::take_sequences()
-    {
-        // 写失败不致命（stdout 没了，协议机也没数据可谈）；模式没开成通道自然静默。
-        let mut out = io::stdout();
-        let _ = enable_paste_events(&mut out);
-        let _ = out.flush();
-        clipboard_protocol::spawn(sequences, tx.clone());
+    let supported = stdin_proxy::paste_channel() == stdin_proxy::PasteChannel::Supported;
+    let announcements = (ordered && supported)
+        .then(|| std::sync::Arc::new(clipboard_protocol::Announcements::new()));
+    if supported {
+        let sequences = match &announcements {
+            Some(announcements) => stdin_proxy::take_ordered_sequences(announcements.clone()),
+            None => stdin_proxy::take_sequences(),
+        };
+        if let Some(sequences) = sequences {
+            // Keep the terminal mode paired with its protocol consumer.
+            let mut out = io::stdout();
+            let _ = enable_paste_events(&mut out);
+            let _ = out.flush();
+            clipboard_protocol::spawn(sequences, tx.clone(), ordered);
+        }
     }
     let handle = tokio::spawn(async move {
         loop {
@@ -504,7 +539,15 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
                         }
                     }
                     Ok(crossterm::event::Event::Paste(text)) => {
-                        if !forward(&tx, TermEvent::Paste(text)).await {
+                        let event = match announcements
+                            .as_ref()
+                            .and_then(|announcements| announcements.decode(&text))
+                        {
+                            Some(Some(request)) => TermEvent::ClipboardAnnouncement(request),
+                            Some(None) => continue,
+                            None => TermEvent::Paste(text),
+                        };
+                        if !forward(&tx, event).await {
                             break;
                         }
                     }
@@ -533,6 +576,36 @@ pub fn spawn_event_stream() -> mpsc::Receiver<TermEvent> {
     });
     *slot = Some(handle);
     rx
+}
+
+/// `Ctrl+V` / `super+v` — 读系统剪贴板（L1）。
+///
+/// 两种解码形态都要接住：没开 kitty 键盘协议的终端把 Ctrl+V 发成控制字节 `0x16`
+/// （crossterm → `Char('v') + CONTROL`）；开了协议的终端把 Cmd+V 回传成
+/// `CSI 118;9u`（crossterm → `Char('v') + SUPER`，见 `tests/clipboard_paste_keys.rs`）。
+///
+/// 口径（两分支不对称是刻意的）：
+///
+/// - `super+v` 与 `super+shift+v`（macOS 的 Paste and Match Style）都触发粘贴 ——
+///   SHIFT 只改变粘贴的“样式”，语义仍是粘贴；`super+alt/ctrl+v` 是与粘贴无关的
+///   系统/终端组合，不接。
+/// - `Ctrl+V` 触发；`Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧）与
+///   `Ctrl+Alt+V`（kitty 把 AltGr 报成 ctrl+alt）不接 —— 绑上只会吃掉字符输入或
+///   得到「有时被终端吃掉、有时没有」的不一致。
+pub(crate) fn is_paste_clipboard_key(key: &crossterm::event::KeyEvent) -> bool {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyModifiers;
+
+    matches!(key.code, KeyCode::Char('v' | 'V'))
+        && if key.modifiers.contains(KeyModifiers::SUPER) {
+            !key.modifiers
+                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
+        } else {
+            key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+        }
 }
 
 /// Check if a key event is the quit shortcut (Ctrl+C).
@@ -871,6 +944,58 @@ mod tests {
             }
             other => panic!("expected a mouse event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn terminal_debug_retains_event_context_and_redacts_pasted_content() {
+        use crate::shared::text_edit::TextInputId;
+        use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+
+        const TOKEN: &str = "fixture-private-clipboard-text";
+        let bracketed = TermEvent::Paste(TOKEN.into());
+        assert_eq!(format!("{bracketed:?}"), "Paste(<redacted>)");
+        let ordinary = TermEvent::Clipboard(ClipboardEvent::Delivered(ClipboardPayload::Text(
+            TOKEN.into(),
+        )));
+        assert_eq!(
+            format!("{ordinary:?}"),
+            "Clipboard(Delivered(Text(<redacted>)))"
+        );
+        let scoped = TermEvent::Clipboard(ClipboardEvent::TextInput {
+            target: TextInputId::new(),
+            result: Ok(TOKEN.to_owned().into()),
+        });
+        let debug = format!("{scoped:?}");
+        assert!(debug.contains("TextInput"));
+        assert!(debug.contains("Ok(<redacted>)"));
+        assert!(!debug.contains(TOKEN));
+
+        let picture = ClipboardPayload::Image {
+            bytes: vec![102, 103, 104],
+            mime: "image/png".into(),
+            name: Some("fixture.png".into()),
+        };
+        assert_eq!(
+            format!("{picture:?}"),
+            r#"Image { len: 3, mime: "image/png", name: Some("fixture.png") }"#
+        );
+        let mouse = TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 42,
+            row: 7,
+            modifiers: KeyModifiers::SHIFT,
+        });
+        let debug = format!("{mouse:?}");
+        for detail in ["Moved", "column: 42", "row: 7", "SHIFT"] {
+            assert!(debug.contains(detail));
+        }
+        let escape = TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(format!("{escape:?}").contains("Esc"));
+        assert_eq!(
+            format!("{:?}", TermEvent::Resize(120, 40)),
+            "Resize(120, 40)"
+        );
+        assert_eq!(format!("{:?}", TermEvent::Focus(false)), "Focus(false)");
     }
 
     /// 没起过事件流（向导 / 初始化失败路径）：收尾是 no-op——不 panic、不动 flag

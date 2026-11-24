@@ -1,0 +1,222 @@
+//! Presentation of the Gateway model union over the original sparse document.
+
+use std::collections::HashSet;
+
+use serde_json::{Value, json};
+use wing_api_client::models::{PathStep, SettingKind, SettingNode, parse_path};
+
+use super::{Root, SettingsDoc};
+use crate::shared::doc_edit;
+
+const MODEL_LIST: &str = "providers[].models";
+const IMAGE_INPUT: &str = "providers[].models[].capabilities.vision";
+const VISION_FIELD: &str = "capabilities.vision";
+
+pub(super) fn object_variant(root: Root, list: &SettingNode) -> Option<usize> {
+    if root != Root::Gateway || list.path != MODEL_LIST {
+        return None;
+    }
+    let variants = list.variants.as_deref()?;
+    if !variants.iter().any(|node| node.kind == SettingKind::Str) {
+        return None;
+    }
+    variants.iter().position(|node| {
+        node.kind == SettingKind::Object
+            && node
+                .children
+                .iter()
+                .any(|field| field.key == "name" && field.kind == SettingKind::Str)
+            && node.children.iter().any(|field| {
+                field.key == "capabilities"
+                    && field.children.iter().any(|capability| {
+                        capability.key == "vision" && capability.kind == SettingKind::Bool
+                    })
+            })
+    })
+}
+
+pub(super) fn field_label(node: &SettingNode) -> &str {
+    match node.path.as_str() {
+        IMAGE_INPUT => "Image input",
+        "providers[].models[].name" => "Model name",
+        _ => node.display_label(),
+    }
+}
+
+/// The virtual name borrows the short form directly. Other fields use the catalog defaults.
+pub(super) fn field_value<'a>(doc: &'a SettingsDoc, root: Root, path: &str) -> Option<&'a Value> {
+    doc.value(root, path)
+        .or_else(|| short_name(doc, root, path))
+}
+
+pub(super) fn short_name<'a>(doc: &'a SettingsDoc, root: Root, path: &str) -> Option<&'a Value> {
+    if !path.ends_with(".name") {
+        return None;
+    }
+    let (item, field) = model_field(root, path)?;
+    if field != "name" {
+        return None;
+    }
+    doc.value(root, &item).filter(|value| value.is_string())
+}
+
+fn model_field(root: Root, path: &str) -> Option<(String, &str)> {
+    if root != Root::Gateway || !path.starts_with("providers[") {
+        return None;
+    }
+    let steps = parse_path(path)?;
+    let [
+        PathStep::Key(providers),
+        PathStep::Index(_),
+        PathStep::Key(models),
+        PathStep::Index(_),
+        PathStep::Key(_),
+        ..,
+    ] = steps.as_slice()
+    else {
+        return None;
+    };
+    if providers != "providers" || models != "models" {
+        return None;
+    }
+    let item = doc_edit::format_path(&steps[..4]);
+    let field = path.strip_prefix(&item)?.strip_prefix('.')?;
+    Some((item, field))
+}
+
+/// Remember which objects came from a short form in this draft. Index changes follow list edits.
+#[derive(Default)]
+pub(super) struct ModelEdits {
+    promoted: HashSet<String>,
+}
+
+impl ModelEdits {
+    pub(super) fn clear(&mut self) {
+        self.promoted.clear();
+    }
+
+    pub(super) fn remap(&mut self, root: Root, list: &str, map: &dyn Fn(usize) -> Option<usize>) {
+        if root == Root::Gateway {
+            self.promoted = self
+                .promoted
+                .iter()
+                .filter_map(|path| doc_edit::remap_index(path, list, map))
+                .collect();
+        }
+    }
+
+    /// Returns the value to the caller when it needs an ordinary document write.
+    pub(super) fn write(
+        &mut self,
+        doc: &mut SettingsDoc,
+        root: Root,
+        path: &str,
+        value: Value,
+        vision_default: Option<bool>,
+    ) -> Option<Value> {
+        let Some((item, field)) = model_field(root, path) else {
+            return Some(value);
+        };
+        if let Some(name) = doc.value(root, &item).and_then(Value::as_str) {
+            if field == "name" {
+                doc.set_value(root, &item, value);
+                doc.mark_dirty(root, path);
+                return None;
+            }
+            doc.set_value(root, &item, json!({"name": name}));
+            self.promoted.insert(item.clone());
+        }
+        if !self.promoted.contains(&item) {
+            return Some(value);
+        }
+        if field == VISION_FIELD
+            && vision_default.is_some_and(|default| value.as_bool() == Some(default))
+        {
+            self.reset_promoted(doc, root, path, &item);
+        } else {
+            doc.set_value(root, path, value);
+            doc.mark_dirty(root, path);
+        }
+        None
+    }
+
+    pub(super) fn reset(&mut self, doc: &mut SettingsDoc, root: Root, path: &str) -> bool {
+        let Some((item, field)) = model_field(root, path) else {
+            return false;
+        };
+        if field == "name" || !self.promoted.contains(&item) {
+            return false;
+        }
+        self.reset_promoted(doc, root, path, &item);
+        true
+    }
+
+    fn reset_promoted(&mut self, doc: &mut SettingsDoc, root: Root, path: &str, item: &str) {
+        doc.remove_value(root, path);
+        doc.clear_dirty(root, path);
+        if let Some(name) = doc
+            .value(root, item)
+            .and_then(Value::as_object)
+            .filter(|object| object.len() == 1)
+            .and_then(|object| object.get("name"))
+            .filter(|name| name.is_string())
+            .cloned()
+        {
+            doc.set_value(root, item, name);
+            self.promoted.remove(item);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn virtual_model_names_do_not_leak_into_nested_fields_or_other_lists() {
+        let doc = SettingsDoc::new(
+            json!({"providers": [{"models": ["short"], "fallback_models": ["fallback"]}]}),
+            json!({"providers": [{"models": ["local"]}]}),
+            Default::default(),
+            "base".into(),
+        );
+        assert_eq!(
+            short_name(&doc, Root::Gateway, "providers[0].models[0].name"),
+            Some(&json!("short"))
+        );
+        for (root, path) in [
+            (Root::Gateway, "providers[0].models[0].capabilities.name"),
+            (Root::Gateway, "providers[0].fallback_models[0].name"),
+            (Root::Interface, "providers[0].models[0].name"),
+        ] {
+            assert_eq!(field_value(&doc, root, path), None, "{root:?} {path}");
+        }
+    }
+
+    #[test]
+    fn interface_reorders_do_not_reassign_gateway_promotion_history() {
+        let mut doc = SettingsDoc::new(
+            json!({"providers": [{"models": ["short", {"name": "object"}]}]}),
+            json!({}),
+            Default::default(),
+            "base".into(),
+        );
+        let mut edits = ModelEdits::default();
+        let vision = "providers[0].models[0].capabilities.vision";
+        assert!(
+            edits
+                .write(&mut doc, Root::Gateway, vision, json!(true), Some(false))
+                .is_none()
+        );
+        edits.remap(
+            Root::Interface,
+            "providers[0].models",
+            &doc_edit::swap_index_map(0, 1),
+        );
+        assert!(edits.reset(&mut doc, Root::Gateway, vision));
+        assert_eq!(
+            doc.value(Root::Gateway, "providers[0].models"),
+            Some(&json!(["short", {"name": "object"}]))
+        );
+    }
+}

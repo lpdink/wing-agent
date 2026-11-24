@@ -96,8 +96,15 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | GET | `/api/models` | 可用模型目录（按 provider 分组嵌套；目录 = **配置静态声明的同步投影**——远端 `/models` 发现已退役、无网络请求）。`providers[].models` 是**对象数组**：`{id, name, display_name, description, context_window_tokens, keep_recent_tokens, capabilities: {vision}}`——`id` 是全局唯一**引用词**（一切请求 / 协议引用它），`name` 是发给上游的调用名，`display_name` 是展示名（可空，前端回落 `name`），`context_window_tokens` / `keep_recent_tokens` 是压缩双阈值的**生效值**（模型声明唯一来源，未声明 = 声明层默认），`capabilities` 是能力声明（见 [media-images.md](media-images.md)）。旧的 `model_details` 平行数组已删除（消灭「两数组逐项对齐」的脆弱契约） |
 | GET | `/api/agents` | 可用 agent 模板列表 |
 | POST | `/api/system/reload` | 热重载（无需重启），**逐项名字序是对外契约**（probe `test_system_reload` 钉住，只许在末尾追加）：`config.yaml → hooks → prompt commands → provider → skills & rules → log level`。config 项失败立即中止（后续项不再尝试），其余项失败继续；逐项 `ok` / `detail` 如实上报，**失败不回滚文件**。保存事务（`/api/settings/set` 的第 ⑦ 步）走同一条管道 |
-| POST | `/api/shutdown` | Gateway 优雅自关闭（返回 200 后延迟自送 SIGTERM） |
+| POST | `/api/shutdown` | Gateway 优雅自关闭。重启可传 `settings_fingerprint` 查询参数，文件指纹已变更时返回 409 |
 | GET | `/api/tools` | 全局工具列表（内置 + 远程，平铺；ref / namespace / name / llm_name / description）（PR #50） |
+
+`/api/system/reload` 和保存回执中的 `reload` 保持 `ok`、`results` 及逐项顺序。`pending_restart_paths`
+列出已加载并需要重启的设置路径，空数组表示没有待重启项，缺少字段或 `null` 表示状态未知。
+无效文件保留上一份已加载配置的待重启状态。`new_session_defaults_changed` 表示这次重载改变了新会话的默认值。
+`diagnostics_redacted: true` 表示网关返回的 `detail` 可供显示。初始化允许个别 hook 或命令文件加载失败，
+这时 `reload.ok` 为假，`setup_mode_exited` 仍为真。
+启动校验读取原始 YAML。`GET /api/settings/status` 的 `restart_listener` 使用相同文件版本，保留未改的启动监听参数。
 
 > `/api/models` 的响应形状（对象数组；`model_details` 平行数组已不存在）：
 
@@ -116,8 +123,8 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/settings/schema` | 设置目录树（`SettingNodeProto`：默认值 / 约束 / 枚举 / 生效域 `apply` / 密文标记 / 分组 / 列表元素形态）。纯静态，可长缓存；`{version, root, config_path, groups}`，根节点的 `key` / `path` 恒为 `"config"`；`groups[]`（`{id, title, doc, members}`，顺序即界面顺序）是设置面板左列锚点的唯一来源，声明在后端 `config/groups.py` |
-| GET | `/api/settings/get` | 稀疏文档（只有用户显式写下的键；密文叶子恒为 `null`）+ `secrets` 状态表（`set` / `empty` / `absent` + 末 4 位 hint）+ `fingerprint`（文件 sha256；不存在 = `"absent"`）+ 全部 `problems` + `setup_mode` + `config_path`。文件坏掉（YAML 语法错）也照常应答：`values={}` + 一条文档级 problem（`path=null`） |
+| GET | `/api/settings/schema` | 设置目录树（`SettingNodeProto`：默认值 / 约束 / 枚举 / 生效域 `apply` / 密文标记 / 分组 / 列表元素形态）。纯静态，可长缓存；`{version, root, config_path, groups}`，根节点的 `key` / `path` 恒为 `"config"`；`groups[]`（`{id, title, doc, members}`，顺序即界面顺序）是设置分类的唯一来源，声明在后端 `config/groups.py` |
+| GET | `/api/settings/get` | 稀疏文档（只有用户显式写下的键；密文叶子恒为 `null`）+ `secrets` 状态表（`set` / `empty` / `absent` + 末 4 位 hint）+ `fingerprint`（文件 sha256；不存在 = `"absent"`）+ 全部 `problems` + `setup_mode` + `config_path` + `pending_restart_paths`（运行网关已读取、仍待重启的路径，`null` 表示未知）。文件坏掉（YAML 语法错）也照常应答：`values={}` + 一条文档级 problem（`path=null`） |
 | GET | `/api/settings/status` | `{valid, setup_mode, problems, fingerprint}`——启动路径上的最便宜预检。`valid == (not setup_mode and 无 problem)`：降级态**恒** `false` |
 | POST | `/api/settings/set` | 保存事务。body `{base, document}`：`base` = 客户端持有的指纹（显式 `null` / 缺键 = 不做并发检查，CLI `--force`）；`document` = 整份稀疏文档。**密文三态**：`null` = 保留磁盘现值 / 字符串 = 设为该值（`""` = 显式清空）/ 键缺席 = 从文件移除。**鉴权：admin**（`tool_runtime` 403） |
 
@@ -125,14 +132,14 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 
 ```json
 {"ok": true, "fingerprint": "…", "problems": [], "changed": ["providers[0].extra_body"],
- "restart_required": [], "reload": {"ok": true, "results": [{"name": "config.yaml", "ok": true}, …]},
+ "restart_required": [], "reload": {"ok": true, "results": [{"name": "config.yaml", "ok": true}, …], "pending_restart_paths": []},
  "setup_mode_exited": false, "backup_path": "…/config.yaml.bak", "warnings": []}
 ```
 
 > **校验失败走 HTTP 200 + `ok=false` + `problems`（不是 4xx）**——刻意的取舍，别"修好"它：
 > 请求本身完全合法，是**用户填的内容**不合法；把它当业务结果返回，前端保存路径永远拿到同一个响应类型
 > （`ok` 决定成败，`problems` 逐条驱动标红）。HTTP 错误码只留给**协议级**失败：**409**（指纹不匹配，
-> `error: "conflict"`，`detail` 带当前指纹）、**401 / 403**（鉴权）、**500**（写盘 `OSError`）。
+> `error: "conflict"`，`detail` 带当前指纹）、**401 / 403**（鉴权）、**500 `settings_write_failed`**（磁盘写入失败，配置文件未被替换）。
 >
 > 其他语义：**全有或全无**（有 problem 时文件一个字节都不写）；写前把现有文件字节级复制到
 > `config.yaml.bak`（覆盖式，只留最近一份）；`changed` 是相对保存前的变更路径（列表按下标 diff，
@@ -296,7 +303,7 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 **其他**（`event/base.py`、`query_response.py`）：`error` · `notice` · `delivered` · `context_stats` · `branch_targets`。
 
-**网关级事件**（`event/state_change.py`）：`settings_changed` —— `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（广播给所有已连接客户端）；`persist=false` 且**不进 `FACT_EVENTS`**：它是**时点通知**（没有 `session_id`、不进任何会话链），客户端重连后应重新 `GET /api/settings/status`，重放一条旧通知只会误导。消费侧**用指纹比对**判断是不是别人改的（自己的保存会更新本地指纹，相同即忽略；不同则提示"配置已被其它客户端修改"并作废本地缓存）。
+**网关级事件**（`event/state_change.py`）：`settings_changed` —— `{changed, restart_required, setup_mode_exited, fingerprint}`，`target = global`（广播给所有已连接客户端）；`persist=false` 且**不进 `FACT_EVENTS`**：它是**时点通知**（没有 `session_id`、不进任何会话链），重连或收到事件后用 `GET /api/settings/get` 刷新待重启状态。文件指纹只用于判断本地草稿是否过期。
 
 > `notice`：一次性提醒（`level` + `message`，可带 `attempt` / `max_attempts` / `retry_in_s`），`persist=false` 不落盘、不重放。与 `error` 的边界：`error` 是"真错误"（TUI / ACP 据此终结 turn / 渲染错误 / 通知），`notice` 不终结 turn（如"LLM 调用失败，N 秒后重试"）。stdio 前端例外：它把 `error` 只当原因文本，轮末由 `turn_result` / 合成终态帧 / `done` 收口（见 [architecture.md](architecture.md) 的 stdio「终态帧」一节）。
 

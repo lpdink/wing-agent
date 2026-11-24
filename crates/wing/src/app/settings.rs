@@ -1,7 +1,7 @@
 //! 设置面板的 App 侧接线（`/settings`）。
 //!
-//! `shared/panels/settings` 的状态机产出 [`SettingsAction`]，overlay
-//! （`ui/settings`）把它画出来；这一层负责**它周围的一切**：
+//! `shared/panels/settings` 的状态机产出 [`SettingsAction`]，`ui/settings` 绘制列表。
+//! 这里负责会话里的设置生命周期：
 //!
 //! * **生命周期**——打开（cache-first + 后台刷新）、关闭（预览回退 + 整屏重画 +
 //!   图片失效）、`R` 重载、`Ctrl+R` 重启；
@@ -17,6 +17,7 @@
 use std::time::Duration;
 
 use serde_json::Value;
+use wing_api_client::models::ReloadResponse;
 use wing_api_client::models::SettingsGetResponse;
 use wing_api_client::models::SettingsSchemaResponse;
 use wing_api_client::models::SettingsSetResponse;
@@ -38,8 +39,7 @@ use crate::ui::toast::Toast;
 
 /// 一次保存里 **Interface 半边**（本地写盘）的结论。
 ///
-/// Gateway 半边异步回来后才合并回执，所以这个结论要先存在
-/// [`App`] 上（见 [`PendingSettingsSave`]）。
+/// Gateway 半边异步回来后才合并回执。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum InterfaceSaveReport {
     /// 本次没有 Interface 改动（没尝试写盘）。
@@ -74,7 +74,30 @@ pub(super) enum GatewaySaveReport {
     /// `POST /api/settings/set` 拿到了响应（`ok` 可能是 `false` + problems）。
     Saved(SettingsSetResponse),
     /// 请求本身失败：`conflict` = 409（指纹冲突）。
-    Failed { message: String, conflict: bool },
+    Failed {
+        message: String,
+        conflict: bool,
+    },
+    Unconfirmed {
+        message: String,
+    },
+}
+
+impl From<crate::cmd::settings_api::SettingsSaveFailure> for GatewaySaveReport {
+    fn from(failure: crate::cmd::settings_api::SettingsSaveFailure) -> Self {
+        use crate::cmd::settings_api::SettingsSaveFailure;
+        match failure {
+            SettingsSaveFailure::Conflict => Self::Failed {
+                message: String::new(),
+                conflict: true,
+            },
+            SettingsSaveFailure::Rejected(message) => Self::Failed {
+                message,
+                conflict: false,
+            },
+            SettingsSaveFailure::Unconfirmed(message) => Self::Unconfirmed { message },
+        }
+    }
 }
 
 impl GatewaySaveReport {
@@ -92,13 +115,7 @@ impl GatewaySaveReport {
     }
 }
 
-/// 等待 Gateway 回执的那一次保存：Interface 半边的结论 + 本次发出的文档
-/// （`ok=true` 时写回缓存，让下次打开面板仍能 cache-first）。
-#[derive(Debug, Clone)]
-pub(super) struct PendingSettingsSave {
-    pub(super) interface: InterfaceSaveReport,
-    pub(super) document: Value,
-}
+const SETTINGS_LOADING: &str = "正在载入设置…";
 
 impl App {
     // -----------------------------------------------------------------------
@@ -114,8 +131,12 @@ impl App {
         if self.settings_panel.is_some() {
             return;
         }
+        if self.settings_save.is_some() {
+            self.show_toast(Toast::info("设置正在保存…", Duration::from_secs(3)));
+            return;
+        }
         if self.settings_cache.is_none() {
-            self.show_toast(Toast::info("正在载入设置…", Duration::from_secs(3)));
+            self.show_toast(Toast::info(SETTINGS_LOADING, Duration::from_secs(3)));
         }
         // 打开时的 config 快照：`Esc` 放弃 / `R` 重载的回退基准。
         self.config_snapshot = Some(self.config.clone());
@@ -135,18 +156,21 @@ impl App {
         schema: &SettingsSchemaResponse,
         state: SettingsGetResponse,
     ) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|toast| toast.message == SETTINGS_LOADING)
+        {
+            self.clear_toast();
+        }
         let catalog = crate::config::catalog::interface_catalog();
         let interface = match crate::config::store::read_interface_doc() {
-            Ok(read) => {
-                self.interface_catalog = Some(catalog.clone());
-                Some(InterfaceSource {
-                    groups: crate::config::catalog::interface_groups(),
-                    catalog,
-                    doc: read.doc,
-                })
-            }
+            Ok(read) => Some(InterfaceSource {
+                groups: crate::config::catalog::interface_groups(),
+                catalog,
+                doc: read.doc,
+            }),
             Err(e) => {
-                self.interface_catalog = None;
                 self.show_toast(Toast::warning(
                     format!("无法读取 TUI 配置，面板只显示 Gateway 根：{e}"),
                     Duration::from_secs(5),
@@ -154,32 +178,28 @@ impl App {
                 None
             }
         };
-        self.settings_panel = Some(SettingsPanel::new(schema, state, interface, View::Tree));
+        self.settings_panel = Some(SettingsPanel::new(
+            schema,
+            state,
+            interface,
+            View::Categories,
+        ));
         self.settings_pending = false;
-        // 选区锚在内容坐标：overlay 期间的帧几何与内容都变了，留着只会指向别的文本。
         self.cancel_selection();
-        // v2 的卡片是**浮层**：四周露出聊天背景，于是"卡片底下那张图"成了新问题——
-        // 图形协议画上去的像素不会因为这一帧不画它就消失（sixel 尤其如此）。
-        // 打开时整屏重画一次（`terminal.clear()` + `images.invalidate()` 是既有配对），
-        // 与 `close_settings_panel` 的那一次对称：进出面板各擦一次屏幕。
+        // A viewport resize can leave pixels drawn by the previous frame's graphics protocol.
         self.needs_full_redraw = true;
         self.chat_dirty = true;
     }
 
     /// 关闭面板（`discard=true` = 用户确认放弃未保存改动 → 预览回退）。
-    ///
-    /// **无论哪条路径**都要整屏重画 + 让图片句柄失效：overlay 的 `Clear` 抹过终端，
-    /// ratatui 的 diff 面对"曾经被 Clear 过"的屏幕会留下残影，
-    /// 而图片协议的内容在 Clear 之后终端已不再持有。
     pub(super) fn close_settings_panel(&mut self, discard: bool) {
         self.settings_panel = None;
-        self.interface_catalog = None;
         self.settings_pending = false;
         self.settings_reload_pending = false;
+        self.settings_fetch_id = self.settings_fetch_id.wrapping_add(1);
         if discard {
             self.restore_config_snapshot();
         }
-        // 面板开着时新起的拖拽锚在看不见的 chat band 上：一起收掉。
         self.cancel_selection();
         self.needs_full_redraw = true;
         self.images.invalidate();
@@ -196,12 +216,11 @@ impl App {
         interface: Option<InterfaceSource>,
     ) {
         self.config_snapshot = Some(self.config.clone());
-        self.interface_catalog = interface.as_ref().map(|source| source.catalog.clone());
         self.settings_panel = Some(SettingsPanel::new(
             schema,
             state.clone(),
             interface,
-            View::Tree,
+            View::Categories,
         ));
         self.settings_cache = Some((schema.clone(), state));
         self.cancel_selection();
@@ -212,7 +231,7 @@ impl App {
     ///
     /// 三条口径写死在这里：
     /// * 面板开着 + `R` 重载 → **无条件** `apply_snapshot`（丢弃本地改动是它的语义）；
-    /// * 面板开着 + 后台刷新 → 只在面板还干净时应用（否则会抹掉用户刚敲的值）；
+    /// * 面板开着 + 后台刷新 → 只在面板干净且无活动编辑时应用；
     /// * 面板关着 + 有在飞的首次拉取（`settings_pending`）→ 现在打开。
     pub(super) fn handle_settings_fetch(
         &mut self,
@@ -223,11 +242,27 @@ impl App {
         let open_pending = std::mem::take(&mut self.settings_pending);
         self.settings_cache = Some((schema.clone(), state.clone()));
         if let Some(panel) = self.settings_panel.as_mut() {
-            if reload || panel.dirty_count() == 0 {
+            if reload
+                || (panel.dirty_count() == 0
+                    && !panel.has_active_input()
+                    && panel.prompt().is_none()
+                    && panel.choices().is_none())
+            {
                 panel.apply_snapshot(&schema, state);
+            } else {
+                panel.set_pending_restart_paths(state.pending_restart_paths.unwrap_or_default());
+                panel.on_settings_changed(&state.fingerprint);
             }
         } else if open_pending {
             self.present_settings_panel(&schema, state);
+        }
+    }
+
+    pub(super) fn handle_settings_fetch_error(&mut self, message: String) {
+        let opening = std::mem::take(&mut self.settings_pending);
+        let reloading = std::mem::take(&mut self.settings_reload_pending);
+        if opening || reloading {
+            self.show_toast(Toast::warning(message, Duration::from_secs(5)));
         }
     }
 
@@ -282,9 +317,9 @@ impl App {
                 interface_dirty,
             } => {
                 self.push_intent(AppIntent::SaveSettings {
-                    gateway: Box::new(gateway),
+                    gateway: gateway.into(),
                     base,
-                    interface: Box::new(interface),
+                    interface: interface.into(),
                     gateway_dirty,
                     interface_dirty,
                 });
@@ -311,7 +346,11 @@ impl App {
     /// 本地半边立刻做（预览回到磁盘状态），Gateway 半边走 `ReloadSettings` ——
     /// 回到 `get` 的结果由 `settings_reload_pending` 标记为"无条件应用"。
     pub(super) fn reload_settings(&mut self) {
-        let catalog = self.interface_catalog.clone();
+        let catalog = self
+            .settings_panel
+            .as_ref()
+            .and_then(SettingsPanel::interface_catalog)
+            .cloned();
         match (catalog, crate::config::store::read_interface_doc()) {
             (Some(catalog), Ok(read)) => {
                 let doc = read.doc;
@@ -375,42 +414,38 @@ impl App {
         }
     }
 
-    /// Gateway 半边的结论落地：面板 `apply_save` + 缓存回写 + 合并回执。
-    ///
-    /// 两半的汇合点。`settings_save` 里存着 Interface 半边的结论（短路路径在调用前
-    /// 也会把它放好），所以合并只看这一份状态。
     pub(super) fn settle_gateway_save(&mut self, gateway: GatewaySaveReport) {
-        let pending = self.settings_save.take();
-        let interface = pending
+        let was_setup = self
+            .settings_panel
             .as_ref()
-            .map(|pending| pending.interface.clone())
+            .is_some_and(SettingsPanel::setup_mode);
+        let interface = self
+            .settings_save
+            .take()
             .unwrap_or(InterfaceSaveReport::Skipped);
-
         match &gateway {
             GatewaySaveReport::Saved(response) => {
                 if let Some(panel) = self.settings_panel.as_mut() {
-                    // `ok=false` 时面板自己会切到问题清单视图（apply_save）。
                     panel.apply_save(SaveOutcome {
                         gateway: Some(response.clone()),
                         interface_ok: None,
                     });
                 }
-                if let Some((_, cached)) = self.settings_cache.as_mut() {
-                    cached.fingerprint = response.fingerprint.clone();
-                    cached.problems = response.problems.clone();
-                    // `ok=false` 时文件没变：缓存里的值照旧，只换问题。
-                    if response.ok
-                        && let Some(pending) = &pending
-                    {
-                        cached.values = pending.document.clone();
+                if response.ok {
+                    self.settings_cache = None;
+                    if self.settings_panel.is_some() {
+                        self.push_intent(AppIntent::FetchSettings);
                     }
                 }
             }
-            GatewaySaveReport::Failed { conflict: true, .. } => self.mark_settings_stale(),
+            GatewaySaveReport::Failed { conflict: true, .. } => {
+                self.settings_cache = None;
+                self.mark_settings_stale();
+            }
+            GatewaySaveReport::Unconfirmed { .. } => self.settings_cache = None,
             GatewaySaveReport::Failed { .. } | GatewaySaveReport::Skipped => {}
         }
-
-        self.show_settings_save_notice(&interface, &gateway);
+        self.show_settings_save_notice(&interface, &gateway, was_setup);
     }
 
     /// 409（指纹冲突）：面板顶部横幅「按 R 重新载入」，**不覆盖**本地改动。
@@ -430,8 +465,9 @@ impl App {
         &mut self,
         interface: &InterfaceSaveReport,
         gateway: &GatewaySaveReport,
+        was_setup: bool,
     ) {
-        let text = save_notice_text(interface, gateway);
+        let text = save_notice_text(interface, gateway, was_setup);
         let ok = save_notice_ok(interface, gateway);
         if ok {
             self.chat.push(ChatCell::SystemMessage(text));
@@ -451,16 +487,53 @@ impl App {
     // settings_changed 的消费
     // -----------------------------------------------------------------------
 
-    /// `settings_changed` 事件：面板开着 → 指纹比对（相同 = 自己刚保存的那一次，
-    /// 不警告；不同 = 别人改了，横幅）；关着 → 丢掉缓存。
-    ///
-    /// 丢缓存而不是只改指纹：缓存里的 `values` 与 `fingerprint` 必须同源，
-    /// 只更新指纹会造出"旧文档 + 新指纹"的 base —— 下次保存会把别人的改动覆盖掉。
     pub(super) fn note_settings_changed(&mut self, fingerprint: &str) {
         if let Some(panel) = self.settings_panel.as_mut() {
             panel.on_settings_changed(fingerprint);
+        }
+        self.refresh_settings_snapshot();
+    }
+
+    /// The gateway's running settings can change while the disk fingerprint stays the same.
+    pub(super) fn refresh_settings_snapshot(&mut self) {
+        self.settings_cache = None;
+        self.settings_fetch_id = self.settings_fetch_id.wrapping_add(1);
+        if self.settings_save.is_none() && (self.settings_panel.is_some() || self.settings_pending)
+        {
+            self.push_intent(AppIntent::FetchSettings);
+        }
+    }
+
+    pub(super) fn note_system_reload(&mut self, response: &ReloadResponse) {
+        self.refresh_settings_snapshot();
+        let summary = if response.ok {
+            "已重新读取网关配置"
         } else {
-            self.settings_cache = None;
+            "网关配置未全部应用"
+        };
+        let mut lines = vec![summary.to_string()];
+        for item in response.results.iter().filter(|item| !item.ok) {
+            let name = crate::cmd::common::single_line(&item.name);
+            let detail = response
+                .display_detail(item)
+                .map(crate::cmd::common::single_line);
+            lines.push(match detail {
+                Some(detail) => format!("{name} 加载失败 · {detail}"),
+                None => format!("{name} 加载失败"),
+            });
+        }
+        if let Some(paths) = &response.pending_restart_paths
+            && !paths.is_empty()
+        {
+            lines.push(format!("{} 待重启 · 打开 /settings", paths.join("、")));
+        }
+        let message = lines.join("\n");
+        let duration = Duration::from_secs(5);
+        if response.ok && lines.len() == 1 {
+            self.show_toast(Toast::info(message, duration));
+        } else {
+            self.chat.push(ChatCell::SystemMessage(message.clone()));
+            self.show_toast(Toast::warning(message, duration));
         }
     }
 }
@@ -473,50 +546,94 @@ impl App {
 pub(super) fn save_notice_text(
     interface: &InterfaceSaveReport,
     gateway: &GatewaySaveReport,
+    was_setup: bool,
 ) -> String {
-    let attempted = usize::from(interface.attempted()) + usize::from(gateway.attempted());
-    let failed = usize::from(interface.attempted() && !interface.ok())
-        + usize::from(gateway.attempted() && !gateway.ok());
-    let mut lines: Vec<String> = vec![notice_header(attempted, failed).to_string()];
+    let mut lines = vec![save_header(interface, gateway).to_string()];
+    lines.extend(interface_line(interface));
+    lines.extend(gateway_line(gateway));
 
-    if let Some(line) = interface_line(interface) {
-        lines.push(line);
-    }
-    if let Some(line) = gateway_line(gateway) {
-        lines.push(line);
-    }
-    // 需重启的提示：文案是 `Ctrl+R`（不是 `r`），只在 Gateway 真的保存成功时出现。
     if let GatewaySaveReport::Saved(response) = gateway
         && response.ok
-        && !response.restart_required.is_empty()
     {
-        lines.push(format!(
-            "  ⚠ {} 需重启网关才生效 — Ctrl+R 立即重启",
-            response.restart_required.join("、")
-        ));
-    }
-    // 后端的非致命说明：当前文件不可解析时，密文无从回填 —— 必须**逐条**
-    // 让用户看见（"其中旧密钥没有保留，请重新填写"）。它不影响成败等级。
-    if let GatewaySaveReport::Saved(response) = gateway {
-        for warning in &response.warnings {
-            lines.push(format!("  ⚠ {warning}"));
+        if let Some(reload) = &response.reload {
+            if !reload.ok {
+                for item in reload.results.iter().filter(|item| !item.ok) {
+                    let detail = reload
+                        .display_detail(item)
+                        .map(crate::cmd::common::single_line);
+                    lines.push(match detail {
+                        Some(detail) => format!("  ✗ {}：{detail}", item.name),
+                        None => format!("  ✗ {}", item.name),
+                    });
+                }
+                let retry = if was_setup && !response.setup_mode_exited {
+                    "检查初始化失败项后按 s 重试"
+                } else {
+                    "检查失败项后运行 wing reload 重试"
+                };
+                lines.push(format!("  {retry}"));
+            }
+            if reload.new_session_defaults_changed {
+                lines.push("  新会话默认设置已更新".into());
+            }
+            if let Some(paths) = reload
+                .pending_restart_paths
+                .as_ref()
+                .filter(|paths| !paths.is_empty())
+            {
+                lines.push(format!("  ⚠ {} 待重启 · Ctrl+R 重启网关", paths.join("、")));
+            }
         }
+        if response
+            .reload
+            .as_ref()
+            .and_then(|reload| reload.pending_restart_paths.as_ref())
+            .is_none()
+            && !response.restart_required.is_empty()
+        {
+            lines.push(format!(
+                "  启动时读取的设置已更改 · {}",
+                response.restart_required.join("、")
+            ));
+        }
+        lines.extend(
+            response
+                .warnings
+                .iter()
+                .map(|warning| format!("  ⚠ {warning}")),
+        );
     }
     lines.join("\n")
 }
 
-/// 回执的成败口径（决定 notice 的 rail 等级与 toast）。
 pub(super) fn save_notice_ok(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> bool {
-    interface.ok_or_skipped() && gateway.ok_or_skipped()
+    interface.ok_or_skipped() && gateway.ok_or_skipped() && !apply_failed(gateway)
 }
 
-fn notice_header(attempted: usize, failed: usize) -> &'static str {
-    if failed == 0 {
-        "设置已保存"
-    } else if failed == attempted {
-        "设置未保存"
+fn apply_failed(gateway: &GatewaySaveReport) -> bool {
+    matches!(gateway, GatewaySaveReport::Saved(response)
+        if response.ok && response.reload.as_ref().is_some_and(|reload| !reload.ok))
+}
+
+fn save_header(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> &'static str {
+    if matches!(gateway, GatewaySaveReport::Unconfirmed { .. }) {
+        return if interface.ok() {
+            "Interface 已保存，Gateway 保存未确认"
+        } else {
+            "Gateway 保存未确认"
+        };
+    }
+    if !interface.ok_or_skipped() || !gateway.ok_or_skipped() {
+        return if interface.ok() || gateway.ok() {
+            "设置部分保存"
+        } else {
+            "设置未保存"
+        };
+    }
+    if apply_failed(gateway) {
+        "已保存，部分设置未生效"
     } else {
-        "设置部分保存"
+        "设置已保存"
     }
 }
 
@@ -526,9 +643,10 @@ fn interface_line(report: &InterfaceSaveReport) -> Option<String> {
         InterfaceSaveReport::Ok { path, changed } => {
             Some(format!("  ✓ {:<12}{path}（{changed} 项）", "Interface"))
         }
-        InterfaceSaveReport::Err { message } => {
-            Some(format!("  ✗ {:<12}写入失败：{message}", "Interface"))
-        }
+        InterfaceSaveReport::Err { message } => Some(format!(
+            "  ✗ {:<12}写入失败：{message}。修复后按 s 重试",
+            "Interface"
+        )),
     }
 }
 
@@ -536,9 +654,14 @@ fn gateway_line(report: &GatewaySaveReport) -> Option<String> {
     match report {
         GatewaySaveReport::Skipped => None,
         GatewaySaveReport::Saved(response) if response.ok => Some(format!(
-            "  ✓ {:<12}{}",
+            "  ✓ {:<12}{} 项变更{}",
             "Gateway",
-            gateway_success_summary(response)
+            response.changed.len(),
+            if apply_failed(report) {
+                "已写入，部分设置未生效"
+            } else {
+                "已写入"
+            }
         )),
         GatewaySaveReport::Saved(response) => Some(format!(
             "  ✗ {:<12}{} 个问题，未保存（已切到问题清单）",
@@ -546,69 +669,56 @@ fn gateway_line(report: &GatewaySaveReport) -> Option<String> {
             response.problems.len()
         )),
         GatewaySaveReport::Failed { conflict: true, .. } => Some(format!(
-            "  ✗ {:<12}配置已被其它客户端修改，按 R 重新载入",
+            "  ✗ {:<12}设置文件已更改，按 R 重新读取文件",
             "Gateway"
         )),
-        GatewaySaveReport::Failed { message, .. } => {
-            Some(format!("  ✗ {:<12}保存失败：{message}", "Gateway"))
-        }
+        GatewaySaveReport::Failed { message, .. } => Some(format!(
+            "  ✗ {:<12}保存失败：{message}。修复后按 s 重试",
+            "Gateway"
+        )),
+        GatewaySaveReport::Unconfirmed { message } => Some(format!(
+            "  ⚠ Gateway 未收到保存确认：{message}。核对磁盘文件后重试"
+        )),
     }
 }
 
-/// `N 项变更 · <热重载逐项>`（回执的第二列）。
-fn gateway_success_summary(response: &SettingsSetResponse) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !response.changed.is_empty() {
-        parts.push(format!("{} 项变更", response.changed.len()));
-    }
-    if let Some(reload) = &response.reload {
-        let mut reloaded: Vec<String> = Vec::new();
-        let mut failed = 0usize;
-        for item in &reload.results {
-            if item.ok {
-                reloaded.push(match item.detail.as_deref() {
-                    Some(detail) if !detail.is_empty() => format!("{} {detail}", item.name),
-                    _ => item.name.clone(),
-                });
+fn save_notice_toast(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> String {
+    let header = save_header(interface, gateway);
+    let detail = match gateway {
+        GatewaySaveReport::Saved(response) if !response.ok => {
+            Some(format!("Gateway 有 {} 个问题", response.problems.len()))
+        }
+        GatewaySaveReport::Saved(response) => {
+            let reload = response.reload.as_ref();
+            if let Some(reload) = reload.filter(|reload| !reload.ok) {
+                let mut failed = reload.results.iter().filter(|item| !item.ok);
+                Some(match failed.next() {
+                    Some(first) if failed.next().is_some() => format!("{} 等加载失败", first.name),
+                    Some(first) => format!("{} 加载失败", first.name),
+                    None => "网关应用失败".into(),
+                })
+            } else if !interface.ok_or_skipped() {
+                Some("Interface 写入失败，按 s 重试".into())
+            } else if !response.warnings.is_empty() {
+                Some(format!("{} 条说明（见回执）", response.warnings.len()))
+            } else if reload
+                .and_then(|r| r.pending_restart_paths.as_ref())
+                .is_some_and(|p| !p.is_empty())
+            {
+                Some("部分设置待重启 · Ctrl+R".into())
             } else {
-                failed += 1;
+                None
             }
         }
-        if !reloaded.is_empty() {
-            parts.push(reloaded.join(" · "));
+        GatewaySaveReport::Failed { conflict: true, .. } => Some("按 R 重新读取文件".into()),
+        GatewaySaveReport::Failed { .. } => Some("Gateway 写入失败，按 s 重试".into()),
+        GatewaySaveReport::Unconfirmed { .. } => Some("请核对磁盘文件".into()),
+        GatewaySaveReport::Skipped if !interface.ok_or_skipped() => {
+            Some("Interface 写入失败，按 s 重试".into())
         }
-        if failed > 0 {
-            parts.push(format!("{failed} 项重载失败"));
-        }
-    }
-    if parts.is_empty() {
-        "已应用".to_string()
-    } else {
-        parts.join(" · ")
-    }
-}
-
-/// 摘要 toast：面板还没关，回执在它底下看不见 —— "保存到底成没成"要立刻可见。
-fn save_notice_toast(interface: &InterfaceSaveReport, gateway: &GatewaySaveReport) -> String {
-    if save_notice_ok(interface, gateway) {
-        // 有后端 warnings 时不能只说"已保存"：那些话（"旧密钥没有保留"）
-        // 是用户必须知道的，而回执此刻正压在面板下面。
-        if let GatewaySaveReport::Saved(response) = gateway
-            && !response.warnings.is_empty()
-        {
-            return format!("设置已保存 · {} 条说明（见回执）", response.warnings.len());
-        }
-        return "设置已保存".to_string();
-    }
-    match gateway {
-        GatewaySaveReport::Saved(response) if !response.ok => {
-            format!("设置未保存：{} 个问题", response.problems.len())
-        }
-        GatewaySaveReport::Failed { conflict: true, .. } => {
-            "配置已被其它客户端修改，按 R 重新载入".to_string()
-        }
-        _ => "设置未保存（见回执）".to_string(),
-    }
+        GatewaySaveReport::Skipped => None,
+    };
+    detail.map_or_else(|| header.to_owned(), |detail| format!("{header}\n{detail}"))
 }
 
 /// 两份稀疏文档之间**叶子**路径的差异（新增 / 删除 / 改值都算一条）。
@@ -670,8 +780,7 @@ const RESTART_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// 不重写任何重连逻辑。两条容易踩的线：
 ///
 /// 1. **端口可能刚被改过**（用户改 `gateway.port` 保存 + `Ctrl+R` 的意义就是这个）：
-///    第 3 步重读 `~/.wing/core/config.yaml`（host/port 的事实来源）与 TUI 配置
-///    （`api_key` 的生效域是 restart），把新的端点写回 `*endpoint`；
+///    使用网关验证的监听地址和本地 Interface 凭据重建端点；
 /// 2. **重连退避不与显式重启打架**：重启期间 event loop 停在这里，`select!` 的
 ///    WS 断开分支不会同时运行；成功 → 传输已换成新的（退避没被触发）；失败 →
 ///    `*transport = None`，交给既有退避路径（它的目标是 `*endpoint`，也就是新端点）。
@@ -680,20 +789,77 @@ pub(super) async fn restart_gateway(
     transport: &mut Option<Transport>,
     endpoint: &mut GatewayEndpoint,
 ) {
-    // 1. 请求关闭（失败只 warn：网关可能已经自己死了，它还是在往下走）。
-    match transport.as_ref() {
-        Some(transport) => {
-            if let Err(e) = transport.http.shutdown().await {
-                tracing::warn!("gateway shutdown request failed: {e}");
-            }
-        }
-        None => {
+    let Some(current) = transport.as_ref() else {
+        app.show_toast(Toast::warning(
+            "网关未连接，无法重启",
+            Duration::from_secs(3),
+        ));
+        return;
+    };
+    let (listener, fingerprint) = match current.http.settings_status().await {
+        Ok(status) if !status.valid => {
             app.show_toast(Toast::warning(
-                "网关未连接，无法重启",
-                Duration::from_secs(3),
+                "配置文件有问题。修复后再重启网关",
+                Duration::from_secs(5),
+            ));
+            app.push_intent(AppIntent::FetchSettings);
+            return;
+        }
+        Ok(status) => match (status.restart_listener, status.fingerprint) {
+            (Some(listener), Some(fingerprint)) if listener.port != 0 => (listener, fingerprint),
+            _ => {
+                app.show_toast(Toast::warning(
+                    "网关未提供可验证的重启地址",
+                    Duration::from_secs(5),
+                ));
+                return;
+            }
+        },
+        Err(_) => {
+            app.show_toast(Toast::warning(
+                "无法确认磁盘配置。请重新读取文件后重试",
+                Duration::from_secs(5),
             ));
             return;
         }
+    };
+    let next_endpoint = GatewayEndpoint {
+        ws_url: format!("ws://{}:{}/ws", listener.host, listener.port),
+        http_base: format!("http://{}:{}", listener.host, listener.port),
+        api_key: AppConfig::load().api_key.filter(|key| !key.is_empty()),
+    };
+    let current_port = url::Url::parse(&endpoint.http_base)
+        .ok()
+        .and_then(|url| url.port_or_known_default());
+    if current_port != Some(listener.port)
+        && !matches!(
+            tokio::time::timeout(
+                RESTART_PROBE_TIMEOUT,
+                tokio::net::TcpListener::bind((listener.host.as_str(), listener.port)),
+            )
+            .await,
+            Ok(Ok(_))
+        )
+    {
+        app.show_toast(Toast::warning(
+            "无法绑定重启目标地址",
+            Duration::from_secs(5),
+        ));
+        return;
+    }
+    if let Err(error) = current
+        .http
+        .shutdown_if_config_unchanged(&fingerprint)
+        .await
+    {
+        let message = if error.is_conflict() {
+            app.push_intent(AppIntent::FetchSettings);
+            "设置文件已更改。检查设置后再重启"
+        } else {
+            "网关拒绝关闭。请检查连接与鉴权"
+        };
+        app.show_toast(Toast::warning(message, Duration::from_secs(5)));
+        return;
     }
 
     // 2. 等它真的不可达（有界）。
@@ -707,17 +873,9 @@ pub(super) async fn restart_gateway(
 
     app.set_connected(false);
 
-    // 3. 重读两份配置 → 新端点（端口 / host / api_key 都可能刚被改过）。
-    let backend = crate::cmd::backend_config::read_backend_gateway_config();
-    let api_key = AppConfig::load().api_key.filter(|key| !key.is_empty());
-    *endpoint = GatewayEndpoint {
-        ws_url: format!("ws://{}:{}/ws", backend.host, backend.port),
-        http_base: format!("http://{}:{}", backend.host, backend.port),
-        api_key,
-    };
+    *endpoint = next_endpoint;
 
-    // 4. 重新拉起（复用 `wing start` 的守护进程启动）。
-    if let Err(e) = crate::cmd::start::start_gateway(&backend.host, backend.port).await {
+    if let Err(e) = crate::cmd::start::start_gateway(&listener.host, listener.port).await {
         tracing::warn!("gateway restart failed: {e:#}");
         app.show_toast(Toast::warning(
             format!("网关重启失败：{e}"),
@@ -752,7 +910,7 @@ pub(super) async fn restart_gateway(
                     // 与既有 recovery 路径同一组刷新（会话快照 + 命令表）。
                     app.push_intent(AppIntent::FetchInfo);
                     app.push_intent(AppIntent::FetchCommands);
-                    // 面板的 restart_required 该熄了：不脏时 apply_snapshot 会清掉它。
+                    // GET 读取新进程的待重启状态。
                     app.push_intent(AppIntent::FetchSettings);
                     app.needs_full_redraw = true;
                 }

@@ -26,7 +26,7 @@ import uvicorn
 from wing.background import BackgroundScheduler
 from wing.build_info import get_commit
 from wing.common.logger import log, setup_logger
-from wing.commands import register_prompt_commands
+from wing.commands import magic_registry, register_prompt_commands
 from wing.config import (
     AuthConfig,
     Config,
@@ -36,11 +36,18 @@ from wing.config import (
     load_config,
 )
 from wing.config.boot import BootFailure, BootResult, boot_config
+from wing.config.loader import load_config_text
 from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.request_context import get_request_context
 from wing.runtime import WingRuntime, WriteEffectResult
-from wing.system import ReloadResult, ReloadResultItem, record_step
+from wing.system import (
+    ReloadResult,
+    ReloadResultItem,
+    failure_detail,
+    file_load_failure,
+    record_step,
+)
 
 from .app import create_app
 from .frames import HARD_LIMIT_BYTES, Frame, build_frames
@@ -116,9 +123,9 @@ class _SetupRuntime(WingRuntime):
         # 不调 super().__init__()：它读 config、建 SessionManager / reaper，setup mode 做不到。
         self._server = server
 
-    async def post_write_effect(self) -> WriteEffectResult:
+    async def post_write_effect(self, saved_text: str) -> WriteEffectResult:
         """⑦：转入正常模式（而不是热重载）——``setup_mode_exited`` 因此为真。"""
-        reload_result = self._server._enter_operational()
+        reload_result = self._server._enter_operational(saved_text=saved_text)
         return WriteEffectResult(
             reload=reload_result,
             setup_mode_exited=not self._server.in_setup_mode,
@@ -166,6 +173,16 @@ class GatewayServer:
         self.host = host
         self.port = port
         self._boot = boot if boot is not None else boot_config()
+        boot_gateway = (
+            self._boot.config.gateway if self._boot.config is not None else None
+        )
+        self._configured_listener = (
+            (boot_gateway.host, boot_gateway.port)
+            if boot_gateway is not None
+            else self._boot.endpoint or (DEFAULT_HOST, DEFAULT_PORT)
+        )
+        self.settings_lock = asyncio.Lock()
+        self._running_schedules: dict[str, float] = {}
         # setup mode 的替身：``runtime`` 因此恒非 Optional——配置不可用不是
         # 「有时没有 runtime」，而是「除修复路径外一律 503」（守门 + 替身共同保证）。
         self._runtime: WingRuntime = _SetupRuntime(self)
@@ -183,11 +200,12 @@ class GatewayServer:
         self._started_at = datetime.now(timezone.utc)
         if self._boot.ok:
             result = self._enter_operational(config=self._boot.config)
-            if not result.ok:
+            if self._in_setup_mode:
                 # 启动路径**必须消费**这个结果——否则「文件合法但运行时装不上」
                 # 会静默降级：boot_reason=None、problems 为空、503 说「共 0 条问题」，
                 # 而 status.valid=true（预检把用户送进正常启动链再吃一串 503）。
                 self._record_startup_failure(result)
+        self._running_cors_origins = frozenset(self.cors_origins)
         self._app = create_app(self)
 
     # ============================================================
@@ -232,11 +250,13 @@ class GatewayServer:
         """``boot_config()`` 的结局分类（``ok=True`` 时为 ``None``）。"""
         return self._boot.reason
 
-    def _enter_operational(self, config: Config | None = None) -> ReloadResult:
+    def _enter_operational(
+        self, config: Config | None = None, *, saved_text: str | None = None
+    ) -> ReloadResult:
         """把网关推进正常模式（六步，**幂等**）：① 配置 ② 日志级别 ③ prompt commands
         ④ 建 runtime ⑤ 逐出 job + 后台任务 ⑥ auth 锁死警告。
 
-        任一步失败 ⇒ **停在 setup mode**（``_runtime`` 与 ``_in_setup_mode`` 都不翻转），
+        核心装配失败时停在 setup mode。命令与 hook 文件允许部分加载，
         返回 ``ReloadResult(ok=False, items=[…])`` 如实报明细；文件**不回滚**——它是
         合法配置（保存事务已校验过），下次保存或重启再试。
 
@@ -252,10 +272,18 @@ class GatewayServer:
         # ① 配置（boot 成功时由调用方给，避免重复读盘）。
         try:
             if config is None:
-                config = load_config(reload=True)
+                config = (
+                    load_config(reload=True)
+                    if saved_text is None
+                    else load_config_text(saved_text)
+                )
         except Exception as e:
-            items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
-            log.error(f"setup mode: cannot enter operational mode — {e}")
+            items.append(
+                ReloadResultItem(name="config.yaml", ok=False, detail=failure_detail(e))
+            )
+            log.error(
+                f"setup mode: cannot enter operational mode — {failure_detail(e)}"
+            )
             return ReloadResult(ok=False, items=items)
         items.append(ReloadResultItem(name="config.yaml", ok=True))
 
@@ -269,20 +297,42 @@ class GatewayServer:
             return ReloadResult(ok=False, items=items)
 
         # ③ prompt 命令（配置里的 commands.paths）。
-        def _apply_prompt_commands() -> None:
-            register_prompt_commands(config.commands.paths)
-
-        if not record_step(items, "prompt commands", _apply_prompt_commands):
+        try:
+            magic_registry.remove_by_source("prompt")
+            command_failures = register_prompt_commands(config.commands.paths)
+        except Exception as exc:
+            items.append(
+                ReloadResultItem(
+                    name="prompt commands", ok=False, detail=failure_detail(exc)
+                )
+            )
             return ReloadResult(ok=False, items=items)
+        items.append(
+            ReloadResultItem(
+                name="prompt commands",
+                ok=not command_failures,
+                detail=file_load_failure(command_failures, "prompt command"),
+            )
+        )
 
         # ④ runtime（hooks 随之加载；providers 池按需懒建）。
         try:
             runtime = WingRuntime()
         except Exception as e:
-            items.append(ReloadResultItem(name="runtime", ok=False, detail=str(e)))
-            log.error(f"setup mode: cannot enter operational mode — {e}")
+            items.append(
+                ReloadResultItem(name="runtime", ok=False, detail=failure_detail(e))
+            )
+            log.error(
+                f"setup mode: cannot enter operational mode — {failure_detail(e)}"
+            )
             return ReloadResult(ok=False, items=items)
-        items.append(ReloadResultItem(name="runtime", ok=True))
+        items.append(
+            ReloadResultItem(
+                name="runtime",
+                ok=not runtime.failed_hook_files,
+                detail=file_load_failure(runtime.failed_hook_files, "hook"),
+            )
+        )
 
         # ⑤ 逐出 job + 归档 job + 后台任务（lifespan 的 startup 已跑过时补启；幂等）。
         # 这里必须直调 runtime.wake.start()，不能写 self._start_wake()：后者在
@@ -303,13 +353,48 @@ class GatewayServer:
         detail = self._warn_auth_lockout(config.gateway.auth)
         items.append(ReloadResultItem(name="auth", ok=True, detail=detail))
 
-        # 全部成功：同一个同步块里原子翻转（请求处理之间看不到中间态）。
+        # 扩展文件允许部分加载。核心装配完成后切换到正常模式。
+        self._running_schedules = self._schedule_settings(config)
         self._runtime = runtime
         self._in_setup_mode = False
         log.info(
             "setup mode exited: gateway is operational (config reloaded from disk)"
         )
-        return ReloadResult(ok=True, items=items)
+        return ReloadResult(ok=all(item.ok for item in items), items=items)
+
+    @staticmethod
+    def _schedule_settings(config: Config) -> dict[str, float]:
+        return {
+            "sessions.eviction.sweep_interval_seconds": config.sessions.eviction.sweep_interval_seconds,
+            "sessions.archive.sweep_interval_seconds": config.sessions.archive.sweep_interval_seconds,
+            "sessions.archive.startup_delay_seconds": config.sessions.archive.startup_delay_seconds,
+        }
+
+    def restart_listener(self, config: GatewayConfig) -> tuple[str, int]:
+        """Keep live launch overrides on axes whose configured values did not change."""
+        file_host, file_port = self._configured_listener
+        return (
+            self.host if config.host == file_host else config.host,
+            self.port if config.port == file_port else config.port,
+        )
+
+    def pending_restart_paths(self) -> list[str] | None:
+        if self.in_setup_mode:
+            return None
+        config = load_config()
+        paths = [
+            path
+            for path, value in self._schedule_settings(config).items()
+            if value != self._running_schedules[path]
+        ]
+        host, port = self.restart_listener(config.gateway)
+        if host != self.host:
+            paths.append("gateway.host")
+        if port != self.port:
+            paths.append("gateway.port")
+        if frozenset(config.gateway.cors.origins) != self._running_cors_origins:
+            paths.append("gateway.cors.origins")
+        return sorted(paths)
 
     def _record_startup_failure(self, result: ReloadResult) -> None:
         """启动路径转入正常模式失败：**不静默降级**。

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from wing.commands import (
     expand_prompt_command,
     load_prompt_command_from_file,
@@ -445,3 +447,34 @@ class TestRegistryListing:
         registry = MagicCommandRegistry()
 
         assert registry.remove_by_source("prompt") == 0
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected"),
+    [
+        (
+            b"---\nname: [private_fixture_value\n---\nBody\n",
+            "invalid YAML front matter at line",
+        ),
+        (
+            b"---\nname: fixture\n---\n\xffprivate_fixture_value",
+            "invalid UTF-8 at byte offset",
+        ),
+        (None, "No such file or directory"),
+    ],
+)
+def test_prompt_file_diagnostics_show_safe_parser_details(
+    tmp_path, monkeypatch, contents, expected
+):
+    from wing.common.logger import log
+
+    path = tmp_path / "broken_command.md"
+    if contents is not None:
+        path.write_bytes(contents)
+    messages: list[str] = []
+    monkeypatch.setattr(log, "error", messages.append)
+
+    assert load_prompt_command_from_file(path) is None
+    (message,) = messages
+    assert str(path) in message and expected in message
+    assert "private_fixture_value" not in message

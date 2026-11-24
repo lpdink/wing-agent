@@ -27,16 +27,27 @@ def _items(result) -> list[tuple[str, bool]]:
 
 
 async def test_config_failure_aborts_immediately(manager, monkeypatch):
-    def _boom(*args: Any, **kwargs: Any):
-        raise RuntimeError("config unreadable")
+    from wing.common.logger import log
 
+    def _boom(*args: Any, **kwargs: Any):
+        raise RuntimeError("private_fixture_value")
+
+    messages: list[str] = []
+    monkeypatch.setattr(log, "warning", messages.append)
     monkeypatch.setattr("wing.config.load_config", _boom)
 
     result = await reload_system(manager)
 
     assert result.ok is False
     assert _items(result) == [("config.yaml", False)]
-    assert "config unreadable" in (result.items[0].detail or "")
+    assert result.items[0].detail == "RuntimeError"
+    (message,) = messages
+    assert "config.yaml: RuntimeError" in message
+    assert (
+        f"'test_reload_system_failures.py':{_boom.__code__.co_firstlineno + 1}"
+        in message
+    )
+    assert "private_fixture_value" not in message
 
 
 async def test_hooks_failure_is_isolated(manager, monkeypatch):

@@ -111,7 +111,7 @@ fn splice_extracts_osc_5522_and_leaves_every_other_event_untouched() {
     let deadline = Instant::now() + Duration::from_millis(1000);
     while got.len() < 3 && Instant::now() < deadline {
         while let Ok(seq) = sequences.try_recv() {
-            got.push(String::from_utf8_lossy(&seq).into_owned());
+            got.push(String::from_utf8_lossy(seq.as_ref()).into_owned());
         }
         std::thread::sleep(Duration::from_millis(10));
     }

@@ -49,6 +49,16 @@ class ReloadResponse(BaseModel):
         default_factory=list, description="每项重载的结果"
     )
 
+    diagnostics_redacted: bool = Field(
+        default=False, description="detail 经过脱敏，可供界面显示"
+    )
+    pending_restart_paths: list[str] | None = Field(
+        default=None, description="已加载但待重启的配置路径，null 表示状态未知"
+    )
+    new_session_defaults_changed: bool = Field(
+        default=False, description="此次重载改变了新会话默认值"
+    )
+
 
 class ToolInfo(BaseModel):
     """单个工具的元信息。"""

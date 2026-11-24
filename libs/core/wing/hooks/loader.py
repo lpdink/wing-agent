@@ -1,17 +1,47 @@
 # wing/hooks/loader.py
-"""hook 文件加载器（11 归位：自 ``wing/config/loader.py`` 抽出）。
+"""Load Python hook files whose decorators register handlers at import time."""
 
-每个匹配的 ``.py`` 文件被 import；hook 注册在 import 期由 ``hooks.on()``
-装饰器完成——加载器只执行文件，不注册任何 handler。
-
-函数体逐字搬迁（含函数内的 glob / importlib / log 懒加载）；新模块补一个
-模块级 ``Path`` import（原函数依赖 ``config/loader.py`` 的模块级 ``Path``）。
-"""
-
+from dis import get_instructions
 from pathlib import Path
 
 
-def load_hooks(hooks_patterns: list[str]) -> None:
+def _hook_failure(path: Path, exc: Exception) -> str:
+    source = str(path.absolute())
+    if isinstance(exc, SyntaxError) and exc.filename == source and exc.lineno:
+        return f"{str(path)!r}:{exc.lineno}: invalid Python syntax"
+
+    line = None
+    module = None
+    trace = exc.__traceback__
+    while trace is not None:
+        code = trace.tb_frame.f_code
+        if code.co_filename == source:
+            line = trace.tb_lineno
+            if isinstance(exc, ModuleNotFoundError):
+                instruction = next(
+                    (
+                        item
+                        for item in get_instructions(code)
+                        if item.offset == trace.tb_lasti
+                    ),
+                    None,
+                )
+                # The import operand is a source literal. exc.name can come from config.
+                if instruction is not None and instruction.opname == "IMPORT_NAME":
+                    module = instruction.argval
+        trace = trace.tb_next
+
+    location = f"{str(path)!r}:{line}" if line is not None else repr(str(path))
+    if isinstance(exc, ModuleNotFoundError):
+        return (
+            f"{location}: missing Python module for import {module!r}"
+            if module
+            else f"{location}: missing Python module"
+        )
+    return f"{location}: {type(exc).__name__}"
+
+
+def load_hooks(hooks_patterns: list[str]) -> int:
     """Load hook files from glob patterns.
 
     Each matched .py file is imported; hook registration happens
@@ -23,6 +53,7 @@ def load_hooks(hooks_patterns: list[str]) -> None:
 
     from wing.common.logger import log
 
+    failed = 0
     for pattern in hooks_patterns:
         expanded = Path(pattern).expanduser()
         matched_files = sorted(glob.glob(str(expanded)))
@@ -42,10 +73,13 @@ def load_hooks(hooks_patterns: list[str]) -> None:
                     module_name, str(file_path)
                 )
                 if spec is None or spec.loader is None:
+                    failed += 1
                     log.warning(f"Cannot create import spec for hook file: {file_path}")
                     continue
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 log.info(f"Loaded hook file: {file_path}")
             except Exception as e:
-                log.warning(f"Failed to load hook file {file_path}: {e}")
+                failed += 1
+                log.warning(f"Failed to load hook file {_hook_failure(file_path, e)}")
+    return failed

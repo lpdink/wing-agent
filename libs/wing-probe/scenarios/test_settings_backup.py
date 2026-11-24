@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from wing_probe import Probe
+from wing_probe import DriverHttpError, Probe
 
 #: 透传键（单键 map——最小复现形态）。
 MARKER_KEY = "probe_backup_marker"
@@ -79,3 +79,24 @@ async def test_backup_holds_the_previous_file_verbatim(probe: Probe) -> None:
     assert latest["providers"][0]["extra_body"] == {MARKER_KEY: MARKER_VALUE}, latest[
         "providers"
     ][0]
+
+
+@pytest.mark.asyncio
+async def test_backup_write_failure_reports_config_was_not_replaced(
+    probe: Probe,
+) -> None:
+    http = probe.driver_required.http
+    path = probe.env.config_path
+    before = path.read_bytes()
+    path.with_name("config.yaml.bak").mkdir()
+    current = await http.request("GET", "/api/settings/get")
+    current["values"]["log"] = {"level": "INFO"}
+    with pytest.raises(DriverHttpError) as failure:
+        await http.request(
+            "POST",
+            "/api/settings/set",
+            body={"base": current["fingerprint"], "document": current["values"]},
+        )
+    assert failure.value.status == 500
+    assert failure.value.call.response["error"] == "settings_write_failed"
+    assert path.read_bytes() == before

@@ -242,6 +242,50 @@ impl FakeGateway {
     }
 }
 
+#[tokio::test]
+async fn gateway_restart_checks_disk_before_posting_shutdown() {
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let target_port = target.local_addr().unwrap().port();
+    let mut occupied = Some(target);
+    let valid: &'static str = Box::leak(format!(
+        r#"{{"valid":true,"setup_mode":false,"fingerprint":"fixture-fp","restart_listener":{{"host":"127.0.0.1","port":{target_port}}}}}"#
+    ).into_boxed_str());
+    for (status, shutdown_expected) in [
+        (r#"{"valid":false,"setup_mode":false}"#, false),
+        (valid, false),
+        (valid, true),
+    ] {
+        if shutdown_expected {
+            drop(occupied.take());
+        }
+        let server = FakeGateway::start_with_replies(HashMap::from([
+            ("/api/settings/status", (200, status)),
+            (
+                "/api/shutdown?settings_fingerprint=fixture-fp",
+                (401, r#"{"error":"unauthorized"}"#),
+            ),
+        ]))
+        .await;
+        let mut endpoint = server.endpoint();
+        let mut transport = Some(
+            crate::app::transport::connect_transport(&endpoint)
+                .await
+                .unwrap(),
+        );
+        let mut app = super::support::test_app();
+        crate::app::settings::restart_gateway(&mut app, &mut transport, &mut endpoint).await;
+        let requests = server.session_requests.lock().unwrap();
+        assert_eq!(requests[0].0, "/api/settings/status");
+        assert_eq!(
+            requests
+                .iter()
+                .any(|request| request.0 == "/api/shutdown?settings_fingerprint=fixture-fp"),
+            shutdown_expected
+        );
+        assert!(transport.is_some());
+    }
+}
+
 fn upload_reply(route: &UploadRoute, seen: usize, size: usize) -> (u16, String) {
     let id = match route {
         UploadRoute::FailAfter {

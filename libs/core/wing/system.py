@@ -16,11 +16,20 @@ handler，把声明的 ``log.level: hot`` 兑现到运行期。
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+import yaml
+from pydantic import ValidationError
+
+from wing.common.logger import log
+from wing.config.document import invalid_yaml_message
+
 if TYPE_CHECKING:
+    from wing.config import Config
     from wing.session import SessionManager
 
 # ============================================================
@@ -43,30 +52,49 @@ class ReloadResult:
 
     ok: bool
     items: list[ReloadResultItem] = field(default_factory=list)
+    new_session_defaults_changed: bool = False
+
+
+def failure_detail(exc: Exception) -> str:
+    """Public diagnostics must not contain exception text from config or plug-ins."""
+    if isinstance(exc, (yaml.YAMLError, UnicodeDecodeError)):
+        return invalid_yaml_message(exc)
+    error = exc.__cause__ if isinstance(exc.__cause__, ValidationError) else exc
+    if isinstance(error, ValidationError):
+        paths = [
+            ".".join(map(str, item["loc"])) or "config.yaml"
+            for item in error.errors(include_input=False, include_context=False)
+        ]
+        return f"Invalid configuration at {', '.join(dict.fromkeys(paths))}"
+    if isinstance(exc, OSError) and exc.errno is not None:
+        return os.strerror(exc.errno)
+    return type(exc).__name__
+
+
+def _record_exception(items: list[ReloadResultItem], name: str, exc: Exception) -> None:
+    detail = failure_detail(exc)
+    items.append(ReloadResultItem(name=name, ok=False, detail=detail))
+    trace = exc.__traceback__
+    assert trace is not None
+    while trace.tb_next is not None:
+        trace = trace.tb_next
+    filename = Path(trace.tb_frame.f_code.co_filename).name
+    log.warning(f"{name}: {detail} (source {filename!r}:{trace.tb_lineno})")
 
 
 def record_step(
-    items: list[ReloadResultItem], name: str, fn: Callable[[], None]
+    items: list[ReloadResultItem], name: str, fn: Callable[[], str | None]
 ) -> bool:
-    """跑一步 reload 并记一条 :class:`ReloadResultItem`；失败返回 ``False``。
-
-    ``fn`` 抛异常即记 ``ok=False`` + ``str(e)``，否则记 ``ok=True``。**中止还是继续
-    由调用方决定**——``system.reload_system`` 除 config 外都继续，
-    ``GatewayServer._enter_operational`` 任一步失败即中止；那行 ``if not record_step(...)``
-    就是策略所在。
-
-    本函数不包住三类步骤：产出值（``load_config`` 的 ``Config``、``WingRuntime()``
-    的实例）、需要 ``await``（``reset_providers()``）、以及自带 ``detail`` 的
-    （``_warn_auth_lockout`` 的告警文案）——它们写成显式 ``try`` / 显式 append
-    更能看清输出去哪。
-    """
     try:
-        fn()
-    except Exception as e:
-        items.append(ReloadResultItem(name=name, ok=False, detail=str(e)))
+        detail = fn()
+    except Exception as exc:
+        _record_exception(items, name, exc)
         return False
-    items.append(ReloadResultItem(name=name, ok=True))
-    return True
+    ok = detail is None
+    items.append(ReloadResultItem(name=name, ok=ok, detail=detail))
+    if not ok:
+        log.warning(f"{name}: {detail}")
+    return ok
 
 
 # ============================================================
@@ -74,38 +102,66 @@ def record_step(
 # ============================================================
 
 
-async def reload_system(sm: SessionManager) -> ReloadResult:
+def file_load_failure(failed: int, kind: str) -> str | None:
+    if failed:
+        return f"{failed} {kind} file(s) need attention; check the gateway log"
+    return None
+
+
+def _new_session_defaults(sm: SessionManager, config: Config) -> tuple[object, ...]:
+    template = sm.template_manager.default
+    return (
+        template.model_dump(exclude={"compactor", "yolo"}),
+        template.compactor.context_window_tokens,
+        template.compactor.keep_recent_tokens,
+        config.yolo if template.yolo is None else template.yolo,
+        config.steer,
+    )
+
+
+async def reload_system(
+    sm: SessionManager, *, saved_text: str | None = None
+) -> ReloadResult:
     """热重载全局配置、hooks、prompt commands、provider、skills & rules、log level。
 
     config 加载失败时立即中止。其余项失败时继续。
     """
     from wing.commands import magic_registry, register_prompt_commands
-    from wing.config import load_config
+    from wing.config import get_config, load_config
+    from wing.config.loader import load_config_text
     from wing.hooks import hooks, load_hooks
 
     items: list[ReloadResultItem] = []
 
     try:
-        config = load_config(reload=True)
+        before = _new_session_defaults(sm, get_config())
+        config = (
+            load_config(reload=True)
+            if saved_text is None
+            else load_config_text(saved_text)
+        )
         # 模板是 config 的派生状态（agents[].model 经 id 表解析）：与 config
         # 一起重建，避免「reload 后新会话用旧模板、resume 用新映射」分叉。
         # 不另立 ReloadResultItem——逐项名字序是对外契约，且 config 加载成功
         # 而模板重建失败在逻辑上不可达（加载期已强制 agents[].model ∈ id 空间）。
         sm.reload_templates()
+        new_session_defaults_changed = before != _new_session_defaults(sm, config)
         items.append(ReloadResultItem(name="config.yaml", ok=True))
     except Exception as e:
-        items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
+        _record_exception(items, "config.yaml", e)
         return ReloadResult(ok=False, items=items)
 
-    def _reload_hooks() -> None:
+    def _reload_hooks() -> str | None:
         hooks.clear()
-        load_hooks(config.hooks)
+        return file_load_failure(load_hooks(config.hooks), "hook")
 
     record_step(items, "hooks", _reload_hooks)
 
-    def _reload_commands() -> None:
+    def _reload_commands() -> str | None:
         magic_registry.remove_by_source("prompt")
-        register_prompt_commands(config.commands.paths)
+        return file_load_failure(
+            register_prompt_commands(config.commands.paths), "prompt command"
+        )
 
     record_step(items, "prompt commands", _reload_commands)
 
@@ -119,7 +175,7 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
 
         rebuilt = await reset_providers()
     except Exception as e:
-        items.append(ReloadResultItem(name="provider", ok=False, detail=str(e)))
+        _record_exception(items, "provider", e)
     else:
         items.append(
             ReloadResultItem(
@@ -147,4 +203,8 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
     record_step(items, "log level", _reload_log_level)
 
     all_ok = all(item.ok for item in items)
-    return ReloadResult(ok=all_ok, items=items)
+    return ReloadResult(
+        ok=all_ok,
+        items=items,
+        new_session_defaults_changed=new_session_defaults_changed,
+    )

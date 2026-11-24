@@ -29,7 +29,7 @@ use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelAction;
 use crate::shared::panels::picker::ModelPanel;
 use crate::shared::panels::picker::ModelPanelAction;
-use crate::tui::is_quit_key;
+use crate::tui::{is_paste_clipboard_key, is_quit_key};
 use crate::ui::input_area::InputAction;
 use crate::ui::input_area::SubmitPayload;
 use crate::ui::popup::ActivePopup;
@@ -83,9 +83,6 @@ pub(super) enum KeyRoute {
     ToggleReasoning,
     /// `Ctrl+V` / `super+v` — 读系统剪贴板（L1，见 `util::clipboard_paste`）。
     ///
-    /// 应用保留键（与 Ctrl+O 同档）：读取在后台任务上跑，**落点**才做门控 —
-    /// 文本走 `App::handle_paste`（模态挡板自动继承），图片走 `on_clipboard_local_image`
-    /// （不受挡板，与 OSC 5522 通道同一条既定取舍）。
     PasteClipboard,
     /// 设置面板 owns the key（`Esc` / `PageUp` / `PageDown` / `Ctrl+O` 一并交给它；
     /// `Ctrl+C` 在它之前就被应用截走）。
@@ -204,36 +201,6 @@ fn is_toggle_reasoning_key(key: &crossterm::event::KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('o' | 'O')) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// `Ctrl+V` / `super+v` — 读系统剪贴板（L1）。
-///
-/// 两种解码形态都要接住：没开 kitty 键盘协议的终端把 Ctrl+V 发成控制字节 `0x16`
-/// （crossterm → `Char('v') + CONTROL`）；开了协议的终端把 Cmd+V 回传成
-/// `CSI 118;9u`（crossterm → `Char('v') + SUPER`，见 `tests/clipboard_paste_keys.rs`）。
-///
-/// 口径（两分支不对称是刻意的）：
-///
-/// - `super+v` 与 `super+shift+v`（macOS 的 Paste and Match Style）都触发粘贴 ——
-///   SHIFT 只改变粘贴的“样式”，语义仍是粘贴；`super+alt/ctrl+v` 是与粘贴无关的
-///   系统/终端组合，不接。
-/// - `Ctrl+V` 触发；`Ctrl+Shift+V`（Linux 终端的粘贴默认键，动作发生在终端一侧）与
-///   `Ctrl+Alt+V`（kitty 把 AltGr 报成 ctrl+alt）不接 —— 绑上只会吃掉字符输入或
-///   得到「有时被终端吃掉、有时没有」的不一致。
-fn is_paste_clipboard_key(key: &crossterm::event::KeyEvent) -> bool {
-    use crossterm::event::KeyCode;
-    use crossterm::event::KeyModifiers;
-
-    matches!(key.code, KeyCode::Char('v' | 'V'))
-        && if key.modifiers.contains(KeyModifiers::SUPER) {
-            !key.modifiers
-                .intersects(KeyModifiers::ALT | KeyModifiers::CONTROL)
-        } else {
-            key.modifiers.contains(KeyModifiers::CONTROL)
-                && !key
-                    .modifiers
-                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
-        }
-}
-
 /// The chat-scroll meaning of a key, if it has one.
 ///
 /// Plain (unmodified) `Up` / `Down` are NOT scrolling keys: they belong to
@@ -299,6 +266,9 @@ impl App {
         if is_quit_key(key) {
             return KeyRoute::Quit;
         }
+        if is_paste_clipboard_key(key) {
+            return KeyRoute::PasteClipboard;
+        }
         // 设置面板：最高优先级，且是**唯一接管应用保留键**的层——
         // `Esc` 走面板自己的 Esc 阶梯、`PageUp`/`PageDown` 翻面板的树、
         // `Ctrl+O` 交给面板（面板忽略它，比让它穿透去改看不见的聊天状态安全）。
@@ -310,13 +280,6 @@ impl App {
         // 面板之前截住 —— 落到 composer 会变成输入 `o`）。
         if is_toggle_reasoning_key(key) {
             return KeyRoute::ToggleReasoning;
-        }
-        // Ctrl+V / super+v 同样是应用保留键（设置浮层除外，早期分支已接管，与 Ctrl+O
-        // 同档）：粘贴手势在其余面板之下也要接住（落点再做挡板），且必须赶在 composer
-        // 之前 —— 否则 super+v 会被当字面 `v` 输入（Ghostty 图片剪贴板回传 super+v
-        // 时的实测行为）。
-        if is_paste_clipboard_key(key) {
-            return KeyRoute::PasteClipboard;
         }
         for layer in self.modal_chain() {
             match layer {
@@ -441,13 +404,7 @@ impl App {
             }
             KeyRoute::PasteClipboard => {
                 self.reset_quit_counter();
-                // 在飞合并：第一次读取落地前连按只算一次（同
-                // `clipboard_compress_in_flight` 的纪律）——最坏 ~23 s 的读取窗口里
-                // 堆 N 条子进程链只会换来 N 倍 churn 与 N 个收尾 toast。落地（成功
-                // 或失败）由 runner 的开闸恢复可读。
-                if crate::app::runner::claim_clipboard_read() {
-                    self.push_intent(AppIntent::ReadClipboard);
-                }
+                self.request_clipboard_paste();
             }
             KeyRoute::Settings => self.handle_settings_key(key),
             KeyRoute::AskPanel => self.handle_ask_panel_key(key),
@@ -626,6 +583,18 @@ impl App {
     /// —— 全部分派逻辑（预览 / 保存 / 重启 / 重载 / 关闭）在 `app::settings`。
     /// `Ctrl+C` 永远到不了这里（[`App::route_key`] 先放行给应用）。
     fn handle_settings_key(&mut self, key: crossterm::event::KeyEvent) {
+        use crossterm::event::KeyCode;
+
+        if (self.settings_save.is_some() || self.settings_reload_pending)
+            && key.code != KeyCode::Esc
+            && !(key.code == KeyCode::Enter
+                && self
+                    .settings_panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.is_confirming_close()))
+        {
+            return;
+        }
         let action = self
             .settings_panel
             .as_mut()
@@ -869,17 +838,11 @@ impl App {
         }
     }
 
-    /// Handle a bracketed paste event: routed to the active ask panel's inline
-    /// editor when one is up (panel is modal); the modal model panel and the
-    /// settings overlay drop it; otherwise it goes to the composer.
-    ///
-    /// **顺序**：设置面板的挡板排在最前 —— 面板是模态浮层、拿走全部按键的层，
-    /// 而队列里可能正躺着一条**看不见**的 ask（面板开着时到达的 ask 入队不弹）。
-    /// 先问 ask 的话，`Ctrl+V` 会写进那条 ask 的内联编辑器（用户看不见自己改了什么）。
     pub(super) fn handle_paste(&mut self, text: &str) {
-        // 设置面板：内联编辑器只吃按键事件，草稿在面板底下不可见 —— 粘贴进
-        // composer 只会改掉用户关面板之后要发的内容。
-        if self.settings_panel.is_some() {
+        if let Some(panel) = &self.settings_panel {
+            if let Some(target) = panel.paste_target() {
+                self.paste_into_settings(target, Ok(text));
+            }
             return;
         }
         if !self.ask_panels.is_empty() {

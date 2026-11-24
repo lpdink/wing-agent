@@ -10,13 +10,9 @@
 
 use tokio::sync::mpsc;
 
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-
 use crate::app::intent::{AppIntent, FetchPayload, FetchResult, SendOutcome, SessionUpdate};
 use crate::app::settings::GatewaySaveReport;
 use crate::app::settings::InterfaceSaveReport;
-use crate::app::settings::PendingSettingsSave;
 use crate::app::settings::changed_leaf_paths;
 use crate::app::transport::Transport;
 use crate::app::transport::{GatewayEndpoint, Recovery};
@@ -41,26 +37,6 @@ use super::App;
 /// Timing out degrades to the OSC52-less failure path: a `Copy failed` toast
 /// with the reason.
 const CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
-
-/// L1 读取的在飞闸门：同一时刻只允许一条读取链。
-///
-/// 与 `App::clipboard_compress_in_flight` 同一条「单并发 + 落地恢复」纪律；读任务的
-/// 整个生命周期都在本模块（`ReadClipboard` 分支起任务、任务落地时释放），所以状态
-/// 住在这里。分派点（`modal::handle_key`）先 [`claim_clipboard_read`] 再推 intent：
-/// 最坏 ~23 s 的读取窗口里连按只会被合并，不再堆 N 条子进程链（N 倍 churn 与 N 个
-/// 收尾 toast）。
-static CLIPBOARD_READ_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
-
-/// 认领一次 L1 读取：`true` = 本次起链（调用方推 `ReadClipboard`），`false` = 已
-/// 有在飞读取，本次触发被合并（调用方什么都不做）。
-pub(super) fn claim_clipboard_read() -> bool {
-    !CLIPBOARD_READ_IN_FLIGHT.swap(true, Ordering::AcqRel)
-}
-
-/// 读取落地（成功或失败都）释放闸门：之后的手势恢复可读。
-pub(super) fn release_clipboard_read() {
-    CLIPBOARD_READ_IN_FLIGHT.store(false, Ordering::Release);
-}
 
 /// Execute a single intent, performing any necessary I/O.
 ///
@@ -120,22 +96,22 @@ pub async fn execute_intent(
                 }
             }
         }
-        AppIntent::ReadClipboard => {
-            // 本地剪贴板读取（L1）：所有子进程都在模块里的阻塞池上调起，这里只把
-            // "读取 → 回执" 放进后台任务（同 `CompressClipboardImage` 的范式）。
-            // 结果属于 composer 而不是会话，`session_id` 只是 `FetchResult` 的形状要求。
-            // 在飞闸门已在分派点认领（`claim_clipboard_read`）。
+        AppIntent::ReadClipboard(target) => {
+            // Clipboard results follow local input across session switches.
             let tx = fetch_tx.clone();
             let session_id = app.session_id.clone();
             tokio::spawn(async move {
-                let result = crate::util::clipboard_paste::read_clipboard().await;
-                // 先开闸、再把回执送回去（成功或失败都开）：App 处理回执时闸门必须已经
-                // 打开，否则紧接着的那次 Ctrl+V 会被误合并成「还在飞」。
-                release_clipboard_read();
+                use crate::util::clipboard_paste::{PasteMode, read_clipboard};
+                let mode = match target {
+                    crate::tui::ClipboardTarget::Default => PasteMode::TextOrImage,
+                    crate::tui::ClipboardTarget::TextOnly(_) => PasteMode::TextOnly,
+                    crate::tui::ClipboardTarget::Ignore => return,
+                };
+                let result = read_clipboard(mode).await;
                 let _ = tx
                     .send(FetchResult {
                         session_id,
-                        payload: FetchPayload::ClipboardPaste(result),
+                        payload: FetchPayload::ClipboardPaste { target, result },
                     })
                     .await;
             });
@@ -397,28 +373,7 @@ pub async fn execute_intent(
         AppIntent::ReloadSystem => {
             if let Some(t) = transport {
                 match t.http.reload_system().await {
-                    Ok(resp) => {
-                        let status = if resp.ok { "✅" } else { "⚠️" };
-                        let details: Vec<String> = resp
-                            .results
-                            .iter()
-                            .map(|r| {
-                                if r.ok {
-                                    format!("✅ {}", r.name)
-                                } else {
-                                    format!(
-                                        "❌ {}: {}",
-                                        r.name,
-                                        r.detail.as_deref().unwrap_or("unknown")
-                                    )
-                                }
-                            })
-                            .collect();
-                        app.show_toast(Toast::info(
-                            format!("{status} Reload: {}", details.join(", ")),
-                            std::time::Duration::from_secs(4),
-                        ));
-                    }
+                    Ok(resp) => app.note_system_reload(&resp),
                     Err(e) => {
                         app.show_toast(Toast::error(
                             format!("Reload failed: {e}"),
@@ -525,6 +480,8 @@ pub async fn execute_intent(
         }
         // ---- 设置面板 ----
         AppIntent::FetchSettings | AppIntent::ReloadSettings => {
+            app.settings_fetch_id = app.settings_fetch_id.wrapping_add(1);
+            let id = app.settings_fetch_id;
             if let Some(t) = transport {
                 let http = t.http.clone();
                 let session_id = app.session_id.clone();
@@ -535,12 +492,13 @@ pub async fn execute_intent(
                     let (schema, state) = tokio::join!(http.settings_schema(), http.settings_get());
                     let payload = match (schema, state) {
                         (Ok(schema), Ok(state)) => FetchPayload::Settings {
+                            id,
                             schema: Box::new(schema),
                             state: Box::new(state),
                         },
-                        (Err(e), _) | (_, Err(e)) => FetchPayload::Toast {
-                            message: format!("载入设置失败：{e}"),
-                            is_error: true,
+                        (Err(e), _) | (_, Err(e)) => FetchPayload::SettingsFetchError {
+                            id,
+                            message: format!("读取设置文件失败：{e}"),
                         },
                     };
                     let _ = tx
@@ -550,6 +508,8 @@ pub async fn execute_intent(
                         })
                         .await;
                 });
+            } else {
+                app.handle_settings_fetch_error("读取设置文件失败：网关未连接".into());
             }
         }
         AppIntent::SaveSettings {
@@ -586,28 +546,23 @@ pub async fn execute_intent(
             } else {
                 InterfaceSaveReport::Skipped
             };
-            // 两半的状态先存住：合并回执（与缓存回写）都读这一份。
-            app.settings_save = Some(PendingSettingsSave {
-                interface: report,
-                document: (*gateway).clone(),
-            });
+            app.settings_save = Some(report);
             // Gateway 半边：异步（回执两半合体，不阻塞主循环）。
             if gateway_dirty {
+                app.settings_fetch_id = app.settings_fetch_id.wrapping_add(1);
+                app.settings_reload_pending = false;
                 if let Some(t) = transport.as_ref() {
                     let http = t.http.clone();
                     let session_id = app.session_id.clone();
                     let tx = fetch_tx.clone();
                     let request = wing_api_client::models::SettingsSetRequest {
                         base: Some(base),
-                        document: (*gateway).clone(),
+                        document: gateway.into_value(),
                     };
                     tokio::spawn(async move {
                         let payload = match http.settings_set(&request).await {
                             Ok(response) => FetchPayload::SettingsSaved(Box::new(response)),
-                            Err(e) => FetchPayload::SettingsSaveError {
-                                message: e.to_string(),
-                                conflict: e.is_conflict(),
-                            },
+                            Err(e) => FetchPayload::SettingsSaveError((&e).into()),
                         };
                         let _ = tx
                             .send(FetchResult {

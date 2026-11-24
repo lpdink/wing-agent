@@ -118,6 +118,7 @@ mod tests {
     #[test]
     fn render_doctor_renders_ok_and_problem_lines() {
         let ok = SettingsStatusResponse {
+            restart_listener: None,
             valid: true,
             setup_mode: false,
             problems: Vec::new(),
@@ -129,6 +130,7 @@ mod tests {
         );
 
         let status = SettingsStatusResponse {
+            restart_listener: None,
             valid: false,
             setup_mode: true,
             problems: vec![
@@ -164,6 +166,7 @@ mod tests {
     #[test]
     fn render_doctor_handles_invalid_without_problems() {
         let status = SettingsStatusResponse {
+            restart_listener: None,
             valid: false,
             setup_mode: false,
             problems: Vec::new(),

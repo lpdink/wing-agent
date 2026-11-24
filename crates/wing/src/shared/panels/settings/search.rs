@@ -16,6 +16,7 @@ use wing_api_client::models::SettingNode;
 use super::doc::Root;
 use crate::shared::doc_edit::ancestors;
 use crate::shared::doc_edit::path_is_within;
+use crate::shared::text_edit::TextInputId;
 
 /// 一次搜索的匹配结果（跨根）。
 #[derive(Debug, Clone)]
@@ -107,6 +108,7 @@ fn collect_hits(node: &SettingNode, root: Root, needle: &str, hits: &mut HashSet
 fn node_matches(node: &SettingNode, needle: &str) -> bool {
     let contains = |text: &str| text.to_lowercase().contains(needle);
     contains(&node.path)
+        || contains(super::model::field_label(node))
         || contains(&node.title)
         || contains(&node.doc)
         || node.notes.iter().any(|note| contains(note))
@@ -147,6 +149,7 @@ fn find_spans(haystack: &str, needle: &str) -> Vec<Range<usize>> {
 /// 面板侧的搜索会话：query + 进入搜索时的展开 / 光标 / 分组快照（Esc 恢复用）。
 #[derive(Debug, Clone)]
 pub(crate) struct SearchState {
+    pub(super) target: TextInputId,
     query: String,
     snapshot: HashSet<(Root, String)>,
     cursor_snapshot: Option<(Root, String)>,
@@ -160,6 +163,7 @@ impl SearchState {
         group: usize,
     ) -> Self {
         Self {
+            target: TextInputId::new(),
             query: String::new(),
             snapshot: expanded.clone(),
             cursor_snapshot: cursor,
@@ -178,6 +182,10 @@ impl SearchState {
 
     pub(crate) fn push(&mut self, c: char) {
         self.query.push(c);
+    }
+
+    pub(super) fn insert_paste(&mut self, text: &str) {
+        self.query.push_str(text);
     }
 
     pub(crate) fn backspace(&mut self) {
