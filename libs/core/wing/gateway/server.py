@@ -519,8 +519,8 @@ class GatewayServer:
         if target is None:
             return
 
-        # 无接收者时也让 EventBus 报告 wire 投影失败，例如不可序列化的工具参数。
-        payload = wire_dump(event)
+        # EventBus 即使没有接收者也记录 wire 投影或 JSON 编码失败。
+        payload = json.dumps(wire_dump(event))
         recipients: Iterable[tuple[str, WebSocket | None]]
         if target.scope == "global":
             recipients = list(self._client_to_ws.items())
@@ -536,7 +536,7 @@ class GatewayServer:
             if ws is None or not self._receives_events(cid):
                 continue
             if frames is None:
-                frames = build_frames(json.dumps(payload), event.type)
+                frames = build_frames(payload, event.type)
             self._schedule_send(ws, frames, event.type)
 
     def _schedule_send(self, ws: WebSocket, frames: list[Frame], of_type: str) -> None:

@@ -476,7 +476,16 @@ class TestEagerChunking:
             server._on_event(event)
         build.assert_not_called()
 
-    def test_unroutable_event_keeps_serialization_diagnostic(self):
+    @pytest.mark.parametrize(
+        ("value", "error"),
+        [
+            pytest.param(object(), "Unable to serialize unknown type", id="projection"),
+            pytest.param(10**640, "Exceeds the limit (640 digits)", id="encoding"),
+        ],
+    )
+    def test_unroutable_event_keeps_serialization_diagnostic(self, value, error):
+        import sys
+
         from wing.event import ToolCallEvent
 
         server = _make_server()
@@ -486,14 +495,20 @@ class TestEagerChunking:
         event = ToolCallEvent(
             tool_name="test",
             tool_call_id="call",
-            tool_args={"unknown": object()},
+            tool_args={"unknown": value},
             target=EventTarget(scope="client"),
         )
-        with patch("wing.event_bus.log") as logger:
-            event_bus.emit(event)
+        limit = sys.get_int_max_str_digits()
+        try:
+            sys.set_int_max_str_digits(640)
+            with patch("wing.event_bus.log") as logger:
+                event_bus.emit(event)
+        finally:
+            sys.set_int_max_str_digits(limit)
         logger.error.assert_called_once()
-        message = logger.error.call_args.args[0]
-        assert "EventBus subscriber error: Unable to serialize unknown type" in message
+        assert logger.error.call_args.args[0].startswith(
+            f"EventBus subscriber error: {error}"
+        )
         later.assert_called_once_with(event)
 
 
