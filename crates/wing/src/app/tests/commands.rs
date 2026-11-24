@@ -428,9 +428,11 @@ fn test_every_routed_command_is_offered_by_completion() {
 #[test]
 fn fetched_commands_keep_wire_defaults_and_local_completions() {
     use crate::app::intent::{FetchPayload, FetchResult};
-    use crate::ui::popup::command::filter_commands;
 
     let mut app = test_app();
+    app.input.set_text("/");
+    app.update_popup_from_input();
+    assert!(app.popup.active.render_data().is_some());
     let response = serde_json::from_value(serde_json::json!({
         "commands": [{"name": "server-command", "future_field": true}],
     }))
@@ -444,7 +446,7 @@ fn fetched_commands_keep_wire_defaults_and_local_completions() {
     assert!(cached[0].aliases.is_empty());
     assert!(cached[0].description.is_empty());
     assert!(cached[0].params.is_empty());
-    let rows = filter_commands(cached, "");
+    let (rows, ..) = app.popup.active.render_data().expect("panel is open");
     assert!(rows.iter().any(|row| row.name == "/server-command"));
     assert!(rows.iter().any(|row| row.name == "/tips"));
 }

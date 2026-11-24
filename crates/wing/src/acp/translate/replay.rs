@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_without_arguments_omits_raw_input() {
+    fn tool_call_raw_input_distinguishes_missing_arguments_and_null() {
         let mut cards = ToolCards::default();
         let updates = replay_updates(
             &mut cards,
@@ -323,19 +323,29 @@ mod tests {
                 json!([{
                     "role": "assistant",
                     "content": "",
-                    "tool_calls": [{"id": "tc1", "name": "SomeTool"}],
+                    "tool_calls": [
+                        {"id": "tc1", "name": "SomeTool"},
+                        {"id": "tc2", "name": "SomeTool", "arguments": null},
+                    ],
                 }]),
                 json!([]),
             ),
         );
+        assert_eq!(updates.len(), 2);
         match &updates[0] {
             SessionUpdate::ToolCall(call) => {
-                assert!(call.raw_input.is_none(), "参数缺席 → 不发 rawInput");
                 assert_eq!(call.title, "SomeTool", "参数缺席 → 标题退回工具名");
                 assert_eq!(call.kind, ToolKind::Other);
             }
             other => panic!("expected tool_call, got {other:?}"),
         }
+        let missing = serde_json::to_value(&updates[0]).unwrap();
+        let explicit_null = serde_json::to_value(&updates[1]).unwrap();
+        assert!(missing.get("rawInput").is_none());
+        assert_eq!(
+            explicit_null.get("rawInput"),
+            Some(&serde_json::Value::Null)
+        );
     }
 
     #[test]
