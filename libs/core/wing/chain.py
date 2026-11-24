@@ -12,11 +12,8 @@ TrackedList — 链拓扑引擎，UUID + parentUuid 链模型。
 - 始终以类型化对象工作，存储层传输 raw dict（ts 由本类注入）
 - 内存中维护 full chain map（_all_items），find/trace_chain 从内存读取
 
-写入与恢复：
-- 写端由会话串行调用。自动压缩通过 extend_detached 批量追加摘要和重链接节点，
-  写入成功后才更新内存并切换 tip。
-- 文件日志追加失败会尝试回截。若回截也失败，当前进程只暴露已确认的前缀，
-  下次追加先重试回截。进程重启会失去这个上界，可能读到未回截批次中的完整记录。
+写端由会话串行调用。自动压缩通过 extend_detached 批量追加摘要和重链接节点，
+写入成功后才更新内存并切换 tip。
 """
 
 from __future__ import annotations

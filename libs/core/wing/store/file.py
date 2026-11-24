@@ -73,7 +73,12 @@ class _HistoryTails:
 
 
 class FileMessageLog(MessageLog):
-    """文件消息日志：history.jsonl（append+fsync）。"""
+    """文件消息日志，以追加和 fsync 持久化 history.jsonl。
+
+    追加遇到 OSError 会尝试回截。回截失败时，同一存储实例的读端只暴露已确认的
+    前缀，续写前先重试回截并同步。进程重启后此上界丢失，完整的尾部记录可能进入
+    冷读，截断的尾行可能与下一次追加粘连。
+    """
 
     _HISTORY = "history.jsonl"
 
@@ -148,9 +153,6 @@ class FileMessageLog(MessageLog):
           幽灵会话（该目录此后会被 list 到）；
         - **不拼大字符串**：fork/compact 的批量前缀动辄 MiB 级，``join``
           会把同一份数据再复制一遍。进程崩溃可能留下完整的批次前缀或截断行。
-
-        代价是整批一份编码副本（``blobs``）——批量只出现在 fork / compact
-        这类重塑路径上，换 all-or-nothing 划算；逐轮的小批量追加可忽略。
         """
         if self._sealed:
             log.warning(f"Message log sealed ('{self._path.name}'), dropping append")
