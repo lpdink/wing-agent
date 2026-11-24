@@ -42,7 +42,7 @@ use crate::environments::{is_multiline, render_multiline_env};
 use crate::grid::layout::layout;
 use crate::grid::rendered_block::RenderedBlock;
 use crate::guard::{self, Reject};
-use crate::latex::parse_equation_with_depth;
+use crate::latex::parser::parse_chars_with_depth;
 use crate::normalize::normalize;
 use crate::scan::scan;
 
@@ -54,7 +54,7 @@ const MAX_ENV_DEPTH: usize = 8;
 /// 花括号深度拦不住 **brace-free** 的嵌套（`\left(\left(…`、`\hat \hat …`、`\frac \frac …`、
 /// `\sqrt \sqrt …`）：那些链既没有 `{` 也不产生任何结构信号，却会让 parser / layout 递归到
 /// 爆栈。所以闸门放在解析器自己的递归计数上（它覆盖**所有**会递归的构造），并且**在排版之前**
-/// 判定：`parse_equation_with_depth` 一旦置位就直接拒绝，AST 与排版都不跑。
+/// 判定：`parse_chars_with_depth` 一旦置位就直接拒绝，AST 与排版都不跑。
 ///
 /// 口径是"每进入一层 `parse_atom` / `parse_sequence_until_ex` 加 1"，所以**一层结构通常占 2 个
 /// 单位**。实测映射（本机 release）：
@@ -235,12 +235,13 @@ pub(crate) fn render_block_at(src: &str, depth: usize) -> Result<RenderedBlock, 
     let block = match structure.envs.first() {
         Some(span) if is_multiline(&span.name) => render_multiline_env(&chars, span, depth)?,
         _ => {
-            let (ast, too_deep, consumed) = parse_equation_with_depth(&normalized, MAX_PARSE_DEPTH);
+            let len = chars.len();
+            let (ast, too_deep, consumed) = parse_chars_with_depth(chars, MAX_PARSE_DEPTH);
             if too_deep {
                 // 越界的 AST 是残缺的：既不能渲染，也不能拿它做泄漏判断
                 return Err(Reject::TooDeep);
             }
-            if consumed < chars.len() {
+            if consumed < len {
                 // 解析器提前收工 = 剩下的输入会被静默丢掉（上游在 `&` / `\\` / `}` /
                 // `\right` / `\end` 处 `break`）。这是"内容丢失"的最后一道兜底判据：
                 // 前面的结构自检负责给出更精确的理由，这里保证**没有任何形态能漏网**
