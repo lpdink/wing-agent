@@ -1089,12 +1089,15 @@ def _assemble(
     emits = getattr(provider, "frame_emits", None)
     samples["delivery_available"] = None if provider is None else emits is not None
     if emits is not None and turns:
+        ledger = metrics.emit_ledger_from_snapshot(emits)
+        del emits  # 全表快照在分组后即可释放，避免与配对样本同时驻留。
         pairing = metrics.pair_delivery(
-            metrics.emit_ledger_from_snapshot(emits),
+            ledger,
             provider.requests.all(),
             turns,
             window=(sampling.window_start, sampling.window_end),
         )
+        del ledger
         for label, value in metrics.spread(pairing.latencies_ms).items():
             block[f"delivery.{label}_ms"] = _round(value)
         samples["count"] = pairing.paired
@@ -1118,6 +1121,7 @@ def _assemble(
                 f"{dict(pairing.reasons)}"
             )
     elif emits is not None:
+        del emits
         notes.append("delivery.* is null: no turn sample was collected in the window")
     elif provider is not None:
         notes.append(DELIVERY_UNAVAILABLE)

@@ -18,9 +18,9 @@
    与网关重试都会让一个 prompt 对应两次请求，而某个通道的帧只可能来自发过该通道帧的
    那一次请求。仍有多条候选（真重试）才整轮丢弃——不猜。
 
-发射时刻来自上游冻结接口（``FakeProvider.frame_emits``）；缺失时
-:func:`build_emit_ledger` 直接抛 :class:`DeliveryUnavailable`，由档位编排
-（``orchestrator``）转成「延迟指标不可用」并三处点名（不写 0、不静默）。
+发射时刻来自上游冻结接口（``FakeProvider.frame_emits``）。档位编排读取快照，接口缺失时
+标记「延迟指标不可用」；直接通过 :func:`build_emit_ledger` 从 Provider 建账时，同一情况
+抛 :class:`DeliveryUnavailable`。
 """
 
 from __future__ import annotations
@@ -358,5 +358,5 @@ def pair_delivery(
 
 
 def has_frame_emits(provider: Any) -> bool:
-    """上游冻结接口是否已就位（档位开始前的一次能力探测）。"""
+    """读取一次快照以探测能力；也需要快照的调用方应直接读取属性。"""
     return getattr(provider, "frame_emits", None) is not None
