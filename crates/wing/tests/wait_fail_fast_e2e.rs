@@ -14,19 +14,20 @@
 //! `sync_session` payload does), the other delivers a normal `TurnResult`.
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::Arc;
 
 use futures_util::SinkExt;
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-use tokio_tungstenite::tungstenite::protocol::Role;
 
 mod common;
 
-use common::e2e::{read_request, start_fake_gateway};
+use common::e2e::{
+    RUN_TIMEOUT, header_value, is_websocket_upgrade, read_request, request_path, send_connected,
+    send_json, start_fake_gateway, upgrade_websocket, wait_for_ws_disconnect, wing_command,
+};
 
 /// The client's per-frame receive limit (tungstenite default).
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
@@ -43,104 +44,64 @@ enum Scenario {
     TurnResult,
 }
 
-// ============================================================
-// Fake gateway: minimal HTTP/1.1 + WS upgrade
-// ============================================================
-async fn handle_conn(mut stream: TcpStream, scenario: Scenario) {
-    let mut buf: Vec<u8> = Vec::new();
-    loop {
-        let Some((head, _body)) = read_request(&mut stream, &mut buf).await else {
-            return;
-        };
-        // Request target including the query string (e.g. `/api/session/info?…`).
-        let target = head
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .unwrap_or("")
-            .to_string();
-        let path = target.split('?').next().unwrap_or("").to_string();
+struct WaitGateway {
+    scenario: Scenario,
+    subscribed: Notify,
+    info_sent: Notify,
+}
 
-        let is_upgrade = header_value(&head, "upgrade")
-            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
-        if path == "/ws" && is_upgrade {
-            let key = header_value(&head, "sec-websocket-key").unwrap_or_default();
-            let response = format!(
-                "HTTP/1.1 101 Switching Protocols\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Sec-WebSocket-Accept: {}\r\n\r\n",
-                derive_accept_key(key.as_bytes())
-            );
-            if stream.write_all(response.as_bytes()).await.is_err() {
-                return;
+async fn handle_conn(mut stream: TcpStream, gateway: Arc<WaitGateway>) {
+    let mut buf = Vec::new();
+    while let Some((head, body)) = read_request(&mut stream, &mut buf).await {
+        let path = request_path(&head);
+        if path == "/ws" && is_websocket_upgrade(&head) {
+            if let Ok(ws) = upgrade_websocket(stream, &head).await {
+                drive_ws(ws, gateway).await;
             }
-            let ws = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
-            drive_ws(ws, scenario).await;
             return;
         }
 
-        let body = match path.as_str() {
+        let payload = match path {
             "/api/health" => {
                 r#"{"service":"wing-gateway","status":"ok","version":"test","uptime":1}"#
-                    .to_string()
+            }
+            "/api/session/subscribe" => {
+                let request: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(request["session_id"], SESSION_ID);
+                assert_eq!(header_value(&head, "x-client-id"), Some("fake"));
+                gateway.subscribed.notify_one();
+                "{}"
             }
             "/api/session/info" => {
-                // "working" keeps the session pending — the wait must not
-                // finish on its own; only an event (or the dead stream) ends it.
+                // The session stays pending until the WS outcome arrives.
                 r#"{"model":"test","api_url":"http://x","tools":[],"total_tokens":0,"context_window_tokens":1,"thinking":false,"reasoning_effort":null,"yolo":false,"session_name":null,"status":"working","context_stats":{"message_count":0,"total_tokens":0}}"#
-                    .to_string()
             }
-            _ => "{}".to_string(),
+            _ => "{}",
         };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
-            body.len(),
-            body
-        );
-        if stream.write_all(response.as_bytes()).await.is_err() {
+        if send_json(&mut stream, payload).await.is_err() {
             return;
         }
-    }
-}
-
-/// Complete the client handshake, then play out the scenario.
-async fn drive_ws(mut ws: WebSocketStream<TcpStream>, scenario: Scenario) {
-    let _ = ws
-        .send(Message::Text(
-            r#"{"type":"connected","client_id":"fake"}"#.into(),
-        ))
-        .await;
-    // Give `wing wait` time to subscribe and enter its wait loop.
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    match scenario {
-        Scenario::OversizedFrame => {
-            let _ = ws
-                .send(Message::Text("x".repeat(FRAME_LIMIT + 1).into()))
-                .await;
-            // Keep the socket open so the client observes a frame error (not EOF).
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-        Scenario::TurnResult => {
-            let event = format!(
-                r#"{{"type":"turn_result","subtype":"success","is_error":false,"result":"all good","num_turns":1,"duration_ms":12,"session_id":"{SESSION_ID}","created_at":"2026-01-01T00:00:00+00:00","request_id":"r"}}"#
-            );
-            let _ = ws.send(Message::Text(event.into())).await;
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        if path == "/api/session/info" {
+            gateway.info_sent.notify_one();
         }
     }
 }
-/// Case-insensitive header lookup over the raw request head (header *values*
-/// are case-sensitive — e.g. the base64 `Sec-WebSocket-Key`).
-fn header_value(head: &str, name: &str) -> Option<String> {
-    head.lines().skip(1).find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_string())
-    })
+
+async fn drive_ws(mut ws: WebSocketStream<TcpStream>, gateway: Arc<WaitGateway>) {
+    if send_connected(&mut ws, "fake").await.is_err() {
+        return;
+    }
+    gateway.subscribed.notified().await;
+    gateway.info_sent.notified().await;
+
+    let frame = match gateway.scenario {
+        Scenario::OversizedFrame => "x".repeat(FRAME_LIMIT + 1),
+        Scenario::TurnResult => format!(
+            r#"{{"type":"turn_result","subtype":"success","is_error":false,"result":"all good","num_turns":1,"duration_ms":12,"session_id":"{SESSION_ID}","created_at":"2026-01-01T00:00:00+00:00","request_id":"r"}}"#
+        ),
+    };
+    let _ = ws.send(Message::Text(frame.into())).await;
+    wait_for_ws_disconnect(ws).await;
 }
 
 // ============================================================
@@ -148,27 +109,25 @@ fn header_value(head: &str, name: &str) -> Option<String> {
 // ============================================================
 /// Bind a port, publish it in a scratch `WING_HOME`, serve `scenario` there.
 async fn start_gateway(scenario: Scenario, tag: &str) -> (PathBuf, u16) {
-    start_fake_gateway("wing-e2e", tag, scenario, handle_conn).await
+    let gateway = Arc::new(WaitGateway {
+        scenario,
+        subscribed: Notify::new(),
+        info_sent: Notify::new(),
+    });
+    start_fake_gateway("wing-e2e", tag, gateway, handle_conn).await
 }
 
 #[tokio::test]
 async fn wait_fails_fast_with_reason_and_logs_when_stream_dies() {
     let (home, _port) = start_gateway(Scenario::OversizedFrame, "wait-fail-fast").await;
 
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
-    command
-        .args(["wait", SESSION_ID, "--timeout", "300"])
-        .env("WING_HOME", &home)
-        .env_remove("RUST_LOG")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().unwrap();
+    let child = wing_command(&["wait", SESSION_ID, "--timeout", "300"], &home)
+        .spawn()
+        .unwrap();
 
     // A 300s timeout would mean "spun until the deadline"; the process must
     // exit on its own long before that.
-    let output = match tokio::time::timeout(Duration::from_secs(30), child.wait_with_output()).await
-    {
+    let output = match tokio::time::timeout(RUN_TIMEOUT, child.wait_with_output()).await {
         Ok(result) => result.unwrap(),
         Err(_) => panic!(
             "`wing wait` did not exit after the event stream died — expected fail-fast, \
@@ -237,17 +196,11 @@ async fn wait_fails_fast_with_reason_and_logs_when_stream_dies() {
 async fn wait_succeeds_when_turn_result_arrives() {
     let (home, _port) = start_gateway(Scenario::TurnResult, "wait-success").await;
 
-    let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"));
-    command
-        .args(["wait", SESSION_ID, "--timeout", "30", "--json"])
-        .env("WING_HOME", &home)
-        .env_remove("RUST_LOG")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true);
-    let child = command.spawn().unwrap();
+    let child = wing_command(&["wait", SESSION_ID, "--timeout", "30", "--json"], &home)
+        .spawn()
+        .unwrap();
 
-    let output = tokio::time::timeout(Duration::from_secs(30), child.wait_with_output())
+    let output = tokio::time::timeout(RUN_TIMEOUT, child.wait_with_output())
         .await
         .expect("`wing wait` must exit once the session is done")
         .unwrap();
@@ -267,6 +220,8 @@ async fn wait_succeeds_when_turn_result_arrives() {
         stdout.contains(SESSION_ID),
         "wait output must name the session: {stdout}"
     );
+    let response: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(response["results"][0]["result"], "all good");
 
     let _ = std::fs::remove_dir_all(&home);
 }

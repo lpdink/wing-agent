@@ -25,12 +25,13 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-use tokio_tungstenite::tungstenite::protocol::Role;
 
 mod common;
 
-use common::e2e::{read_request, start_fake_gateway};
+use common::e2e::{
+    is_websocket_upgrade, read_request, request_path, send_connected, send_json,
+    start_fake_gateway, upgrade_websocket, wing_command,
+};
 
 const SESSION_ID: &str = "20260101-000000-resident";
 
@@ -45,9 +46,12 @@ const EXIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// HTTP 侧 → WS 侧的推进信号。
 enum HttpEvent {
     /// 收到第 `seq` 条（1 起）`POST /api/session/send`。
-    Send { seq: usize },
+    Send {
+        seq: usize,
+    },
     /// 收到 `POST /api/session/interrupt`。
     Interrupt,
+    FinishFirstTurn,
 }
 
 /// 假网关的事件脚本。
@@ -56,9 +60,8 @@ enum Scenario {
     /// 每收到一条 send 就推一轮（turn_started → assistant → result），
     /// result 文本 = `turn-{seq}`。
     Turns,
-    /// 第一条 send：推 turn_started + assistant 后**延时**推 result（观察
-    /// 「EOF 落在轮中」的收尾）；之后同 `Turns`。
-    SlowFirstTurn,
+    /// 第一条 send 先推 turn_started + assistant，收到放行信号再推 result。
+    HoldFirstTurn,
     /// 第一条 send：只推 turn_started + assistant；收到 interrupt 后推
     /// `interrupted`（不推 turn_result——被打断的轮次后端不发终态帧）。
     Interrupt,
@@ -121,29 +124,11 @@ async fn handle_conn(mut stream: TcpStream, gateway: Arc<FakeGateway>) {
         let Some((head, body)) = read_request(&mut stream, &mut buf).await else {
             return;
         };
-        let target = head
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .unwrap_or("")
-            .to_string();
-        let path = target.split('?').next().unwrap_or("").to_string();
-
-        let is_upgrade = header_value(&head, "upgrade")
-            .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
-        if path == "/ws" && is_upgrade {
-            let key = header_value(&head, "sec-websocket-key").unwrap_or_default();
-            let response = format!(
-                "HTTP/1.1 101 Switching Protocols\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Sec-WebSocket-Accept: {}\r\n\r\n",
-                derive_accept_key(key.as_bytes())
-            );
-            if stream.write_all(response.as_bytes()).await.is_err() {
+        let path = request_path(&head);
+        if path == "/ws" && is_websocket_upgrade(&head) {
+            let Ok(ws) = upgrade_websocket(stream, &head).await else {
                 return;
-            }
-            let ws = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
+            };
             // 本次连接独占通知口（一个测试一个客户端连接）。
             let events = gateway.events.lock().unwrap().take();
             match events {
@@ -153,7 +138,7 @@ async fn handle_conn(mut stream: TcpStream, gateway: Arc<FakeGateway>) {
             return;
         }
 
-        let payload = match path.as_str() {
+        let payload = match path {
             "/api/health" => {
                 r#"{"service":"wing-gateway","status":"ok","version":"test","uptime":1}"#
                     .to_string()
@@ -177,13 +162,7 @@ async fn handle_conn(mut stream: TcpStream, gateway: Arc<FakeGateway>) {
             // subscribe / unsubscribe 等：无需特判，回通用 ok。
             _ => r#"{"ok":true}"#.to_string(),
         };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
-            payload.len(),
-            payload
-        );
-        if stream.write_all(response.as_bytes()).await.is_err() {
+        if send_json(&mut stream, &payload).await.is_err() {
             return;
         }
     }
@@ -195,15 +174,7 @@ async fn drive_ws(
     gateway: Arc<FakeGateway>,
     mut events: mpsc::UnboundedReceiver<HttpEvent>,
 ) {
-    if ws
-        .send(Message::Text(
-            json!({"type": "connected", "client_id": "fake"})
-                .to_string()
-                .into(),
-        ))
-        .await
-        .is_err()
-    {
+    if send_connected(&mut ws, "fake").await.is_err() {
         return;
     }
 
@@ -215,16 +186,12 @@ async fn drive_ws(
                     (Scenario::Turns, HttpEvent::Send { seq }) => {
                         emit_turn(&mut ws, seq).await;
                     }
-                    (Scenario::SlowFirstTurn, HttpEvent::Send { seq }) => {
-                        if seq == 1 {
-                            // 轮起了、但 result 迟到：给测试留出「EOF 落在轮中」的窗口。
-                            emit(&mut ws, turn_started_event()).await;
-                            emit(&mut ws, assistant_event("slow")).await;
-                            tokio::time::sleep(Duration::from_millis(400)).await;
-                            emit_result(&mut ws, "turn-1", false).await;
-                        } else {
-                            emit_turn(&mut ws, seq).await;
-                        }
+                    (Scenario::HoldFirstTurn, HttpEvent::Send { seq: 1 }) => {
+                        emit(&mut ws, turn_started_event()).await;
+                        emit(&mut ws, assistant_event("slow")).await;
+                    }
+                    (Scenario::HoldFirstTurn, HttpEvent::FinishFirstTurn) => {
+                        emit_result(&mut ws, "turn-1", false).await;
                     }
                     (Scenario::Interrupt, HttpEvent::Send { .. }) => {
                         if !started {
@@ -441,16 +408,6 @@ fn tool_result_turn_event() -> Value {
         "request_id": "fake",
     })
 }
-/// Case-insensitive header lookup over the raw request head.
-fn header_value(head: &str, name: &str) -> Option<String> {
-    head.lines().skip(1).find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_string())
-    })
-}
-
 // ============================================================
 // 测试 harness
 // ============================================================
@@ -472,20 +429,15 @@ impl WingProcess {
 
     /// 额外 CLI 参数（如 `-p`）叠加在常驻形态之上。
     async fn spawn_with(home: &PathBuf, extra: &[&str]) -> Self {
-        let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_wing"))
-            .args([
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-            ])
-            .args(extra)
-            .env("WING_HOME", home)
-            .env_remove("RUST_LOG")
+        let mut args = vec![
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+        ];
+        args.extend_from_slice(extra);
+        let mut child = wing_command(&args, home)
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
             .spawn()
             .unwrap();
         let stdin = child.stdin.take().unwrap();
@@ -696,7 +648,7 @@ async fn resident_serves_multiple_turns_and_exits_on_eof() {
 /// b) EOF 落在轮中：等该轮终态后才退出，迟到的 result 仍然产出。
 #[tokio::test]
 async fn resident_eof_waits_for_the_in_flight_turn() {
-    let (home, _gateway, _port) = start_gateway(Scenario::SlowFirstTurn, "resident-slow").await;
+    let (home, gateway, _port) = start_gateway(Scenario::HoldFirstTurn, "resident-eof").await;
     let mut wing = WingProcess::spawn(&home).await;
 
     wing.write_line(&user_frame("slow")).await;
@@ -706,6 +658,13 @@ async fn resident_eof_waits_for_the_in_flight_turn() {
 
     // 关 stdin：在途轮必须等到它的终态，迟到的 result 仍要写出去。
     wing.close_stdin();
+    // Give the child a bounded chance to observe EOF while the result is still withheld.
+    let early_exit = tokio::time::timeout(Duration::from_millis(200), wing.child.wait()).await;
+    assert!(
+        early_exit.is_err(),
+        "resident exited before the in-flight result: {early_exit:?}"
+    );
+    gateway.notify(HttpEvent::FinishFirstTurn);
     let result = wing
         .read_frame("result of the in-flight turn", is_result)
         .await;

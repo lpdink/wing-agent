@@ -10,18 +10,17 @@
 //! 一次性模式只发一条 prompt，所以帧脚本在握手应答之后**一次推完**——代价是这些
 //! 用例对帧序不敏感（帧序由 `stdio_resident_e2e` 与渲染层单测覆盖）。
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::SinkExt;
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
-use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-use tokio_tungstenite::tungstenite::protocol::Role;
 
 mod common;
 
-use common::e2e::{read_request, run_wing, start_fake_gateway};
+use common::e2e::{
+    is_websocket_upgrade, read_request, request_path, run_wing, send_connected, send_json,
+    start_fake_gateway, upgrade_websocket, wait_for_ws_disconnect,
+};
 
 const SESSION_ID: &str = "20260101-000000-one-shot";
 
@@ -97,33 +96,15 @@ async fn handle_conn(mut stream: TcpStream, script: Script) {
         let Some((head, _body)) = read_request(&mut stream, &mut buf).await else {
             return;
         };
-        let path = head
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("")
-            .split('?')
-            .next()
-            .unwrap_or("")
-            .to_string();
-
-        if path == "/ws"
-            && header_value(&head, "upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
-        {
-            let key = header_value(&head, "sec-websocket-key").unwrap_or_default();
-            let response = format!(
-                "HTTP/1.1 101 Switching Protocols\r\n\
-                 Upgrade: websocket\r\n\
-                 Connection: Upgrade\r\n\
-                 Sec-WebSocket-Accept: {}\r\n\r\n",
-                derive_accept_key(key.as_bytes())
-            );
-            if stream.write_all(response.as_bytes()).await.is_err() {
+        let path = request_path(&head);
+        if path == "/ws" && is_websocket_upgrade(&head) {
+            let Ok(mut ws) = upgrade_websocket(stream, &head).await else {
+                return;
+            };
+            if send_connected(&mut ws, "fake").await.is_err() {
                 return;
             }
-            let mut ws = WebSocketStream::from_raw_socket(stream, Role::Server, None).await;
-            let connected = json!({"type": "connected", "client_id": "fake"});
-            for frame in std::iter::once(connected).chain(script()) {
+            for frame in script() {
                 if ws
                     .send(Message::Text(frame.to_string().into()))
                     .await
@@ -133,11 +114,11 @@ async fn handle_conn(mut stream: TcpStream, script: Script) {
                 }
             }
             // 进程退出会关掉 WS：留着连接等对端关闭（不主动写、不主动关）。
-            while let Some(Ok(_)) = ws.next().await {}
+            wait_for_ws_disconnect(ws).await;
             return;
         }
 
-        let payload = match path.as_str() {
+        let payload = match path {
             "/api/health" => {
                 r#"{"service":"wing-gateway","status":"ok","version":"test","uptime":1}"#
                     .to_string()
@@ -149,35 +130,17 @@ async fn handle_conn(mut stream: TcpStream, script: Script) {
             // （预检把解不出的 body 当「网关早于 Setting API」→ Ready）。
             _ => r#"{"ok":true,"request_id":"fake-req"}"#.to_string(),
         };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
-             Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
-            payload.len(),
-            payload
-        );
-        if stream.write_all(response.as_bytes()).await.is_err() {
+        if send_json(&mut stream, &payload).await.is_err() {
             return;
         }
     }
 }
 
-/// 请求头里取一个字段（大小写不敏感）。
-fn header_value(head: &str, name: &str) -> Option<String> {
-    head.lines().skip(1).find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        key.trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_string())
-    })
-}
-
 async fn run(script: Script, tag: &str, args: &[&str]) -> (i32, String, String) {
-    let (home, _port) =
-        start_fake_gateway("wing-one-shot", tag, script, |stream, script| async move {
-            handle_conn(stream, script).await;
-        })
-        .await;
-    run_wing(args, &home).await
+    let (home, _) = start_fake_gateway("wing-one-shot", tag, script, handle_conn).await;
+    let output = run_wing(args, &home).await;
+    let _ = std::fs::remove_dir_all(home);
+    output
 }
 
 /// stdout 的完整帧（按顺序；空行忽略）。
@@ -311,10 +274,8 @@ async fn stdio_frames_die_with_sigpipe_when_the_reader_leaves() {
     let (home, _port) = start_fake_gateway(
         "wing-one-shot",
         "closed-stdout",
-        script_success_then_done,
-        |stream, script| async move {
-            handle_conn(stream, script).await;
-        },
+        script_success_then_done as Script,
+        handle_conn,
     )
     .await;
     let child = wing_command(&["-p", "hello", "--output-format", "stream-json"], &home)
@@ -326,6 +287,8 @@ async fn stdio_frames_die_with_sigpipe_when_the_reader_leaves() {
         .await
         .expect("the stdio front end kept running with an unwritable stdout")
         .unwrap();
+
+    let _ = std::fs::remove_dir_all(home);
 
     assert_eq!(
         output.status.signal(),
