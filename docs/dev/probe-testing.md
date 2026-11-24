@@ -74,7 +74,7 @@ libs/wing-probe/
 └── scenarios/             # 整机场景（只 import wing_probe 与 pytest）
 ```
 
-### 设置面场景（`scenarios/test_settings_*.py`，9 个文件 / 12 个用例）
+### 设置面场景（`scenarios/test_settings_*.py`，10 个文件 / 17 个用例）
 
 Setting API / setup mode 的整机证据（都在真网关上跑，断言锚定 HTTP 响应体、假 Provider 留档的请求体、
 磁盘字节、会话事件四个面）：
@@ -84,12 +84,11 @@ Setting API / setup mode 的整机证据（都在真网关上跑，断言锚定 
 | `test_settings_schema.py` | schema 的 wire 形状：抽查 29 条关键路径（`kind` / `apply` / `secret` / `min_items` / `variants` / `summary_fields` 是数组不是 null）+ 三条全局不变量（根 `key == path == "config"`、`value_hint is None`、`config_path` 绝对路径） |
 | `test_settings_apply.py` | **"生效"的硬证据**：改 `extra_body`（单键 map）与 `reasoning_effort` → 下一个请求体真的带上它们；回执 `reload.results` 的六项名字序 |
 | `test_settings_invalid.py` | 非法值 → **HTTP 200 + `ok=false`** + 精确 path/kind；文件字节未变；既有会话照常跑完一轮 |
-| `test_settings_conflict.py` | 旧指纹 → 409 `conflict` + 文件未被覆盖；新指纹 → 成功；幂等保存 `changed == []` |
 | `test_settings_secrets.py` | get 不回显真值（响应体里搜不到）+ hint 是末 4 位；set 的 `null` **保留**磁盘现值、字符串覆盖生效、嵌套密文（`gateway.auth.keys[0].key`）同样进表 |
 | `test_settings_setup_mode.py` | 钱场景：坏配置 → 降级启动 → 503 `setup_mode` → `set` 修好 → `setup_mode_exited=true` → 会话跑通；另两个用例覆盖顶层数字键与 YAML 语法错（`.bak` 逐字留坏文件） |
 | `test_settings_list_editing.py` | 新增 provider + 新 model id → `/api/models` 立刻出现且能驱动一轮；删空 `agents` → 精确 `empty_list`、文件未变、恢复后可保存 |
 | `test_settings_restart_required.py` | 改 `gateway.port` → 回执点名 + **旧端口照常、新端口无人监听**（不做假热更） |
-| `test_settings_backup.py` | `.bak` 逐字节等于"每次保存前"的文件（覆盖式只留一份） |
+| `test_settings_backup.py` | 旧指纹 → 409 `conflict` + 文件未被覆盖，重取指纹后幂等保存 `changed == []`。连续保存的 `.bak` 逐字等于每次保存前的文件，单键 `extra_body` 跨无关保存原样保留 |
 
 ## 新增一个场景
 
