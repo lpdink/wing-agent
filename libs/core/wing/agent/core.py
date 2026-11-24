@@ -289,6 +289,9 @@ class WingAgent:
         """当前 turn 的开始时刻（UTC）；无进行中 turn 时为 None。"""
         return self._turn_started_at
 
+    def running_tool_starts(self) -> dict[str, datetime]:
+        return self._executor.running_tool_starts()
+
     def uncommitted_message(self) -> dict | None:
         """未提交的 assistant Message 投影（单个 Message 形状 dict | None）。
 

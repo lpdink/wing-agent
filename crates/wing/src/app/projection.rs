@@ -343,26 +343,28 @@ impl App {
                 tool_name,
                 tool_args,
                 tool_call_id,
+                started_at,
                 ..
             } => {
                 self.chat.finish_active_thinking(std::time::Instant::now());
                 self.ctx.current_thinking = None;
                 self.ctx.current_assistant = None;
 
-                // If a streaming cell already exists for this id, update it
+                let started_at = started_at
+                    .as_deref()
+                    .and_then(turn_state::instant_from_utc_iso);
                 if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
                     self.chat.update_tool_args_by_index(idx, tool_args);
                     self.chat.set_tool_status_by_index(idx, ToolStatus::Pending);
-                    // Start timer for Bash tools on execution start.
-                    if tool_name == TOOL_BASH {
-                        self.chat.set_tool_started_at_by_index(idx);
+                    if let Some(at) = started_at {
+                        self.chat.set_tool_started_at_by_index(idx, at);
                     }
                 } else {
-                    let mut block =
-                        ToolCallBlock::new(tool_name.clone(), tool_args, tool_call_id.clone());
-                    // Start timer for Bash tools.
-                    if tool_name == TOOL_BASH {
-                        block.start_timer(std::time::Instant::now());
+                    let mut block = ToolCallBlock::new(tool_name.clone(), tool_args, tool_call_id);
+                    if tool_name == TOOL_BASH
+                        && let Some(at) = started_at
+                    {
+                        block.start_timer(at);
                     }
                     self.chat.push(ChatCell::ToolCall(block));
                 }
@@ -375,6 +377,7 @@ impl App {
                 tool_call_id,
                 tool_result,
                 tool_success,
+                duration_ms,
                 ..
             } => {
                 if self.user_input_sync {
@@ -386,6 +389,7 @@ impl App {
                     tool_call_id,
                     tool_result,
                     tool_success,
+                    duration_ms,
                 );
             }
 
@@ -707,6 +711,7 @@ impl App {
             events,
             status,
             turn_started_at,
+            tool_started_at,
             draft,
             name,
             agent,
@@ -790,7 +795,7 @@ impl App {
         self.model_panel = None;
 
         // Restore working state BEFORE feeding uncommitted content, so
-        // the spinner / Bash timers / terminal title reflect an
+        // the spinner and terminal title reflect an
         // in-progress turn (a mid-turn resume). `turn_started_at`
         // restores the real elapsed instead of recounting from resume.
         //
@@ -831,10 +836,14 @@ impl App {
         //    handle_event as a pseudo-event.
         if let Some(uncommitted_msg) = &uncommitted {
             replay::replay_messages(&mut self.chat, std::slice::from_ref(uncommitted_msg));
-            // A mid-execution Bash card (finalized tool_use, no result
-            // yet) shows elapsed anchored to the turn start.
-            if let Some(instant) = turn_instant {
-                self.chat.mark_pending_bash_running(instant);
+        }
+        if status.turn_in_flight() {
+            for (call_id, started_at) in tool_started_at {
+                if let Some(idx) = self.chat.tool_call_index(&call_id)
+                    && let Some(at) = turn_state::instant_from_utc_iso(&started_at)
+                {
+                    self.chat.set_tool_started_at_by_index(idx, at);
+                }
             }
         }
         // 3. Unfinished tool calls' raw args fragments — through the
@@ -924,6 +933,7 @@ impl App {
         tool_call_id: String,
         tool_result: String,
         tool_success: bool,
+        duration_ms: Option<u64>,
     ) {
         // Special handling for TodoWrite — render as TodoMessage cell
         // anchored directly after its ToolCall cell. Concurrent tool
@@ -938,14 +948,14 @@ impl App {
                 // Mark the ToolCall cell Success (mirrors replay behavior;
                 // the early return previously left it Pending forever).
                 self.chat
-                    .set_tool_result_by_index(idx, tool_result, tool_success);
+                    .set_tool_result_by_index(idx, tool_result, tool_success, duration_ms);
                 // Cannot fail — the ToolCall cell was just located above.
                 let _ = self.chat.insert_after_tool_call(&tool_call_id, todo_cell);
             } else {
                 // Orphan result (lost ToolCall event) — mirror the unified
                 // path below: show the ToolCall block, then the todo list.
                 let mut block = ToolCallBlock::new(tool_name, tool_args, tool_call_id);
-                block.set_result(tool_result, tool_success);
+                block.set_result(tool_result, tool_success, duration_ms);
                 self.chat.push(ChatCell::ToolCall(block));
                 self.chat.push(todo_cell);
             }
@@ -956,10 +966,10 @@ impl App {
         // Unified path: set result on existing ToolCallBlock, or create orphan.
         if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
             self.chat
-                .set_tool_result_by_index(idx, tool_result, tool_success);
+                .set_tool_result_by_index(idx, tool_result, tool_success, duration_ms);
         } else {
             let mut block = ToolCallBlock::new(tool_name, tool_args, tool_call_id);
-            block.set_result(tool_result, tool_success);
+            block.set_result(tool_result, tool_success, duration_ms);
             self.chat.push(ChatCell::ToolCall(block));
         }
     }

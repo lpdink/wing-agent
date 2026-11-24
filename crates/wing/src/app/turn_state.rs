@@ -5,18 +5,10 @@ use std::time::Instant;
 use crate::ui::spinner::SpinnerState;
 use crate::ui::status_bar::TurnUsage;
 
-/// Parse a UTC ISO-8601 turn-start timestamp into a local monotonic `Instant`
-/// representing "when the turn started".
-///
-/// Used on resume: the backend sends `turn_started_at` (UTC) so the TUI can
-/// restore the *real* elapsed time instead of recounting from the resume
-/// moment. Clock skew is saturated — a timestamp in the future (negative
-/// elapsed) clamps to zero (i.e. `Instant::now()`) rather than panicking or
-/// wrapping to a huge value. Returns `None` only when the string is unparseable
-/// or the elapsed exceeds the monotonic clock's range (caller keeps its
-/// existing `started_at`).
-pub fn instant_from_utc_iso(turn_started_at: &str) -> Option<Instant> {
-    let started = chrono::DateTime::parse_from_rfc3339(turn_started_at).ok()?;
+/// Convert a server UTC timestamp to a local monotonic instant for elapsed displays.
+/// Future timestamps clamp to the current instant to account for clock skew.
+pub fn instant_from_utc_iso(timestamp: &str) -> Option<Instant> {
+    let started = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
     let elapsed = chrono::Utc::now().signed_duration_since(started);
     // `to_std()` errors on a negative duration → clamp to zero (clock skew /
     // cross-machine resume).

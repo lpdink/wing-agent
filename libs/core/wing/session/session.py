@@ -724,6 +724,7 @@ class Session:
             messages=self.serialize_messages(),
             uncommitted=agent.uncommitted_message(),
             uncommitted_tools=agent.uncommitted_tools(),
+            tool_started_at=agent.running_tool_starts(),
             pending_user_messages=agent.pending_user_messages(),
             events=[
                 wire_dump(e)

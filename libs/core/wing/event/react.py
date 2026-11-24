@@ -7,6 +7,7 @@ Agent react loop 期间产生的事件：文本、推理、工具调用、指标
 from __future__ import annotations
 
 import uuid as _uuid
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
 from pydantic import BaseModel, Field
@@ -37,14 +38,18 @@ class ToolCallEvent(WingEvent):
     tool_name: str
     tool_args: dict[str, Any]
     tool_call_id: str
+    started_at: datetime | None = None
 
     @classmethod
-    def from_tool_call(cls, tc: ToolCall, session_id: str) -> Self:
+    def from_tool_call(
+        cls, tc: ToolCall, session_id: str, *, started_at: datetime | None = None
+    ) -> Self:
         return cls(
             session_id=session_id,
             tool_name=tc.name,
             tool_args=tc.arguments,
             tool_call_id=tc.id,
+            started_at=started_at,
         )
 
 

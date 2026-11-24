@@ -11,6 +11,8 @@
 //! 镜像），所以这里直接复用 [`wing_api_client::models::SessionUsage`] 而不是
 //! 再定义一份——两份定义必然漂移，而它们本就该逐字段相同。
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -249,6 +251,9 @@ pub struct SessionSnapshot {
     /// turn is in progress.
     #[serde(default)]
     pub turn_started_at: Option<String>,
+    /// UTC execution starts for tools still running, keyed by tool call ID.
+    #[serde(default)]
+    pub tool_started_at: HashMap<String, String>,
     /// Boxed: the agent snapshot is the largest inline payload of this
     /// variant — boxing keeps `WingEvent` small (clippy large_enum_variant).
     #[serde(default)]
@@ -342,6 +347,9 @@ pub enum WingEvent {
         tool_name: String,
         tool_args: serde_json::Value,
         tool_call_id: String,
+        /// UTC execution start, when available.
+        #[serde(default)]
+        started_at: Option<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -373,6 +381,8 @@ pub enum WingEvent {
         tool_call_id: String,
         tool_result: String,
         tool_success: bool,
+        #[serde(default)]
+        duration_ms: Option<u64>,
         #[serde(default)]
         model: String,
         /// 工具产生的媒体引用（如 ReadImage 的图片）——追加属性。
@@ -1702,8 +1712,10 @@ mod tests {
                 uncommitted_tools,
                 events,
                 turn_started_at,
+                tool_started_at,
                 ..
             }) => {
+                assert!(tool_started_at.is_empty());
                 assert_eq!(session_id, "s1");
                 assert_eq!(messages.len(), 1);
                 assert!(uncommitted.is_none());
@@ -1809,7 +1821,10 @@ mod tests {
             "type": "sync_session",
             "session_id": "s1",
             "messages": [],
-            "uncommitted": {"role": "assistant", "content": "partial"},
+            "uncommitted": {"role": "assistant", "content": "partial", "tool_calls": [
+                {"id": "tc2", "name": "Bash", "arguments": {"command": "ls"}}
+            ]},
+            "tool_started_at": {"tc2": "2026-01-01T00:00:01Z"},
             "uncommitted_tools": [
                 {"tool_call_id": "tc1", "tool_name": "Bash", "args_fragment": "{\"c"}
             ],
@@ -1825,8 +1840,10 @@ mod tests {
                 uncommitted,
                 uncommitted_tools,
                 turn_started_at,
+                tool_started_at,
                 ..
             }) => {
+                assert_eq!(tool_started_at["tc2"], "2026-01-01T00:00:01Z");
                 assert!(uncommitted.is_some());
                 assert_eq!(uncommitted_tools.len(), 1);
                 assert_eq!(uncommitted_tools[0]["tool_call_id"].as_str(), Some("tc1"));

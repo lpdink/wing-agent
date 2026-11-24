@@ -15,6 +15,7 @@ import inspect
 import tempfile
 import time
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from pathlib import Path
 
 from wing.common.logger import log
@@ -70,6 +71,10 @@ class ToolExecutor:
     def __init__(self, sink: AgentEventSink) -> None:
         self._sink = sink
         self._tools: dict[str, Tool] = {}
+        self._running_tool_starts: dict[str, datetime] = {}
+
+    def running_tool_starts(self) -> dict[str, datetime]:
+        return self._running_tool_starts.copy()
 
     def set_tools(self, tools: dict[str, Tool]) -> None:
         self._tools = tools
@@ -85,11 +90,16 @@ class ToolExecutor:
         """
         log.info(f"exec_tool_calls: executing {len(pending_tool_calls)} tool calls")
 
+        # Batch-local ownership keeps late cancellation cleanup off the next batch's map.
+        running: dict[str, datetime] = {}
+        self._running_tool_starts = running
+
         async def _exec_one(tc: ToolCall) -> Message:
-            log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={tc.id}")
-            token = _current_tool_call_id.set(tc.id)
+            call_id = tc.id
+            log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={call_id}")
+            token = _current_tool_call_id.set(call_id)
             try:
-                result = await self._execute_one(tc, model)
+                result = await self._execute_one(tc, model, running)
                 if isinstance(result, ToolOutput):
                     # 截断只作用文本信封——media 是引用元数据（字节在存储层），
                     # 截断它没有任何意义。
@@ -103,6 +113,7 @@ class ToolExecutor:
                 content = f"Error executing tool '{tc.name}': {e}"
                 media = []
             finally:
+                running.pop(call_id, None)
                 _current_tool_call_id.reset(token)
             # media 为空时置 None：无媒体消息的落盘记录与引入 media 之前完全一致。
             return Message(
@@ -155,8 +166,12 @@ class ToolExecutor:
             synthesized = sum(1 for item in raw if not isinstance(item, Message))
             log.info(f"exec_tool_calls: interrupted ({synthesized} synthesized)")
             raise InterruptedToolResults(results, original=cancel_err) from None
+        finally:
+            running.clear()
 
-    async def _execute_one(self, tc: ToolCall, model: str) -> str | ToolOutput:
+    async def _execute_one(
+        self, tc: ToolCall, model: str, running: dict[str, datetime]
+    ) -> str | ToolOutput:
         """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。
 
         工具可返回 ``str``（存量，零改动）或 ``ToolOutput``（文本 + 媒体
@@ -168,8 +183,12 @@ class ToolExecutor:
         交 ``duration_ms=None``（账本按「不是一次执行」处理），中断合成的
         结果由 execute() 直接发射、不经这里，同样不会被记成一次执行。
         """
-        self._sink.tool_started(tc)
+        tool = self._tools.get(tc.name)
         started = time.monotonic()
+        started_at = None
+        if tool is not None and not tc.arguments_error:
+            started_at = running[tc.id] = datetime.now(timezone.utc)
+        self._sink.tool_started(tc, started_at=started_at)
 
         def finish(
             content: str,
@@ -202,7 +221,6 @@ class ToolExecutor:
             finish(result, success=False, executed=False)
             return result
 
-        tool = self._tools.get(tc.name)
         if not tool:
             result = (
                 f"Error: unknown tool: {tc.name}, "

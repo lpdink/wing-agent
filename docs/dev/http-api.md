@@ -271,6 +271,8 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 **ReAct 事件**（`event/react.py`）：`turn_started` · `user_message_accepted` · `text` · `reasoning` · `tool_call_stream` · `tool_call` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
 
 > `tool_call_stream`：LLM 生成工具参数期间的流式渲染事件，携带**增量原始 args 文本碎片**（`args_fragment`，首个事件含完整前缀）。后端不解析 partial JSON，前端自行累积 buffer 并容错解析渲染；参数生成结束后由 `tool_call` 事件携带权威解析结果。
+>
+> `tool_call.started_at` 提供工具执行起点（UTC ISO 8601），参数无效或工具不可用时省略。`tool_call_result.duration_ms` 提供服务端以单调钟测量的执行时长，未执行或中断时的合成结果省略。`sync_session.tool_started_at` 与 `session_history_refreshed.tool_started_at` 按 `tool_call_id` 提供仍在执行的工具起点。计时信息仅供实时事件和快照使用，字段缺失时对应时长未知。
 
 会话订阅端按 WS 到达顺序应用用户输入事件：
 

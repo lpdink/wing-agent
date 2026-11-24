@@ -29,7 +29,7 @@ class _Sink:
     def __init__(self) -> None:
         self.finished: list[dict] = []
 
-    def tool_started(self, tc: ToolCall) -> None:
+    def tool_started(self, tc: ToolCall, *, started_at=None) -> None:
         pass
 
     def tool_finished(
