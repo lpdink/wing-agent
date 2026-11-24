@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Callable, Iterator
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log
@@ -43,6 +42,8 @@ from wing.event import (
     ToolCallEvent,
     ToolCallResultEvent,
     ToolCallStreamEvent,
+    ToolExecutionTiming,
+    ToolExecutionTimingEvent,
     ToolResultTurnEvent,
     TurnResultEvent,
     TurnStartedEvent,
@@ -269,9 +270,14 @@ class AgentEventSink:
 
     # ── Tool events ──
 
-    def tool_started(self, tc: ToolCall, *, started_at: datetime | None = None) -> None:
+    def tool_started(self, tc: ToolCall) -> None:
+        self.emit(ToolCallEvent.from_tool_call(tc, self._session_id))
+
+    def tool_execution_timing(self, call_id: str, timing: ToolExecutionTiming) -> None:
         self.emit(
-            ToolCallEvent.from_tool_call(tc, self._session_id, started_at=started_at)
+            ToolExecutionTimingEvent(
+                session_id=self._session_id, tool_call_id=call_id, timing=timing
+            )
         )
 
     def tool_finished(

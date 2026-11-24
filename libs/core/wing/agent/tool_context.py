@@ -8,6 +8,8 @@ WingAgent 实现此 Protocol（结构化子类型，无需显式继承）。
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -64,3 +66,13 @@ class ToolContext(Protocol):
     def register_interrupt_hook(self, hook: Callable[[], None]) -> str: ...
 
     def unregister_interrupt_hook(self, hook_id: str) -> None: ...
+
+
+_tool_execution_measurement: ContextVar[
+    Callable[[float], AbstractContextManager[None]]
+] = ContextVar("tool_execution_measurement", default=lambda _: nullcontext())
+
+
+def measure_tool_execution(timeout: float) -> AbstractContextManager[None]:
+    """Measure the tool's timeout boundary when running under the executor."""
+    return _tool_execution_measurement.get()(timeout)

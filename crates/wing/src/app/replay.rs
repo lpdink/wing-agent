@@ -215,7 +215,7 @@ pub fn replay_messages(chat: &mut ChatView, messages: &[serde_json::Value]) {
                 // replayed result always renders as success — a failed call
                 // that was resumed loses its red state. Honest fix: the
                 // projection carries the fact (same for the VSCode lane).
-                chat.set_tool_result_by_index(idx, content, true, None);
+                chat.set_tool_result_by_index(idx, content, true);
 
                 if let Some(cell) = todo_cell {
                     // Cannot fail — the ToolCall cell was located above.

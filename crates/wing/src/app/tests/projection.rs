@@ -9,6 +9,7 @@ use crate::protocol::AskQuestion;
 use crate::protocol::EventMeta;
 use crate::protocol::SessionSnapshot;
 use crate::protocol::SessionStatus;
+use crate::protocol::ToolExecutionTiming;
 use crate::protocol::WingEvent;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelMode;
@@ -252,9 +253,23 @@ fn test_sync_mid_turn_bash_uses_per_call_starts_and_server_duration() {
             "id": id, "name": "Bash", "arguments": {"command": command, "timeout": 60},
         }));
     }
-    snapshot.tool_started_at = [
-        ("tc-bash".into(), utc_ago(5)),
-        ("tc-second".into(), utc_ago(12)),
+    snapshot.tool_execution_timings = [
+        (
+            "tc-bash".into(),
+            ToolExecutionTiming {
+                elapsed_ms: 5_000,
+                running: true,
+                timeout_secs: Some(300.0),
+            },
+        ),
+        (
+            "tc-second".into(),
+            ToolExecutionTiming {
+                elapsed_ms: 12_000,
+                running: true,
+                timeout_secs: Some(60.0),
+            },
+        ),
     ]
     .into_iter()
     .collect();
@@ -282,12 +297,11 @@ fn test_sync_mid_turn_bash_uses_per_call_starts_and_server_duration() {
         );
     }
 
+    app.handle_event(bash_execution_timing("tc-bash", 7_250, false, 300));
     app.handle_event(bash_timing_event(
         "tool_call_result",
         "tc-bash",
-        serde_json::json!({
-            "tool_result": "done", "tool_success": true, "duration_ms": 7_250,
-        }),
+        serde_json::json!({"tool_result": "done", "tool_success": true, "duration_ms": 10_000}),
     ));
     assert!(tool_header(&app, "tc-bash").ends_with(" 7s/300s"));
     assert!(tool_header(&app, "tc-second").ends_with("/60s"));
@@ -296,7 +310,7 @@ fn test_sync_mid_turn_bash_uses_per_call_starts_and_server_duration() {
 fn bash_timing_event(kind: &str, call_id: &str, fields: serde_json::Value) -> WingEvent {
     let mut event = serde_json::json!({
         "type": kind, "session_id": "test-session", "request_id": "r",
-        "created_at": "2026-01-01T00:00:00Z", "tool_name": "Bash", "tool_call_id": call_id,
+        "created_at": "2100-01-01T00:00:00Z", "tool_name": "Bash", "tool_call_id": call_id,
         "tool_args": {"command": "sleep 100", "timeout": 300},
     });
     event
@@ -306,23 +320,45 @@ fn bash_timing_event(kind: &str, call_id: &str, fields: serde_json::Value) -> Wi
     serde_json::from_value(event).unwrap()
 }
 
+fn bash_execution_timing(call_id: &str, elapsed_ms: u64, running: bool, timeout: u64) -> WingEvent {
+    bash_timing_event(
+        "tool_execution_timing",
+        call_id,
+        serde_json::json!({
+            "timing": {"elapsed_ms": elapsed_ms, "running": running, "timeout_secs": timeout},
+        }),
+    )
+}
+
 #[test]
-fn test_live_bash_uses_server_start_and_omits_unknown_duration() {
+fn test_live_bash_only_uses_process_timing() {
     let mut app = test_app();
     app.handle_event(bash_timing_event(
         "tool_call",
-        "tc-legacy",
+        "tc-denied",
         serde_json::json!({}),
     ));
-    assert_eq!(tool_header(&app, "tc-legacy"), "⦁ Bash(sleep 100)");
+    assert_eq!(tool_header(&app, "tc-denied"), "⦁ Bash(sleep 100)");
+    app.handle_event(bash_timing_event(
+        "tool_call_result",
+        "tc-denied",
+        serde_json::json!({
+            "tool_result": "Command rejected by user.", "tool_success": false, "duration_ms": 2_000,
+        }),
+    ));
+    assert_eq!(tool_header(&app, "tc-denied"), "⦁ Bash(sleep 100)");
+
     app.handle_event(bash_timing_event(
         "tool_call",
         "tc-live",
-        serde_json::json!({"started_at": utc_ago(12)}),
+        serde_json::json!({}),
     ));
+    // The server's wall clock is far ahead. The elapsed baseline and effective
+    // budget come from the execution update, independent of event timestamps and tool args.
+    app.handle_event(bash_execution_timing("tc-live", 12_000, true, 15));
     let header = tool_header(&app, "tc-live");
     assert!(
-        header.ends_with(" 12s/300s") || header.ends_with(" 13s/300s"),
+        header.ends_with(" 12s/15s") || header.ends_with(" 13s/15s"),
         "{header}"
     );
     app.handle_event(bash_timing_event(
@@ -332,20 +368,7 @@ fn test_live_bash_uses_server_start_and_omits_unknown_duration() {
             "tool_result": "Tool call interrupted by user.", "tool_success": false,
         }),
     ));
-    let header = tool_header(&app, "tc-live");
-    assert!(
-        !header.contains("/300s") && !header.contains('≤'),
-        "{header}"
-    );
-
-    app.handle_event(bash_timing_event(
-        "tool_call_result",
-        "tc-orphan",
-        serde_json::json!({
-            "tool_result": "done", "tool_success": true, "duration_ms": 0,
-        }),
-    ));
-    assert!(tool_header(&app, "tc-orphan").ends_with(" 0s/300s"));
+    assert_eq!(tool_header(&app, "tc-live"), "⦁ Bash(sleep 100)");
 }
 
 /// #108: turn end (Done / Interrupted) drops the timer of a Bash card whose
@@ -357,12 +380,12 @@ fn test_live_bash_uses_server_start_and_omits_unknown_duration() {
 fn test_turn_end_drops_bash_timer_without_result() {
     let bash_call = |app: &mut App| {
         app.handle_event(WingEvent::ToolCall {
-            started_at: Some(utc_ago(3)),
             tool_name: "Bash".into(),
             tool_args: serde_json::json!({"command": "sleep 100", "timeout": 300}),
             tool_call_id: "tc-no-result".into(),
             meta: event_meta(),
         });
+        app.handle_event(bash_execution_timing("tc-no-result", 3_000, true, 300));
     };
     let assert_dropped = |app: &App, when: &str| {
         let header = tool_header(app, "tc-no-result");
@@ -936,7 +959,6 @@ fn test_direct_diff_event_repeats_anchor_under_one_tool_call() {
     // diff sibling), preserving emission order.
     let mut app = test_app();
     app.handle_event(WingEvent::ToolCall {
-        started_at: None,
         tool_name: "Edit".into(),
         tool_args: serde_json::json!({"path": "f.txt"}),
         tool_call_id: "tc-all".into(),
@@ -1042,14 +1064,12 @@ fn test_replay_matches_live_cell_sequence_across_two_rounds() {
         meta: meta.clone(),
     });
     live.handle_event(WingEvent::ToolCall {
-        started_at: None,
         tool_name: "Bash".into(),
         tool_args: serde_json::json!({"command": "ls"}),
         tool_call_id: "tc-ls".into(),
         meta: meta.clone(),
     });
     live.handle_event(WingEvent::ToolCallResult {
-        duration_ms: None,
         tool_name: "Bash".into(),
         tool_args: serde_json::json!({"command": "ls"}),
         tool_call_id: "tc-ls".into(),
@@ -1068,7 +1088,6 @@ fn test_replay_matches_live_cell_sequence_across_two_rounds() {
         meta: meta.clone(),
     });
     live.handle_event(WingEvent::ToolCall {
-        started_at: None,
         tool_name: "Read".into(),
         tool_args: serde_json::json!({"path": "a.txt"}),
         tool_call_id: "tc-read".into(),
@@ -1128,7 +1147,6 @@ fn test_replay_matches_live_cell_sequence_after_an_anchored_diff() {
     // Live: tool call → its diff → the next round's reasoning + text.
     let mut live = test_app();
     live.handle_event(WingEvent::ToolCall {
-        started_at: None,
         tool_name: "Edit".into(),
         tool_args: serde_json::json!({"path": "a.rs"}),
         tool_call_id: "tc-edit".into(),
@@ -1585,7 +1603,6 @@ fn test_reasoning_freezes_on_text_and_tool_events() {
             meta: event_meta(),
         },
         WingEvent::ToolCall {
-            started_at: None,
             tool_name: "Bash".into(),
             tool_args: serde_json::json!({"command": "ls"}),
             tool_call_id: "tc".into(),
@@ -1747,7 +1764,6 @@ fn a_steer_commit_sits_between_tool_results_and_next_generation() {
     ));
     for call_id in ["call-a", "call-b"] {
         app.handle_event(WingEvent::ToolCall {
-            started_at: None,
             tool_name: "Read".into(),
             tool_args: json!({}),
             tool_call_id: call_id.into(),
@@ -1756,7 +1772,6 @@ fn a_steer_commit_sits_between_tool_results_and_next_generation() {
     }
     for (call_id, result) in [("call-b", "result B"), ("call-a", "result A")] {
         app.handle_event(WingEvent::ToolCallResult {
-            duration_ms: None,
             tool_name: "Read".into(),
             tool_args: json!({}),
             tool_call_id: call_id.into(),

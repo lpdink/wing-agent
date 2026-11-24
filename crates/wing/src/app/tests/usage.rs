@@ -26,7 +26,7 @@ fn sync_with(session_id: &str, usage: Option<SessionUsage>) -> WingEvent {
         session_id: session_id.into(),
         messages: vec![],
         pending_user_messages: None,
-        tool_started_at: Default::default(),
+        tool_execution_timings: Default::default(),
         uncommitted: None,
         uncommitted_tools: vec![],
         events: vec![],

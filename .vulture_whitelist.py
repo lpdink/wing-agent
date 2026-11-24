@@ -22,7 +22,9 @@ workdir
 skills_info
 service
 default_agent
-tool_started_at  # Rust TUI reads the execution starts in session snapshots.
+elapsed_ms  # Rust TUI reads the process timing in events and session snapshots.
+running
+timing
 
 # 链上事件与工具 schema 字段
 created_at

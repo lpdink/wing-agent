@@ -19,7 +19,6 @@ use super::turn_state;
 use crate::protocol::EventMeta;
 use crate::protocol::SessionSnapshot;
 use crate::protocol::WingEvent;
-use crate::shared::constants::TOOL_BASH;
 use crate::shared::constants::TOOL_TODO;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::AskPayload;
@@ -343,33 +342,31 @@ impl App {
                 tool_name,
                 tool_args,
                 tool_call_id,
-                started_at,
                 ..
             } => {
                 self.chat.finish_active_thinking(std::time::Instant::now());
                 self.ctx.current_thinking = None;
                 self.ctx.current_assistant = None;
 
-                let started_at = started_at
-                    .as_deref()
-                    .and_then(turn_state::instant_from_utc_iso);
                 if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
                     self.chat.update_tool_args_by_index(idx, tool_args);
                     self.chat.set_tool_status_by_index(idx, ToolStatus::Pending);
-                    if let Some(at) = started_at {
-                        self.chat.set_tool_started_at_by_index(idx, at);
-                    }
                 } else {
-                    let mut block = ToolCallBlock::new(tool_name.clone(), tool_args, tool_call_id);
-                    if tool_name == TOOL_BASH
-                        && let Some(at) = started_at
-                    {
-                        block.start_timer(at);
-                    }
-                    self.chat.push(ChatCell::ToolCall(block));
+                    self.chat.push(ChatCell::ToolCall(ToolCallBlock::new(
+                        tool_name.clone(),
+                        tool_args,
+                        tool_call_id,
+                    )));
                 }
 
                 tracing::debug!(tool = %tool_name, "tool call started");
+            }
+            WingEvent::ToolExecutionTiming {
+                tool_call_id,
+                timing,
+                ..
+            } => {
+                self.chat.set_tool_execution_timing(&tool_call_id, timing);
             }
             WingEvent::ToolCallResult {
                 tool_name,
@@ -377,7 +374,6 @@ impl App {
                 tool_call_id,
                 tool_result,
                 tool_success,
-                duration_ms,
                 ..
             } => {
                 if self.user_input_sync {
@@ -389,7 +385,6 @@ impl App {
                     tool_call_id,
                     tool_result,
                     tool_success,
-                    duration_ms,
                 );
             }
 
@@ -711,7 +706,7 @@ impl App {
             events,
             status,
             turn_started_at,
-            tool_started_at,
+            tool_execution_timings,
             draft,
             name,
             agent,
@@ -838,12 +833,8 @@ impl App {
             replay::replay_messages(&mut self.chat, std::slice::from_ref(uncommitted_msg));
         }
         if status.turn_in_flight() {
-            for (call_id, started_at) in tool_started_at {
-                if let Some(idx) = self.chat.tool_call_index(&call_id)
-                    && let Some(at) = turn_state::instant_from_utc_iso(&started_at)
-                {
-                    self.chat.set_tool_started_at_by_index(idx, at);
-                }
+            for (call_id, timing) in tool_execution_timings {
+                self.chat.set_tool_execution_timing(&call_id, timing);
             }
         }
         // 3. Unfinished tool calls' raw args fragments — through the
@@ -933,7 +924,6 @@ impl App {
         tool_call_id: String,
         tool_result: String,
         tool_success: bool,
-        duration_ms: Option<u64>,
     ) {
         // Special handling for TodoWrite — render as TodoMessage cell
         // anchored directly after its ToolCall cell. Concurrent tool
@@ -948,14 +938,14 @@ impl App {
                 // Mark the ToolCall cell Success (mirrors replay behavior;
                 // the early return previously left it Pending forever).
                 self.chat
-                    .set_tool_result_by_index(idx, tool_result, tool_success, duration_ms);
+                    .set_tool_result_by_index(idx, tool_result, tool_success);
                 // Cannot fail — the ToolCall cell was just located above.
                 let _ = self.chat.insert_after_tool_call(&tool_call_id, todo_cell);
             } else {
                 // Orphan result (lost ToolCall event) — mirror the unified
                 // path below: show the ToolCall block, then the todo list.
                 let mut block = ToolCallBlock::new(tool_name, tool_args, tool_call_id);
-                block.set_result(tool_result, tool_success, duration_ms);
+                block.set_result(tool_result, tool_success);
                 self.chat.push(ChatCell::ToolCall(block));
                 self.chat.push(todo_cell);
             }
@@ -966,10 +956,10 @@ impl App {
         // Unified path: set result on existing ToolCallBlock, or create orphan.
         if let Some(idx) = self.chat.tool_call_index(&tool_call_id) {
             self.chat
-                .set_tool_result_by_index(idx, tool_result, tool_success, duration_ms);
+                .set_tool_result_by_index(idx, tool_result, tool_success);
         } else {
             let mut block = ToolCallBlock::new(tool_name, tool_args, tool_call_id);
-            block.set_result(tool_result, tool_success, duration_ms);
+            block.set_result(tool_result, tool_success);
             self.chat.push(ChatCell::ToolCall(block));
         }
     }

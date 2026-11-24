@@ -61,7 +61,7 @@ pub(super) fn sync_event_with_status(
         session_id: "test-session".into(),
         messages,
         pending_user_messages: None,
-        tool_started_at: Default::default(),
+        tool_execution_timings: Default::default(),
         uncommitted,
         uncommitted_tools,
         events,

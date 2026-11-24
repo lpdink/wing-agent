@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use ratatui::text::Line;
 
+use crate::protocol::ToolExecutionTiming;
 use crate::shared::constants::TOOL_BASH;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::picker::ModelPanel;
@@ -634,19 +635,13 @@ impl ChatView {
     }
 
     /// Set the result on a tool call block by index (from RenderContext).
-    pub fn set_tool_result_by_index(
-        &mut self,
-        index: usize,
-        result: String,
-        success: bool,
-        duration_ms: Option<u64>,
-    ) {
+    pub fn set_tool_result_by_index(&mut self, index: usize, result: String, success: bool) {
         if let Some(cached) = self.cells.get_mut(index)
             && matches!(cached.cell(), ChatCell::ToolCall(_))
         {
             cached.mutate(|cell| {
                 if let ChatCell::ToolCall(block) = cell {
-                    block.set_result(result, success, duration_ms);
+                    block.set_result(result, success);
                 }
             });
         } else {
@@ -705,16 +700,16 @@ impl ChatView {
         }
     }
 
-    pub fn set_tool_started_at_by_index(&mut self, index: usize, at: std::time::Instant) {
-        if let Some(cached) = self.cells.get_mut(index)
+    pub fn set_tool_execution_timing(&mut self, call_id: &str, timing: ToolExecutionTiming) {
+        if let Some(index) = self.tool_call_index(call_id)
+            && let Some(cached) = self.cells.get_mut(index)
             && let ChatCell::ToolCall(block) = cached.cell()
             && block.tool_name == TOOL_BASH
             && block.status == ToolStatus::Pending
-            && block.started_at.is_none()
         {
             cached.mutate(|cell| {
                 if let ChatCell::ToolCall(block) = cell {
-                    block.start_timer(at);
+                    block.set_execution_timing(timing);
                 }
             });
         }
@@ -934,7 +929,7 @@ mod tests {
         view.push(ChatCell::ToolCall(block));
 
         let idx = view.len() - 1;
-        view.set_tool_result_by_index(idx, "file contents".into(), true, None);
+        view.set_tool_result_by_index(idx, "file contents".into(), true);
         if let ChatCell::ToolCall(block) = view.cells[idx].cell() {
             assert!(block.result.is_some());
         }
@@ -1153,7 +1148,11 @@ mod tests {
             serde_json::json!({"command": "sleep 5"}),
             "tc-timer".into(),
         );
-        block.start_timer(Instant::now());
+        block.set_execution_timing(ToolExecutionTiming {
+            elapsed_ms: 0,
+            running: true,
+            timeout_secs: None,
+        });
         view.push(ChatCell::ToolCall(block));
 
         let idx = view.tool_call_index("tc-timer").unwrap();
@@ -1181,7 +1180,7 @@ mod tests {
         // status flips away from Pending and ticks stop touching the cell.
         // NOTE: 字符串内容与 Python 端 _INTERRUPTED_RESULT 语义对应，但此处
         // 仅作为"任意失败结果"触发状态翻转，内容本身不影响断言。
-        view.set_tool_result_by_index(idx, "Tool call interrupted by user.".into(), false, None);
+        view.set_tool_result_by_index(idx, "Tool call interrupted by user.".into(), false);
         let frozen = view.cells[idx].generation();
         view.tick_bash_timers();
         assert_eq!(view.cells[idx].generation(), frozen);
@@ -1210,7 +1209,14 @@ mod tests {
 
         // ToolCall event finalizes args; set_final_args flips status to Pending.
         view.update_tool_args_by_index(idx, serde_json::json!({"command": "sleep 5"}));
-        view.set_tool_started_at_by_index(idx, Instant::now());
+        view.set_tool_execution_timing(
+            "tc-stream",
+            ToolExecutionTiming {
+                elapsed_ms: 0,
+                running: true,
+                timeout_secs: None,
+            },
+        );
 
         // Now Pending — a tick inside the same second stays a no-op...
         let before = view.cells[idx].generation();

@@ -23,6 +23,14 @@ use wing_api_client::models::SessionUsage;
 // Shared / nested types
 // ============================================================
 
+/// Elapsed at the server when this execution timing was emitted or snapshotted.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ToolExecutionTiming {
+    pub elapsed_ms: u64,
+    pub running: bool,
+    pub timeout_secs: Option<f64>,
+}
+
 /// Common metadata present on every event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventMeta {
@@ -251,9 +259,8 @@ pub struct SessionSnapshot {
     /// turn is in progress.
     #[serde(default)]
     pub turn_started_at: Option<String>,
-    /// UTC execution starts for tools still running, keyed by tool call ID.
     #[serde(default)]
-    pub tool_started_at: HashMap<String, String>,
+    pub tool_execution_timings: HashMap<String, ToolExecutionTiming>,
     /// Boxed: the agent snapshot is the largest inline payload of this
     /// variant — boxing keeps `WingEvent` small (clippy large_enum_variant).
     #[serde(default)]
@@ -347,9 +354,6 @@ pub enum WingEvent {
         tool_name: String,
         tool_args: serde_json::Value,
         tool_call_id: String,
-        /// UTC execution start, when available.
-        #[serde(default)]
-        started_at: Option<String>,
         #[serde(flatten)]
         meta: EventMeta,
     },
@@ -373,6 +377,15 @@ pub enum WingEvent {
         meta: EventMeta,
     },
 
+    /// Timing at the start or end of a tool's execution boundary.
+    #[serde(rename = "tool_execution_timing")]
+    ToolExecutionTiming {
+        tool_call_id: String,
+        timing: ToolExecutionTiming,
+        #[serde(flatten)]
+        meta: EventMeta,
+    },
+
     /// Tool call result.
     #[serde(rename = "tool_call_result")]
     ToolCallResult {
@@ -381,8 +394,6 @@ pub enum WingEvent {
         tool_call_id: String,
         tool_result: String,
         tool_success: bool,
-        #[serde(default)]
-        duration_ms: Option<u64>,
         #[serde(default)]
         model: String,
         /// 工具产生的媒体引用（如 ReadImage 的图片）——追加属性。
@@ -774,6 +785,7 @@ impl WingEvent {
             Self::Reasoning { .. } => "reasoning",
             Self::ToolCall { .. } => "tool_call",
             Self::ToolCallStream { .. } => "tool_call_stream",
+            Self::ToolExecutionTiming { .. } => "tool_execution_timing",
             Self::ToolCallResult { .. } => "tool_call_result",
             Self::LlmCallMetrics { .. } => "llm_call_metrics",
             Self::Ask { .. } => "ask",
@@ -810,6 +822,7 @@ impl WingEvent {
             | Self::Reasoning { meta, .. }
             | Self::ToolCall { meta, .. }
             | Self::ToolCallStream { meta, .. }
+            | Self::ToolExecutionTiming { meta, .. }
             | Self::ToolCallResult { meta, .. }
             | Self::LlmCallMetrics { meta, .. }
             | Self::Ask { meta, .. }
@@ -1712,10 +1725,10 @@ mod tests {
                 uncommitted_tools,
                 events,
                 turn_started_at,
-                tool_started_at,
+                tool_execution_timings,
                 ..
             }) => {
-                assert!(tool_started_at.is_empty());
+                assert!(tool_execution_timings.is_empty());
                 assert_eq!(session_id, "s1");
                 assert_eq!(messages.len(), 1);
                 assert!(uncommitted.is_none());
@@ -1824,7 +1837,7 @@ mod tests {
             "uncommitted": {"role": "assistant", "content": "partial", "tool_calls": [
                 {"id": "tc2", "name": "Bash", "arguments": {"command": "ls"}}
             ]},
-            "tool_started_at": {"tc2": "2026-01-01T00:00:01Z"},
+            "tool_execution_timings": {"tc2": {"elapsed_ms": 1000, "running": true, "timeout_secs": 30}},
             "uncommitted_tools": [
                 {"tool_call_id": "tc1", "tool_name": "Bash", "args_fragment": "{\"c"}
             ],
@@ -1840,10 +1853,11 @@ mod tests {
                 uncommitted,
                 uncommitted_tools,
                 turn_started_at,
-                tool_started_at,
+                tool_execution_timings,
                 ..
             }) => {
-                assert_eq!(tool_started_at["tc2"], "2026-01-01T00:00:01Z");
+                assert_eq!(tool_execution_timings["tc2"].elapsed_ms, 1000);
+                assert!(tool_execution_timings["tc2"].running);
                 assert!(uncommitted.is_some());
                 assert_eq!(uncommitted_tools.len(), 1);
                 assert_eq!(uncommitted_tools[0]["tool_call_id"].as_str(), Some("tc1"));
