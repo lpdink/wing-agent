@@ -43,8 +43,7 @@
 //   9. 运行 `cargo fmt`（仓库门禁要求 `cargo fmt --check` 干净）。上游文件未经 rustfmt 处理，
 //      因此有纯空白差异；已用「先 rustfmt 上游文件、再与本文件逐行 diff」核对，除上述改动外
 //      逐字一致（核对脚本见 crate 根 NOTICE 的「内联保真度」一节）。
-//   10. 受限解析也接收已扫描的字符缓冲，位置仍以字符计。
-//   除以上十点外与上游逐字一致（含文件内联测试）。
+//   除以上九点外与上游逐字一致（含文件内联测试）。
 // ---------------------------------------------------------------------------
 
 //! The parser. Turns LaTeX math strings into [`EqNode`] trees.
@@ -146,14 +145,8 @@ pub fn parse_equation(input: &str) -> EqNode {
 /// （`\left(\left(…`、`\hat \hat …`、`\frac \frac …`）不产生任何花括号，
 /// 光看括号深度拦不住，只有解析器自己知道递归到多深。
 pub fn parse_equation_with_depth(input: &str, max_depth: usize) -> (EqNode, bool, usize) {
-    parse_chars_with_depth(input.chars().collect(), max_depth)
-}
-
-pub(crate) fn parse_chars_with_depth(chars: Vec<char>, max_depth: usize) -> (EqNode, bool, usize) {
-    let mut parser = EqParser {
-        max_depth,
-        ..EqParser::with_chars(chars)
-    };
+    let mut parser = EqParser::new(input);
+    parser.max_depth = max_depth;
     let node = parser.parse_sequence();
     // 第三个返回值：解析器**消费掉的字符数**。上游在 `&` / `\\` / `}` / `\right` /
     // `\end` 处会直接 `break`，剩下的输入被静默丢掉；调用方用它做"输入被完整消费"
@@ -173,12 +166,8 @@ pub struct EqParser {
 
 impl EqParser {
     pub fn new(input: &str) -> Self {
-        Self::with_chars(input.chars().collect())
-    }
-
-    fn with_chars(chars: Vec<char>) -> Self {
         Self {
-            chars,
+            chars: input.chars().collect(),
             pos: 0,
             depth: 0,
             max_depth: usize::MAX,
