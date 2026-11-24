@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -27,6 +28,7 @@ from wing.config import ApiKeyEntry
 from wing.event import (
     EventTarget,
     NoticeEvent,
+    SyncSessionEvent,
     UserMessageCommittedEvent,
     UserMessageQueuedEvent,
     wire_dump,
@@ -139,77 +141,98 @@ class TestBuildFrames:
         payload = "x" * (SOFT_LIMIT_BYTES + 1)
         frames = build_frames(payload, "sync_session")
         assert len(frames) == 2
-        assert "".join(json.loads(f.text)["data"] for f in frames) == payload
-
-    def test_frames_are_within_soft_limit_and_full(self):
-        """20 MiB → 3 帧；每帧 ≤ 软上限，且尽量撞软上限（不浪费帧数）。"""
-        payload = "x" * (20 * 1024 * 1024)
-        frames = build_frames(payload, "sync_session")
-        assert len(frames) == 3
-        for frame in frames:
-            assert frame.size <= SOFT_LIMIT_BYTES
-            assert frame.size == len(frame.text.encode("utf-8")), "size 必须精确"
-        for frame in frames[:-1]:
-            assert frame.size >= SOFT_LIMIT_BYTES - 4096, (
-                f"帧太短，浪费帧数：{frame.size}"
-            )
-
-    @pytest.mark.parametrize("unit", ["中", "🙂"])
-    def test_multibyte_boundary_never_splits_a_character(self, unit: str):
-        """软上限正好落在字符内部字节位置时，切点必须回退到字符边界。"""
-        payload = unit * (3 * 1024 * 1024)
-        frames = build_frames(payload, "sync_session")
-        assert len(frames) >= 2
-        joined = ""
-        for frame in frames:
-            # 每帧的 data 必须是合法 UTF-8（JSON 解析本身就会校验）
-            joined += json.loads(frame.text)["data"]
-        assert joined == payload
-
-    def test_escaping_is_accounted_for(self):
-        """引号/反斜杠会 JSON 转义膨胀——预算必须按转义后长度算。"""
-        payload = '"' * (12 * 1024 * 1024)
-        frames = build_frames(payload, "sync_session")
-        for frame in frames:
-            assert frame.size <= SOFT_LIMIT_BYTES
-        first = frames[0]
-        assert first.size >= SOFT_LIMIT_BYTES - 4096, (
-            f"转义预算算错会浪费一半帧：{first.size}"
-        )
-
-    def test_raw_control_characters_still_respect_the_limit(self):
-        """载荷含裸控制字符（不是 `json.dumps` 输出）时退回精确测量，仍不超限。
-
-        `json.dumps` 的输出里控制字符必然是转义形态（常态走转义计数的快路径）；
-        这里刻意构造裸控制字符，钉住慢路径的存在与正确性。
-        """
-        payload = 'a\u0001b\\c"d' * (2 * 1024 * 1024)
-        frames = build_frames(payload, "sync_session")
-        assert len(frames) >= 2
-        for frame in frames:
-            assert frame.size <= SOFT_LIMIT_BYTES
-            assert frame.size == len(frame.text.encode("utf-8"))
-        joined = "".join(json.loads(f.text)["data"] for f in frames)
-        assert joined == payload
-
-    def test_envelope_fields_are_stable(self):
-        payload = "x" * (SOFT_LIMIT_BYTES + 1)
-        frames = build_frames(payload, "sync_session")
+        assert all(frame.size <= SOFT_LIMIT_BYTES for frame in frames)
         envelopes = [json.loads(f.text) for f in frames]
         assert [set(e) for e in envelopes] == [
             {"type", "id", "index", "count", "of_type", "data"}
-        ] * len(envelopes)
+        ] * 2
         assert {e["type"] for e in envelopes} == {"_chunk"}
         assert {e["of_type"] for e in envelopes} == {"sync_session"}
-        assert [e["index"] for e in envelopes] == list(range(len(envelopes)))
-        assert {e["count"] for e in envelopes} == {len(envelopes)}
+        assert [e["index"] for e in envelopes] == [0, 1]
+        assert {e["count"] for e in envelopes} == {2}
         assert len({e["id"] for e in envelopes}) == 1, "同一事件共享 id"
+        assert "".join(e["data"] for e in envelopes) == payload
 
-    def test_chunk_ids_are_not_reused_across_events(self):
-        payload = "x" * (SOFT_LIMIT_BYTES + 1)
+    def test_frames_are_within_soft_limit_and_full(self, monkeypatch):
+        soft = 1024
+        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", soft)
+        payload = "x" * (soft * 5 // 2)
+        frames = build_frames(payload, "notice")
+        assert len(frames) == 3
+        for frame in frames:
+            assert frame.size <= soft
+            assert frame.size == len(frame.text.encode("utf-8")), "size 必须精确"
+        for frame in frames[:-1]:
+            assert frame.size >= soft - 1, f"帧太短，浪费帧数：{frame.size}"
+        envelopes = [json.loads(f.text) for f in frames]
+        assert {e["count"] for e in envelopes} == {3}
+        assert [e["index"] for e in envelopes] == [0, 1, 2]
+        assert "".join(e["data"] for e in envelopes) == payload
+
+    @pytest.mark.parametrize("unit", ["中", "🙂"])
+    def test_multibyte_boundary_never_splits_a_character(self, unit: str, monkeypatch):
+        soft = 1025
+        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", soft)
+        monkeypatch.setattr("wing.gateway.frames._chunk_ids", iter((42,)))
+        payload = unit * 512
+        frames = build_frames(payload, "sync_session")
+        assert len(frames) >= 2
+        assert 0 < soft - frames[0].size < len(unit.encode("utf-8"))
+        for frame in frames:
+            assert frame.size == len(frame.text.encode("utf-8")) <= soft
+        assert "".join(json.loads(f.text)["data"] for f in frames) == payload
+
+    def test_escaping_is_accounted_for(self, monkeypatch):
+        soft = 1024
+        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", soft)
+        payload = '"\\' * 768
+        frames = build_frames(payload, "sync_session")
+        assert len(frames) == 4
+        for frame in frames:
+            assert frame.size == len(frame.text.encode("utf-8")) <= soft
+        assert frames[0].size >= soft - 1, "转义预算算错会浪费一半帧"
+        assert "".join(json.loads(f.text)["data"] for f in frames) == payload
+
+    def test_raw_control_characters_still_respect_the_limit(self, monkeypatch):
+        """裸控制字符不会出现在 `json.dumps` 的输出里，计长时必须走精确测量。"""
+        soft = 1024
+        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", soft)
+        payload = 'a\u0001b\\c"d' * 256
+        frames = build_frames(payload, "sync_session")
+        assert len(frames) >= 2
+        for frame in frames:
+            assert frame.size == len(frame.text.encode("utf-8")) <= soft
+        assert "".join(json.loads(f.text)["data"] for f in frames) == payload
+
+    def test_chunk_ids_are_not_reused_across_events(self, monkeypatch):
+        soft = 1024
+        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", soft)
+        payload = "x" * (soft + 1)
         first = {json.loads(f.text)["id"] for f in build_frames(payload, "notice")}
         second = {json.loads(f.text)["id"] for f in build_frames(payload, "notice")}
+        assert len(first) == len(second) == 1
         assert first.isdisjoint(second)
+
+    def test_sync_session_wire_fixture(self, monkeypatch):
+        monkeypatch.setattr("wing.gateway.frames.SOFT_LIMIT_BYTES", 240)
+        monkeypatch.setattr("wing.gateway.frames._chunk_ids", iter((42,)))
+        event = SyncSessionEvent(
+            session_id="wire-fixture",
+            status="idle",
+            created_at="2026-09-13T00:00:00+00:00",
+            request_id="wire-req",
+            uuid="wire-uuid",
+            messages=[{"role": "assistant", "content": '中🙂 "quote" \\ path'}],
+        )
+        payload = json.dumps(wire_dump(event))
+        frames = build_frames(payload, event.type)
+        fixture = (
+            Path(__file__).resolve().parents[3]
+            / "crates/wing/tests/fixtures/sync_session_chunked.jsonl"
+        )
+        actual = "\n".join([payload, *(frame.text for frame in frames)]) + "\n"
+        assert len(frames) > 1
+        assert fixture.read_bytes() == actual.encode("utf-8")
 
     def test_limits_are_constants(self):
         assert SOFT_LIMIT_BYTES == 8 * 1024 * 1024
