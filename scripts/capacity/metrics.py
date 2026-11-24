@@ -19,8 +19,7 @@
    那一次请求。仍有多条候选（真重试）才整轮丢弃——不猜。
 
 发射时刻来自上游冻结接口（``FakeProvider.frame_emits``）。档位编排读取快照，接口缺失时
-标记「延迟指标不可用」；直接通过 :func:`build_emit_ledger` 从 Provider 建账时，同一情况
-抛 :class:`DeliveryUnavailable`。
+标记「延迟指标不可用」。
 """
 
 from __future__ import annotations
@@ -75,10 +74,6 @@ SPREAD_PERCENTILES: tuple[tuple[str, float], ...] = (
     ("p99", 99.0),
     ("p999", 99.9),
 )
-
-
-class DeliveryUnavailable(RuntimeError):
-    """假 Provider 不提供逐帧发射时刻——投递延迟不可测。"""
 
 
 #: 分片样本文件（跨进程契约）的必填键。两侧都过 :func:`check_shard_payload`：
@@ -189,18 +184,6 @@ class EmitLedger:
 
     def kinds(self, request_index: int) -> Mapping[str, tuple[float, ...]]:
         return self.by_request.get(request_index, {})
-
-
-def build_emit_ledger(provider: Any) -> EmitLedger:
-    """从 ``FakeProvider.frame_emits`` 建按通道分组的账本（缺接口即抛）。"""
-    emits = getattr(provider, "frame_emits", None)
-    if emits is None:
-        raise DeliveryUnavailable(
-            "frame_emits not available: the fake provider does not record per-frame "
-            "emit times, so delivery latency cannot be paired against the emitter "
-            "clock (needs FakeProvider.frame_emits)"
-        )
-    return emit_ledger_from_snapshot(emits)
 
 
 def emit_ledger_from_snapshot(emits: Iterable[Any]) -> EmitLedger:
@@ -355,8 +338,3 @@ def pair_delivery(
                 result.reasons[f"unexpected_events:{kind}"] += len(arrivals) - paired
                 result.dropped += len(arrivals) - paired
     return result
-
-
-def has_frame_emits(provider: Any) -> bool:
-    """读取一次快照以探测能力；也需要快照的调用方应直接读取属性。"""
-    return getattr(provider, "frame_emits", None) is not None

@@ -141,7 +141,10 @@ def percentile(values: Sequence[float], pct: float) -> float:
 def percentiles(
     values: Sequence[float], labeled_pcts: Iterable[tuple[str, float]]
 ) -> dict[str, float]:
-    """对同一批样本排序一次，按标签返回各 nearest-rank 百分位。"""
+    """对同一批样本排序一次，按输入的标签顺序返回各 nearest-rank 百分位。
+
+    样本为空且请求了分位时抛 ``ValueError``。标签为空时返回 ``{}``。
+    """
     ordered = sorted(values)
     return {label: _nearest_rank(ordered, pct) for label, pct in labeled_pcts}
 

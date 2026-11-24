@@ -1090,7 +1090,7 @@ def _assemble(
     samples["delivery_available"] = None if provider is None else emits is not None
     if emits is not None and turns:
         ledger = metrics.emit_ledger_from_snapshot(emits)
-        del emits  # 全表快照在分组后即可释放，避免与配对样本同时驻留。
+        del emits  # 释放本地临时 tuple 引用，FrameEmit 仍由 Provider 持有。
         pairing = metrics.pair_delivery(
             ledger,
             provider.requests.all(),
