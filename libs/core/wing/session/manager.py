@@ -1463,13 +1463,15 @@ class SessionManager:
 
         Raises:
             LookupError: 内存与磁盘都没有该会话（调用方负责映射错误面）
-            InvalidInputError: 携带的媒体引用不可兑现（id 非法 / 对象不存在）
+            InvalidInputError: 输入校验失败或定向答复已无待答的工具调用
         """
         assert session_id is not None, "session_id is required by WingRuntime"
 
         session = self.ensure_loaded(session_id)
         validate_media_refs(session.store, session.session_id, media)
         session.agent.require_input_id_available(request_id)
+        if tool_call_id is not None:
+            session.agent.require_feedback_waiter(tool_call_id)
 
         event_bus.emit(
             DeliveredEvent(

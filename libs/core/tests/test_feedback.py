@@ -13,6 +13,7 @@ import pytest
 
 from wing.agent import WingAgent
 from wing.agent.tool_executor import _current_tool_call_id
+from wing.common.utils import InvalidInputError
 from wing.event import AskEvent
 from wing.request_context import set_request_context, reset_request_context
 from wing.runtime import WingRuntime
@@ -128,17 +129,19 @@ async def test_unaddressed_message_goes_to_inbox_not_waiter(runtime: WingRuntime
 
 
 @pytest.mark.asyncio
-async def test_stale_tool_call_id_falls_through_to_inbox(runtime: WingRuntime):
-    """定向到已失效（超时/不存在）的 waiter id：消息落 inbox，不丢失。"""
-    session = runtime.create_session()
-    agent = session.agent
-    # 停掉 worker：本文件只验证 post 路由与 waiter 机制，
-    # 避免 worker 消费 inbox 中的测试消息触发 LLM 调用
+@pytest.mark.parametrize("tool_call_id", ["unknown", "resolved"])
+async def test_directed_feedback_requires_live_waiter(
+    runtime: WingRuntime, tool_call_id: str
+):
+    agent = runtime.create_session().agent
     agent._worker.cancel()
+    future = agent._inbox.register_waiter("resolved")
+    await agent.post("first reply", tool_call_id="resolved")
+    assert future.result() == "first reply"
 
-    await agent.post("late reply", tool_call_id="tc_gone")
-    inbound = agent._inbox.drain()[0]
-    assert inbound.message.content == "late reply"
+    with pytest.raises(InvalidInputError, match="no active feedback waiter"):
+        await agent.post("another reply", tool_call_id=tool_call_id)
+    assert not agent.has_pending_input
 
 
 @pytest.mark.asyncio
@@ -156,10 +159,9 @@ async def test_feedback_timeout_unregisters_waiter(runtime: WingRuntime):
     assert "tc_1" not in agent._inbox._feedback_waiters
     assert agent.status == "idle"
 
-    # 超时后该 id 的迟到回复落 inbox
-    await agent.post("better late than never", tool_call_id="tc_1")
-    inbound = agent._inbox.drain()[0]
-    assert inbound.message.content == "better late than never"
+    with pytest.raises(InvalidInputError, match="no active feedback waiter"):
+        await agent.post("better late than never", tool_call_id="tc_1")
+    assert not agent.has_pending_input
 
 
 @pytest.mark.asyncio

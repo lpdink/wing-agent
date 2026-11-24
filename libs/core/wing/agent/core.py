@@ -262,6 +262,9 @@ class WingAgent:
     def require_input_id_available(self, request_id: str | None) -> None:
         self.input_request_ids.require_available(request_id)
 
+    def require_feedback_waiter(self, tool_call_id: str) -> None:
+        self._inbox.require_feedback_waiter(tool_call_id)
+
     @property
     def has_pending_input(self) -> bool:
         """inbox 里是否有待处理输入（已投递、worker 尚未取走）。"""
