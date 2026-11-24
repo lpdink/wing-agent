@@ -304,6 +304,8 @@ class TestTraceChain:
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         chain = tl.trace_chain()
         assert chain == []
+        with pytest.raises(IndexError):
+            tl._leaf_uuid()
 
     def test_trace_chain_single(self, tmp_dir):
         """trace_chain with single message."""
@@ -366,6 +368,17 @@ class TestTraceChain:
         assert chain.walk_full_chain() == [replacement]
         assert chain.walk_full_chain("sibling") == [parent, sibling]
         assert chain.trace_chain("missing") == []
+
+    def test_leaf_fallback_uses_last_append_when_every_uuid_is_a_parent(self):
+        chain: TrackedList[Message] = TrackedList()
+        original = Message(role="user", uuid="root", parent_uuid="child")
+        child = Message(role="assistant", uuid="child", parent_uuid="root")
+        replacement = Message(role="user", uuid="root")
+        chain.extend_detached([original, child, replacement])
+
+        # The older record leaves "child" in the parent set after "root" is replaced.
+        assert chain.trace_chain() == [replacement]
+        assert chain.walk_full_chain() == [replacement]
 
     def test_full_walk_does_not_follow_unzip_with_an_empty_parent(self):
         chain: TrackedList[Message] = TrackedList()
