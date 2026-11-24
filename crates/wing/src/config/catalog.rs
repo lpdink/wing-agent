@@ -1789,9 +1789,11 @@ mod tests {
             ImagesMode::Auto
         );
         let full_dump = parsed.to_yaml();
-        for choice in ["thinking: Hidden", "math: Off", "images: Off"] {
-            assert!(full_dump.contains(choice), "{full_dump}");
-        }
+        assert_eq!(
+            doc_from_text(&full_dump)["rendering"],
+            json!({"thinking": "Hidden", "math": "Off", "images": "Off"}),
+            "{full_dump}"
+        );
         let full = parse(&full_dump);
         assert_eq!(full.rendering.thinking, ThinkingMode::Hidden);
         assert_eq!(full.rendering.math, MathMode::Off);
