@@ -38,7 +38,7 @@
 - **为什么拖动是比例映射（不能改成「每行 3 行内容」）**：手柄的行号就是内容的进度，所以「手柄不落后于手指」⟺「拖完整条轨道 = 内容从头走到尾」⟺ `1 指针行 = max_scroll / travel` 行内容（`travel = 轨道行数 - 手柄行数`）。而「每行只走 3 行」只有在 `max_scroll == 3 × travel`（内容刚好比视口多 3~4 屏）时才与跟手同时成立；超长会话里两者数学上互斥。浏览器滚动条看起来连续，是因为它是**像素**级的比例映射（整条轨道上千像素），终端只有行、轨道只有几十行，所以这个步长必然偏大——**这是终端的量化限制，不是可调参数**。
 - **细粒度交给谁**：指针停在滚动条上**滚轮**（3 行/档，与滚轮完全一致）、`Ctrl+↑/↓`（1 行/次）、PageUp/PageDown（翻页）；`Home`/`Ctrl+Home` 类跳转仍是一步到位。
 - **与文本选择的分派**（`App::handle_mouse`）：`Down` / `Drag` / `Up` 先问滚动条（`scrollbar_at`：在滚动条列上才算），未命中才交给 chat 带的选区；`Moved` 只做滚动条 hover。拖动中的归属由 `scrollbar.dragging` 决定，因此「在 chat 里拖选时划到滚动条列上」仍然是扩选，不会突然开始拖滚动条。
-- **滚动条列不是内容**：内容区 = chat 带减去 gutter，渲染矩形本身就把它排除在外，于是换行预算、用户消息背景框、diff tint、选区高亮与复制都**按构造**停在它左边——不再需要逐点钳制（原 `App::off_the_bar` 与 `ChatView::set_content_width` 因失效而删除）。gutter 的数值就是唯一的调节旋钮。
+- **滚动条列不是内容**：内容区 = chat 带减去 gutter，渲染矩形本身就把它排除在外，于是换行预算、用户消息背景框、diff tint、选区高亮与复制都**按构造**停在它左边——不再需要逐点钳制。gutter 的数值就是唯一的调节旋钮。
 - **不消费滚轮**：滚轮分支在 `handle_mouse` 里先匹配，指针停在滚动条上时滚轮照常滚 chat。
 - **跟随契约**：跳转 / 拖动经 `ChatView::scroll_to` 复用同一套判定（离开底部 = 阅读态，到最底部 = 重新武装跟随）。
 - **状态清理**：几何为 `None` 的那一帧（内容不再溢出）顺手清理 hover/drag，按下未命中滚动条、或窗口失焦时同样清理——条不在屏幕上就不保留激活态。
@@ -58,7 +58,8 @@
 | 选区状态机（纯逻辑，可单测） | `crates/wing/src/ui/selection.rs` |
 | 坐标映射 / 高亮 patch / 文本快照 | `crates/wing/src/ui/chat_view/frame.rs` |
 | 事件接线 / 冻结跟随 / 失效规则 / 自动滚动 | `crates/wing/src/app/mod.rs` |
-| 剪贴板链路 | `crates/wing/src/util/clipboard.rs` + `app/runner.rs` |
+| 复制（平台命令 / OSC 52） | `crates/wing/src/util/clipboard.rs` + `app/runner.rs` |
+| 粘贴（OSC 5522 / 本地读取） | `crates/wing/src/tui/clipboard_protocol.rs` + `util/clipboard_paste.rs` |
 
 **坐标模型**：选区锚定在**内容坐标** `(vrow, col)`（`vrow` = chat 内容虚拟行 = header + cells + pending 的连续空间）。每帧通过 `ChatView::geometry()`（**上一帧真实使用的** chat 区域 Rect + `scroll_offset`）双向映射到屏幕行。指针越界时先**夹到可见带边缘**、再**夹到内容高度**（`last_total - 1`），而不是拒绝——这正是边缘拖拽能继续扩展选区、并驱动边缘自动滚动的前提。内容纯追加时锚点不漂移（追加不改变已有行号）。
 
@@ -78,9 +79,9 @@
 
 **失效规则（保守）**：按下时记录**区域专属**的指纹，每帧渲染前比对、松手时**再比对一次**（重建可能发生在同一轮循环的 draw 之后），任一变化即中止选择并清高亮。chat 选区用 `(cells 数, pending 数, 终端宽度, 重建计数)`（cell 增删 / pending 提升 / compaction / rewind / 会话切换 / 窗口缩放都会命中；最后一项 `rebuilds` 由 `ChatView::clear()` 自增，覆盖「重建后计数恰好相同」的场景；**纯内容追加（流式 delta、既有 cell 文本增长）不改变指纹，因此不失效**——这是与「total 高度变化即清」的关键区别）；composer 选区用 `(草稿文本, 终端宽度)`（任何编辑即中止，见下节）。焦点丢失（`Focus(false)`，拖拽松手事件永不到达）同样中止；`cancel_selection` 按区域恢复——只有 chat 选区会解除跟随冻结。
 
-**与滚动条**：滚动条占用的那一列（chat 区域最右一列）在滚动条存在的那些帧里永远归滚动条——命中它的按下走滚动条，选区映射也被夹掉（`App::off_the_bar`）；否则复制出的文本会混进 `│`、高亮也会把滚动条反显。滚动条的拖动同样不产生复制意图。内容不溢出（没有滚动条）时整列照常可选，分派见上文「滚动条只吃按下 / 拖动 / hover」。
+**与滚动条**。选区只映射 chat 内容矩形，静态 gutter 始终留在矩形外。滚动条出现时，落在轨道上的按下和随后的拖动交给滚动条处理。
 
-**已知限制**：选择覆盖 chat 区域与 composer（见下一节；状态栏 / 弹层不参与）；选择期间滚轮仍可滚动，滚出快照范围的行不参与复制（所见即所得）；拖动期间内容重建（compaction / rewind / 会话切换）会中止选择，需重新拖选；OSC52 在部分终端仍可能「假成功」（无法探测，本地平台命令优先已缓解）；不做词/行粒度、键盘选择、Esc 清除、搜索；内容溢出时最右一列被滚动条占据，那一列的字选不到也复制不到（取舍见上文——`set_content_width` 对整段生效，不只是拖选端点）。
+**已知限制**：选择覆盖 chat 区域与 composer（见下一节；状态栏 / 弹层不参与）；选择期间滚轮仍可滚动，滚出快照范围的行不参与复制（所见即所得）；拖动期间内容重建（compaction / rewind / 会话切换）会中止选择，需重新拖选；OSC52 在部分终端仍可能「假成功」（无法探测，本地平台命令优先已缓解）；不做词/行粒度、键盘选择、Esc 清除、搜索。
 
 ## composer 指针（`tui-composer-pointer`）
 
@@ -463,24 +464,19 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 | 行缓存携带链接 + 行号是否精确 | `crates/wing/src/ui/cached_cell.rs` |
 | 本帧链接快照 / OSC8 注入 / 命中查询 | `crates/wing/src/ui/chat_view/link.rs` |
 | 目标解析 / argv / 进程启动 | `crates/wing/src/util/open.rs` + `app/runner.rs`（`AppIntent::OpenLink`） |
-| 点击 vs 拖动分流 | `crates/wing/src/app/mod.rs`（`App::mouse_link`） |
+| 点击与拖动分流 | `crates/wing/src/app/selection_session.rs`（`chat_selection_press` / `chat_selection_release`） |
 
-**OSC8 注入方式**：ratatui 0.30 没有任何超链接 API（`Cell` 只有 symbol/style/diff_option），所以序列写进 **`Cell` 的 symbol**：`ESC]8;;URL ST` + 字素 + `ESC]8;; ST`，**逐字素头**注入（宽字符只注入头单元，尾单元是填充空格，写进去会覆盖半个宽字）。两个必须同时做的细节：
+**OSC8 注入方式**。每个字素头的 `Cell::symbol` 都包含 `ESC]8;;URL ST`、字素和 `ESC]8;; ST`，宽字尾单元保留给终端占位。diff 只写部分格子时，每个重绘字素都带完整的链接序列。每帧 ratatui 重置 Buffer，同一 URL 的序列逐字节稳定。
 
-1. **`CellDiffOption::ForcedWidth(1)`**：`Cell::cell_width()` 会用 `symbol().cell_width()` 量宽度，而 `BufferDiff` 用它跳过宽字符的尾随单元格（`self.pos += cell_width - 1`）——不 pin 住宽度，一条 URL 长度的 symbol 会让 diff **跳过链接后面的一整行**（屏幕残留旧内容）。ratatui 为此场景预留了 `ForcedWidth`（其文档原文提到转义序列的宽度与屏幕不一致，自带 kitty 占位符测试同款用法）。
-2. **逐字素头自带 open/close**（而不是「首单元开、末单元关」）：diff 只重绘部分单元格时（例如滚动后只有部分格变化），每个被写出的单元格都自带完整序列，终端不会丢掉某个字符的链接属性。代价是链接单元格多 ~`URL 长度 + 12` 字节，仅在实际重绘时产生。
+**`CellDiffOption::ForcedWidth` 必须等于终端实际渲染的字素列宽**。缺少这一宽度覆盖时，OSC8 的 URL 会参与 `Cell::symbol` 的宽度测量，`BufferDiff` 可能把链接到行尾的后续格当成同一宽字符的尾单元跳过，留下旧内容。`CrosstermBackend::draw` 对 `last_x + 1` 的相邻格省略 `MoveTo`。若将实际占两列的字素标成一列，局部重绘就可能省略必要的定位，后续格在终端上向右偏一列。`a_wide_linked_grapheme_moving_one_column_keeps_the_wire_in_step` 核对真实 diff 字节和终端光标，`scrolling_linked_cjk_keeps_the_terminal_in_step` 核对整帧字符列宽。
 
-每帧开始时 ratatui 会 `reset()` 下一个 buffer（"each render pass starts from an empty buffer"），所以注入不跨帧残留；同一 URL 的序列逐字节恒定，连续帧的 `Cell` 相等 → **diff 不抖动**。
+**链接区间链路**：`MarkdownSegment.link_target`（解析层已产出）→ `line_link_spans()`（列 = 前序段 `unicode-width` 累加）→ 与渲染行平行的 `Vec<Vec<LinkSpan>>`（`ComposedLines`；流式路径在 `compose_into` 里加 2 列前缀偏移，`ChatCell::render_lines` 的重放路径同理）→ `ChatViewWidget::render` 逐行映射成**屏幕绝对列**，落到两个消费者：① 本帧 Buffer 注入 OSC8；② `ChatView::frame_links` 快照（`link_at(column, row)`）。
 
-**`ForcedWidth` 必须等于终端真正渲染的宽度**（窄字 1、宽字 / CJK / emoji 2），不能一律写 1：`CrosstermBackend::draw` 对「下一个 cell 正好在 `last_x + 1`」的情况**跳过 `MoveTo`**，这个捷径只在「每个打印出来的符号正好推进一列」时成立。宽字素的 cell 若自称 1 列而终端按 2 列推进，它之后的每个 cell 都会被写到右边一格（`百度` 变 `百 度`、行尾挤到下一行），而且**只在部分重绘时出现**——整帧重绘是按顺序整行写出的，反而看不出来（这就是「静止没事、一滚动就拖影、强制重绘能消失」的成因）。回归测试：`a_wide_linked_grapheme_moving_one_column_keeps_the_wire_in_step`（重放真实 diff 流 + 模拟终端光标，断言没有错位）、`scrolling_linked_cjk_keeps_the_terminal_in_step`（整帧 + 断言每个 cell 的 `cell_width()` 等于可见宽度）。
-
-**链接区间链路**：`MarkdownSegment.link_target`（解析层已产出）→ `line_link_spans()`（列 = 前序段 `unicode-width` 累加）→ 与渲染行平行的 `Vec<Vec<LinkSpan>>`（`ComposedLines`；流式路径在 `compose_into` 里加 2 列前缀偏移，`to_lines` 重放路径同理）→ `ChatViewWidget::render` 逐行映射成**屏幕绝对列**，落到两个消费者：① 本帧 Buffer 注入 OSC8；② `ChatView::frame_links` 快照（`link_at(column, row)`）。
-
-**行号必须精确**：只有当 cell 的每一行显示宽度 ≤ 渲染宽度时（`CellLines::rows_exact`）才建立链接——此时 `Paragraph` 不可能折行，屏幕行号 == cell 内行号，列区间精确。两个取值来源：① 流式 cell 由 `stream.rs` 的硬折行保证恒真；② `to_lines`（冻结/replay/resize 之后）在**有链接时**逐行量一次（`!composed.has_links() || composed.rows_are_exact(width)`），随 width+generation 缓存。**真的会不成立**：IR 层的 UAX #14 预折行只作用于 prose，代码块与缩进代码是显式豁免的（`wrap.rs::is_prose_line`），所以「同一 cell 里有一个超宽代码行 + 后面有链接」时 `Paragraph` 会把代码行折成两屏行，之后的行号整体错位。此时该 cell **一个链接都不建立**（`rows_are_exact == false`）——宁可链接点不开，也不能把命中框和 OSC8 注入到代码文本上（保守降级，不猜列）。单测：`an_overwide_code_line_puts_the_cell_off_limits` / `an_overwide_indented_code_line_puts_the_cell_off_limits` / `a_fitting_code_line_keeps_its_link_on_the_right_row`。**链接目标不使用 `Style` 承载**（不可行：`set_stringn` 会丢掉含控制字符/零宽的字素，URL 的可见字符还会被算进折行列宽）。
+**行号必须精确**。`CellFrame::rows_exact` 保证带链接的行可直接映射到屏幕行。流式路径由硬折行保证，冻结、回放或改宽后的路径用 `ComposedLines::rows_are_exact` 检查，并按宽度与 generation 缓存。代码块和缩进代码豁免 prose 的 UAX #14 预折行，若该 cell 内有超宽代码行，`Paragraph` 的折行会让后续屏幕行偏移，此时该 cell 跳过全部链接注入与命中登记。边界由 `an_overwide_code_line_puts_the_cell_off_limits`、`an_overwide_indented_code_line_puts_the_cell_off_limits` 和 `a_fitting_code_line_keeps_its_link_on_the_right_row` 覆盖。链接目标与文本样式分开存储，避免折行把 URL 算入可见列宽。
 
 **复制仍然干净**：`buffer_row_graphemes` 读 symbol 前先 `strip_osc8`，所以选区快照的宽度不被 URL 撑大、复制文本不含控制字符——**任何从 Buffer 反读文本/宽度的地方都必须先剥序列**。
 
-**点击 vs 拖动**：`Down(Left)` 在 chat band 内先用**本帧快照**查链接（记进 `App::mouse_link`）**再**照旧开始选择（拖动要能选中链接文本）；`Up(Left)` 在「记录了链接且 `is_dragged() == false` 且释放点 == 按下点（`selection.anchor()`）」时打开并提前返回（零宽单击本来也不复制，所以不与复制冲突）。两个条件都查是刻意的：终端丢 motion 事件时不能靠「没收到 `Drag`」把一次真实的拖拽当成单击（reference 的 `isClick = !dragged && anchor == point` 同款）。`cancel_selection`（焦点丢失 / 结构失效）连 `mouse_link` 一起清——中止的手势不打开任何东西。命中来自按下那一帧，滚动/流式追加都不会让「按下 A、松开 B」。toast 画在 chat band 之上，所以 `render_toast` 返回绘制区域、`ChatView::mask_links` 把被盖住的命中框删掉（看不见的链接不可点）。**滚动条列同样会盖住链接**，但它不需要 `mask_links`：`App::mouse_press` 在链接命中之前就把落在滚动条列上的按下交给滚动条，释放点又被 `App::off_the_bar` 夹回左侧一列——那一列进不了 chat 的点击路径，点滚动条不会打开它盖住的链接。
+**点击与拖动**。`chat_selection_press` 在开始选择时记录按下帧的原始链接目标。松开时须同时满足没有拖动记录、释放点存在且等于按下锚点，才发出 `AppIntent::OpenLink`。比较锚点覆盖终端丢失 motion 事件的情况。取消选区会清除记录。toast 与设置卡片调用 `ChatView::mask_links` 删除与遮挡区域相交的整个命中框。滚动条由鼠标路由优先消费，静态 gutter 把它留在 chat 内容矩形外。
 
 **目标解析与打开方式**（`util/open.rs`）：带 scheme（`http` / `https` / `mailto` / `file` …；单个字母 + `:` 视为 Windows 盘符不算 scheme）= URL → 平台默认启动器（macOS `open` / Windows `cmd /c start ""` / Linux `xdg-open`）。其余按本地路径处理：`~` 展开为 `$HOME`、`file://`（含可选 `localhost`）剥离、**相对路径锚定 `current_dir()`（wing CLI 启动目录，不是会话 workspace）**、`#L10` / `#L10C5` / `:10` / `:10:5` 后缀剥离并解析成行（列）；路径先 `canonicalize`（失败则退化为绝对路径）再 `exists()` 检查——不存在就**不启动任何进程**。有行号时先按白名单找支持行跳转的编辑器 CLI（`code -g` / `subl` / `zed`，PATH 探测不用 `which` 子进程），都没有才退回默认程序（文件仍会打开，行号降级——这是「尽量」的诚实边界；`open` / `xdg-open` 都不接受 `path:line`）。
 

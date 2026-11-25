@@ -26,10 +26,7 @@ use std::io::Write as _;
 use std::time::Duration;
 use std::time::Instant;
 
-use ratatui::style::Color;
-use ratatui::style::Modifier;
 use ratatui::text::Line;
-use unicode_width::UnicodeWidthChar as _;
 use wing::config::LayoutConfig;
 use wing::config::ThemePalette;
 use wing::config::rendering::ThinkingMode;
@@ -40,80 +37,10 @@ use wing::ui::cells::tool_call::ToolCallBlock;
 use wing::ui::cells::tool_call::ToolStatus;
 use wing::ui::chat_view::ChatCell;
 
-/// 前 / 背景的 SGR 参数（`38;` / `48;` 之后接的那一段）。
-fn sgr(color: Option<Color>) -> Option<String> {
-    match color? {
-        Color::Rgb(r, g, b) => Some(format!("2;{r};{g};{b}")),
-        Color::Reset => None,
-        other => Some(ansi_index(other).to_string()),
-    }
-}
+#[path = "support/preview_lines.rs"]
+mod preview_lines;
 
-/// 命名色的 ANSI 索引（16 色表）。
-fn ansi_index(color: Color) -> u8 {
-    match color {
-        Color::Black => 0,
-        Color::Red => 1,
-        Color::Green => 2,
-        Color::Yellow => 3,
-        Color::Blue => 4,
-        Color::Magenta => 5,
-        Color::Cyan => 6,
-        Color::Gray => 7,
-        Color::DarkGray => 8,
-        Color::LightRed => 9,
-        Color::LightGreen => 10,
-        Color::LightYellow => 11,
-        Color::LightBlue => 12,
-        Color::LightMagenta => 13,
-        Color::LightCyan => 14,
-        Color::White => 15,
-        _ => 7,
-    }
-}
-
-/// 一行 ANSI 编码：按 span 输出（真终端就是这么画的），超宽部分截掉 ——
-/// 超宽在预览里就该看出来。
-fn render_line(line: &Line<'_>, width: u16, plain: bool) -> String {
-    let mut out = String::new();
-    let mut used = 0usize;
-    let mut open = false;
-    for span in &line.spans {
-        let mut text = String::new();
-        for ch in span.content.chars() {
-            let w = ch.width().unwrap_or(0);
-            if used + w > width as usize {
-                break;
-            }
-            text.push(ch);
-            used += w;
-        }
-        if text.is_empty() {
-            continue;
-        }
-        if plain {
-            out.push_str(&text);
-            continue;
-        }
-        let style = span.style;
-        out.push_str("\x1b[0m");
-        if style.add_modifier.contains(Modifier::BOLD) {
-            out.push_str("\x1b[1m");
-        }
-        if style.add_modifier.contains(Modifier::DIM) {
-            out.push_str("\x1b[2m");
-        }
-        if let Some(code) = sgr(Some(style.fg.unwrap_or(Color::Reset))) {
-            let _ = write!(out, "\x1b[38;{code}m");
-        }
-        out.push_str(&text);
-        open = true;
-    }
-    if open && !plain {
-        out.push_str("\x1b[0m");
-    }
-    out
-}
+use preview_lines::{Preview, render_line};
 
 fn palette() -> ThemePalette {
     ThemePalette::default()
@@ -154,7 +81,7 @@ fn transcript(
 
     let rendered: Vec<String> = lines
         .iter()
-        .map(|line| render_line(line, width, plain))
+        .map(|line| render_line(line, width, plain, Preview::Thinking))
         .collect();
     let height = rendered.len();
     (rendered, height)
@@ -245,7 +172,11 @@ fn gallery(out: &mut String, width: u16, plain: bool, palette: &ThemePalette) {
             let block = block_at(phase, state);
             for line in block.to_lines(palette, ThinkingMode::Hidden, None, width, ImageOpts::off())
             {
-                let _ = writeln!(out, "{}", render_line(&line, width, plain));
+                let _ = writeln!(
+                    out,
+                    "{}",
+                    render_line(&line, width, plain, Preview::Thinking)
+                );
             }
         }
         let _ = writeln!(out);
@@ -267,7 +198,11 @@ fn gallery(out: &mut String, width: u16, plain: bool, palette: &ThemePalette) {
             width,
             ImageOpts::off(),
         ) {
-            let _ = writeln!(out, "{}", render_line(&line, width, plain));
+            let _ = writeln!(
+                out,
+                "{}",
+                render_line(&line, width, plain, Preview::Thinking)
+            );
         }
         let _ = writeln!(out);
     }
@@ -291,7 +226,11 @@ fn draw_one(out: &mut String, width: u16, phase: f32, plain: bool, palette: &The
     ] {
         let block = block_at(phase, state);
         for line in block.to_lines(palette, ThinkingMode::Hidden, None, width, ImageOpts::off()) {
-            let _ = writeln!(out, "{}", render_line(&line, width, plain));
+            let _ = writeln!(
+                out,
+                "{}",
+                render_line(&line, width, plain, Preview::Thinking)
+            );
         }
     }
     let _ = writeln!(out, "展开形态（visible，进行中 + 定格）：");
@@ -307,7 +246,11 @@ fn draw_one(out: &mut String, width: u16, phase: f32, plain: bool, palette: &The
             width,
             ImageOpts::off(),
         ) {
-            let _ = writeln!(out, "{}", render_line(&line, width, plain));
+            let _ = writeln!(
+                out,
+                "{}",
+                render_line(&line, width, plain, Preview::Thinking)
+            );
         }
         let _ = writeln!(out);
     }

@@ -109,7 +109,7 @@ pub fn format(state: State, msg: Option<&str>) -> String {
         let text = truncate_utf8(text.trim(), MAX_MSG_BYTES);
         if !text.is_empty() {
             body.push_str(":msg=");
-            body.push_str(&base64_encode(text.as_bytes()));
+            body.push_str(&super::base64::encode(text.as_bytes()));
         }
     }
     format!("\x1b]7501;{body}\x1b\\")
@@ -207,31 +207,9 @@ fn truncate_utf8(text: &str, max_bytes: usize) -> &str {
     &text[..end]
 }
 
-/// 编码记法只有一份（[`super::base64`]）；这里只是本文件读惯的名字。
-fn base64_encode(bytes: &[u8]) -> String {
-    super::base64::encode(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn base64_matches_rfc4648_vectors() {
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
-    }
-
-    #[test]
-    fn base64_encodes_utf8_bytes() {
-        // "你好" (6 UTF-8 bytes) — multi-byte input must not be split.
-        assert_eq!(base64_encode("你好".as_bytes()), "5L2g5aW9");
-    }
 
     #[test]
     fn formats_working_without_message() {

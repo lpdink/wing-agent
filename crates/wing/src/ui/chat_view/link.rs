@@ -73,7 +73,7 @@ impl LinkTable {
             .map(|link| link.target.as_str())
     }
 
-    /// Drop the hit boxes covered by `area`.
+    /// Drop any complete hit box that intersects `area`.
     fn mask(&mut self, area: Rect) {
         self.0.retain_mut(|(row, links)| {
             if *row < area.y || *row >= area.bottom() {
@@ -99,14 +99,10 @@ impl ChatView {
         self.frame_links.as_slice()
     }
 
-    /// Drop the link hit boxes covered by `area` (an overlay painted on top of
-    /// the chat after this frame's links were recorded).
+    /// Drop whole link hit boxes that intersect an overlay on the chat.
     ///
-    /// A hit box whose text is no longer visible would open a link the user
-    /// cannot see. Today the only overlay over the chat band is the toast; the
-    /// scrollbar column (`tui-scrollbar`) will be the next one — when it lands,
-    /// its column must be masked here too (it paints over the last columns of
-    /// every row, including link text), or clicks on it will open links.
+    /// Toasts and the settings card use this mask. The scrollbar's gutter is
+    /// outside the chat content area.
     pub fn mask_links(&mut self, area: Rect) {
         self.frame_links.mask(area);
     }

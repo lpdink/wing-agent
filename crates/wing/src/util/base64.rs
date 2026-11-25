@@ -78,20 +78,23 @@ pub(crate) fn decode(text: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// RFC 4648 §10 的标准向量（编码 + 解码往返）。
+    /// RFC 4648 §10 向量及自定样本（编码 + 解码往返）。
     #[test]
-    fn rfc4648_vectors_round_trip() {
-        for (raw, encoded) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(encode(raw.as_bytes()), encoded, "{raw:?}");
-            assert_eq!(decode(encoded).as_deref(), Some(raw.as_bytes()), "{raw:?}");
+    fn standard_alphabet_round_trips() {
+        let vectors: &[(&[u8], &str)] = &[
+            (b"", ""),
+            (b"f", "Zg=="),
+            (b"fo", "Zm8="),
+            (b"foo", "Zm9v"),
+            (b"foob", "Zm9vYg=="),
+            (b"fooba", "Zm9vYmE="),
+            (b"foobar", "Zm9vYmFy"),
+            (b"hello world", "aGVsbG8gd29ybGQ="),
+            (&[0, 1, 2, 250, 251, 252, 253, 254, 255], "AAEC+vv8/f7/"),
+        ];
+        for &(raw, encoded) in vectors {
+            assert_eq!(encode(raw), encoded, "{raw:?}");
+            assert_eq!(decode(encoded).as_deref(), Some(raw), "{raw:?}");
         }
     }
 
@@ -104,7 +107,18 @@ mod tests {
     #[test]
     fn decode_is_strict_about_shape() {
         assert_eq!(decode("Zm9vYg").unwrap(), b"foob");
-        for bad in ["Zg=", "Z", "Zg===", "Zg==x", "Z=9v", "Zm9v!"] {
+        for bad in [
+            "Zg=",
+            "Z",
+            "Zg===",
+            "Zg==x",
+            "Z=9v",
+            "Zm9v!",
+            "!!!!",
+            "Zm9vYmFy===",
+            "Zm9vY$==",
+            "=====",
+        ] {
             assert_eq!(decode(bad), None, "{bad:?} 必须判失败");
         }
     }

@@ -99,98 +99,67 @@ impl ChatCell {
         )
     }
 
-    /// Render this cell to lines **plus their markdown link spans**.
-    ///
-    /// Cells without markdown links (everything but assistant messages and
-    /// thinking blocks) return [`ComposedLines::plain`] — the spans exist so
-    /// the widget can inject OSC8 hyperlinks and hit-test clicks without ever
-    /// re-deriving what the renderer produced (see `tui-link-open`).
+    /// Render this cell with per-line markdown links and image anchors.
     pub fn render_lines(&self, width: u16, ctx: &CellContext<'_>) -> ComposedLines {
-        match self {
-            Self::UserMessage(body) => {
-                let style = Style::default()
-                    .bg(ctx.palette.surface)
-                    .fg(ctx.palette.text);
-                media::render_body(body, style, width, ctx.images, true)
-            }
-            Self::PendingUserMessage(body) => {
-                let style = Style::default().bg(ctx.palette.surface).fg(ctx.palette.dim);
-                media::render_body(body, style, width, ctx.images, true)
-            }
-            Self::DiscardedUserMessage(body) => {
-                let style = Style::default()
-                    .bg(ctx.palette.surface)
-                    .fg(ctx.palette.dim)
-                    .add_modifier(Modifier::CROSSED_OUT);
-                media::render_body(body, style, width, ctx.images, false)
-            }
-            Self::AssistantMessage(text) => {
-                assistant_message_lines(text, width, ctx.palette, ctx.images)
-            }
-            Self::Thinking(block) => block.render_lines(
-                ctx.palette,
-                ctx.thinking_mode,
-                ctx.thinking_expanded,
-                width,
-                ctx.images,
-            ),
-            _ => ComposedLines::plain(self.to_lines(width, ctx)),
-        }
-    }
-
-    /// Render this cell to lines, width-aware for full-width elements.
-    pub fn to_lines(&self, width: u16, ctx: &CellContext<'_>) -> Vec<Line<'static>> {
         let palette = ctx.palette;
         match self {
             Self::UserMessage(body) => {
                 let style = Style::default().bg(palette.surface).fg(palette.text);
-                media::render_body(body, style, width, ctx.images, true).into_lines()
+                media::render_body(body, style, width, ctx.images, true)
             }
             Self::PendingUserMessage(body) => {
-                // Queued, not yet accepted by the model — dimmed.
                 let style = Style::default().bg(palette.surface).fg(palette.dim);
-                media::render_body(body, style, width, ctx.images, true).into_lines()
+                media::render_body(body, style, width, ctx.images, true)
             }
             Self::DiscardedUserMessage(body) => {
-                // Discarded by an interrupt before reaching the model —
-                // dimmed + struck through. 只留标签：一张没被划掉的图会让人以为
-                // 它发出去了（图块的像素不受 cell 样式影响，画不出「划掉」）。
                 let style = Style::default()
                     .bg(palette.surface)
                     .fg(palette.dim)
                     .add_modifier(Modifier::CROSSED_OUT);
-                media::render_body(body, style, width, ctx.images, false).into_lines()
+                // Image pixels cannot show the strikethrough of a discarded attachment.
+                media::render_body(body, style, width, ctx.images, false)
             }
             Self::AssistantMessage(text) => {
-                assistant_message_lines(text, width, palette, ctx.images).into_lines()
+                assistant_message_lines(text, width, palette, ctx.images)
             }
-            Self::SystemMessage(text) => notice_lines(text, NoticeLevel::Info, width, palette),
-            Self::WarningMessage(text) => {
-                // A notice (e.g. "retrying in 6s") — yellow, but explicitly not
-                // an error: the turn is still running.
-                notice_lines(text, NoticeLevel::Warning, width, palette)
-            }
-            Self::ErrorMessage(text) => notice_lines(text, NoticeLevel::Error, width, palette),
-            Self::Thinking(block) => block.to_lines(
+            Self::Thinking(block) => block.render_lines(
                 palette,
                 ctx.thinking_mode,
                 ctx.thinking_expanded,
                 width,
                 ctx.images,
             ),
-            Self::ToolCall(block) => block.to_lines(palette, ctx.layout.tool_output_max),
-            Self::Diff(view) => view.to_lines(palette, width),
-            Self::Todo(msg) => msg.to_lines(palette),
-            Self::Ask(msg) => msg.to_lines(palette, width),
-            Self::ModelPicker(panel) => model_picker_lines(panel, width, palette),
+            Self::SystemMessage(text) => {
+                ComposedLines::plain(notice_lines(text, NoticeLevel::Info, width, palette))
+            }
+            Self::WarningMessage(text) => {
+                ComposedLines::plain(notice_lines(text, NoticeLevel::Warning, width, palette))
+            }
+            Self::ErrorMessage(text) => {
+                ComposedLines::plain(notice_lines(text, NoticeLevel::Error, width, palette))
+            }
+            Self::ToolCall(block) => {
+                ComposedLines::plain(block.to_lines(palette, ctx.layout.tool_output_max))
+            }
+            Self::Diff(view) => ComposedLines::plain(view.to_lines(palette, width)),
+            Self::Todo(msg) => ComposedLines::plain(msg.to_lines(palette)),
+            Self::Ask(msg) => ComposedLines::plain(msg.to_lines(palette, width)),
+            Self::ModelPicker(panel) => {
+                ComposedLines::plain(model_picker_lines(panel, width, palette))
+            }
             Self::Separator => {
                 let sep = "─".repeat(width as usize);
-                vec![Line::from(Span::styled(
+                ComposedLines::plain(vec![Line::from(Span::styled(
                     sep,
                     Style::default().fg(palette.dim),
-                ))]
+                ))])
             }
         }
+    }
+
+    /// Render this cell to lines, width-aware for full-width elements.
+    pub fn to_lines(&self, width: u16, ctx: &CellContext<'_>) -> Vec<Line<'static>> {
+        self.render_lines(width, ctx).into_lines()
     }
 }
 
@@ -371,6 +340,84 @@ mod tests {
                 .contains(Modifier::CROSSED_OUT)
         );
         assert_eq!(style_of(&normal).fg, Some(palette.text));
+    }
+
+    #[test]
+    fn plain_chat_cells_preserve_styled_lines_without_side_channels() {
+        use crate::shared::panels::ask::{AskPanel, AskPayload};
+        use crate::ui::cells::todo_msg::TodoItem;
+
+        let (palette, layout) = test_ctx();
+        let ctx = make_ctx(&palette, &layout);
+        let width = 32;
+        let notice = |text: &'static str, color| {
+            let style = Style::default().fg(color);
+            vec![
+                Line::from(vec![Span::styled("│ ", style), Span::styled(text, style)]),
+                Line::from(""),
+            ]
+        };
+        let diff = DiffView::new(
+            "notes.md".into(),
+            Some("old line\n".into()),
+            "new line\n".into(),
+            3,
+            3,
+        );
+        let todo = TodoMessage::new(vec![TodoItem {
+            content: "Check output".into(),
+            status: "in_progress".into(),
+            active_form: Some("Checking output".into()),
+        }]);
+        let ask = AskMessage::new(AskPanel::from_ask(AskPayload {
+            tool_call_id: "ask-1",
+            questions: &[],
+            question: "Review the [notes](notes.md) before continuing?",
+            choices: &["Continue".into()],
+            required: false,
+        }));
+        let cases = [
+            (
+                "warning",
+                ChatCell::WarningMessage("Retrying".into()),
+                notice("Retrying", palette.warning),
+            ),
+            (
+                "error",
+                ChatCell::ErrorMessage("Request failed".into()),
+                notice("Request failed", palette.danger),
+            ),
+            (
+                "diff",
+                ChatCell::Diff(diff.clone()),
+                diff.to_lines(&palette, width),
+            ),
+            (
+                "todo",
+                ChatCell::Todo(todo.clone()),
+                todo.to_lines(&palette),
+            ),
+            (
+                "ask",
+                ChatCell::Ask(ask.clone()),
+                ask.to_lines(&palette, width),
+            ),
+            (
+                "separator",
+                ChatCell::Separator,
+                vec![Line::from(Span::styled(
+                    "─".repeat(width as usize),
+                    Style::default().fg(palette.dim),
+                ))],
+            ),
+        ];
+
+        for (name, cell, expected) in cases {
+            let (lines, links, images) = cell.render_lines(width, &ctx).into_parts();
+            assert_eq!(lines, expected, "{name} lines");
+            assert_eq!(links, vec![Vec::new(); lines.len()], "{name} links");
+            assert_eq!(images, vec![Vec::new(); lines.len()], "{name} images");
+        }
     }
 
     /// The assistant-message cell reads the math mode off the palette, like
