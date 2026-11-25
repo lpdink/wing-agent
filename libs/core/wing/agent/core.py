@@ -443,7 +443,7 @@ class WingAgent:
             return self._thinking
         return self.model_provider.thinking
 
-    def reasoning_controls(self) -> tuple[ReasoningSupport, bool, str | None]:
+    def reasoning_controls(self) -> tuple[ReasoningSupport, bool | None, str | None]:
         provider = self.model_provider
         return (
             provider.reasoning_support(self.model),

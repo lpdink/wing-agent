@@ -7,10 +7,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from wing.provider.base import ReasoningSupport
 from wing.session import SessionManager
 from wing.store import FileSessionStore
 from _support import materialize
@@ -242,3 +243,41 @@ class TestBestEffortStatePersistence:
 
         assert session.context_manager.append_system_prompt == "\ud800"  # live 生效
         assert any("state not persisted" in m for m in wing_warnings), wing_warnings
+
+
+@pytest.mark.asyncio
+async def test_validated_reasoning_save_failure_keeps_both_previous_values(
+    tmp_path: Path,
+):
+    store = FileSessionStore(tmp_path / "sessions")
+    manager = SessionManager({"file": store})
+    sid = "reasoning-save-failure"
+    session = materialize(manager.create_session(session_id=sid))
+    await session.update_state(thinking=True, reasoning_effort="low")
+    metadata = store.load_metadata(sid)
+    support = ReasoningSupport(thinking=True, effort=("low", "high"))
+    with patch.object(
+        type(session.agent.model_provider), "reasoning_support", return_value=support
+    ):
+        with patch.object(
+            store, "save_metadata", side_effect=OSError("write failed")
+        ) as save:
+            with pytest.raises(OSError, match="write failed"):
+                session.update_reasoning(False, "high", validate=True)
+            save.assert_called_once()
+            attempted = save.call_args.args[1]
+            assert (attempted.thinking, attempted.reasoning_effort) == (False, "high")
+        assert (session.agent.thinking, session.agent.reasoning_effort) == (True, "low")
+        assert store.load_metadata(sid) == metadata
+        assert manager.evict(sid, reason="test")
+        await manager.wait_teardowns()
+        resumed = manager.resume_session(sid)
+        assert resumed is not None
+        assert (resumed.agent.thinking, resumed.agent.reasoning_effort) == (True, "low")
+        resumed.update_reasoning(False, "high", validate=True)
+    assert manager.evict(sid, reason="test")
+    await manager.wait_teardowns()
+    resumed = manager.resume_session(sid)
+    assert resumed is not None
+    assert (resumed.agent.thinking, resumed.agent.reasoning_effort) == (False, "high")
+    await resumed.aclose()

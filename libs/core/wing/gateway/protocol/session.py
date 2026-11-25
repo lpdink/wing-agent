@@ -9,7 +9,7 @@ interrupt / release / rewind）。字段与文案即线格式：改动等于改�
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from wing.event import AgentInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
@@ -167,6 +167,8 @@ class RewindRequest(BaseModel):
 
 class UpdateSessionRequest(BaseModel):
     """POST /api/session/update 请求——统一 session 状态变更。"""
+
+    model_config = ConfigDict(extra="allow")
 
     session_id: str = Field(description="目标 session ID")
     model_id: str | None = Field(
@@ -349,9 +351,9 @@ class ContextStatsInfo(BaseModel):
 class SessionReasoningInfo(BaseModel):
     """当前 provider 实际请求值及当前模型可编辑的推理选项。"""
 
-    thinking: bool
+    thinking: bool | None = Field(description="透传值无法解释为 thinking 开关时为 null")
     thinking_supported: bool | None = Field(description="null 表示模型能力未知")
-    effort: str | None = Field(description="会话力度的实际请求值，未发送时为 null")
+    effort: str | None = Field(description="实际请求中的会话力度字符串")
     effort_options: list[str] | None = Field(
         description="null 表示未知，空列表表示不支持"
     )

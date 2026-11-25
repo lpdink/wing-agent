@@ -1185,6 +1185,21 @@ class TestSessionUpdate:
             validate_reasoning=False,
         )
 
+    def test_validated_reasoning_persistence_failure(
+        self, client: TestClient, mock_runtime
+    ):
+        mock_runtime.update_session = AsyncMock(side_effect=OSError("write failed"))
+        resp = client.post(
+            "/api/session/update",
+            json={
+                "session_id": "test-id",
+                "thinking": False,
+                "validate_reasoning": True,
+            },
+        )
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "could not persist reasoning settings"
+
     def test_update_agent(self, client: TestClient, mock_runtime):
         """切换 agent 模板。"""
         mock_runtime.update_session = AsyncMock()

@@ -59,6 +59,14 @@ async def test_openai_options_follow_model_and_persist_after_resume(
         )
     assert rejected.value.status == 400
     assert "low, xhigh" in rejected.value.call.response["detail"]
+    with pytest.raises(DriverHttpError) as unknown_field:
+        await http.request(
+            "POST",
+            UPDATE,
+            body={**strict, "thinking": False, "reasoning_efort": "xhigh"},
+        )
+    assert unknown_field.value.status == 400
+    assert "unknown field" in unknown_field.value.call.response["detail"]
     assert (await session.info())["reasoning"] == default
     assert probe.history(session).metadata() == metadata
 
@@ -105,7 +113,11 @@ async def test_openai_options_follow_model_and_persist_after_resume(
         with pytest.raises(DriverHttpError) as unknown:
             await http.request("POST", UPDATE, body={**strict, field: value})
         assert unknown.value.status == 400
-    await http.update_session(sid, reasoning_effort="high")
+    assert await http.request(
+        "POST",
+        UPDATE,
+        body={"session_id": sid, "reasoning_effort": "high", "future_field": True},
+    ) == {"ok": True}
     await session.chat("check legacy controls on undeclared model")
     assert probe.request(UNDECLARED).body["reasoning_effort"] == "high"
 
@@ -225,7 +237,12 @@ async def test_anthropic_controls_follow_protocol_and_template_reset(
 async def test_adaptive_thinking_reads_as_enabled_and_refreshes_on_reload(
     probe: Probe,
 ) -> None:
-    probe.register(ANTHROPIC, Turn.of(text="adaptive OK"), Turn.of(text="standard OK"))
+    probe.register(
+        ANTHROPIC,
+        Turn.of(text="adaptive OK"),
+        Turn.of(text="disabled OK"),
+        Turn.of(text="enabled OK"),
+    )
     session = await probe.session(model=ANTHROPIC)
     http = probe.driver_required.http
     strict = {
@@ -251,6 +268,7 @@ async def test_adaptive_thinking_reads_as_enabled_and_refreshes_on_reload(
     config["providers"][0]["extra_body"]["thinking"] = {
         "type": "enabled",
         "budget_tokens": 1024,
+        "display": "omitted",
     }
     config_path.write_text(yaml.safe_dump(config))
     assert (await http.reload())["ok"] is True
@@ -260,3 +278,66 @@ async def test_adaptive_thinking_reads_as_enabled_and_refreshes_on_reload(
     assert (await session.info())["reasoning"] == {**standard, "thinking": False}
     await session.chat("check standard thinking disabled")
     assert probe.request(ANTHROPIC, 1).body["thinking"] == {"type": "disabled"}
+
+    assert "anthropic-beta" not in probe.request(ANTHROPIC, 1).headers
+    await http.request("POST", UPDATE, body={**strict, "thinking": True})
+    await session.chat("check standard thinking re-enabled")
+    enabled = probe.request(ANTHROPIC, 2)
+    assert enabled.body["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 1024,
+        "display": "omitted",
+    }
+    assert enabled.headers["anthropic-beta"] == "interleaved-thinking-2025-05-14"
+
+
+@pytest.mark.probe_env(
+    models=[OPENAI_MODEL],
+    provider_extra={"extra_body": {"enable_thinking": "false", "reasoning_effort": ""}},
+)
+async def test_openai_passthrough_does_not_invent_reasoning_values(
+    probe: Probe,
+) -> None:
+    probe.register(OPENAI, Turn.of(text="OK"))
+    session = await probe.session(model=OPENAI)
+    info = await session.info()
+    assert info["thinking"] is True
+    assert info["reasoning"]["thinking"] is None
+    assert info["reasoning"]["effort"] == ""
+    await session.chat("check configured passthrough")
+    body = probe.request(OPENAI).body
+    assert body["enable_thinking"] == "false"
+    assert body["reasoning_effort"] == info["reasoning"]["effort"]
+
+
+async def test_settings_schema_places_effort_choices_on_enum_elements(
+    probe: Probe,
+) -> None:
+    schema = await probe.driver_required.http.request("GET", "/api/settings/schema")
+    providers = next(
+        node for node in schema["root"]["children"] if node["key"] == "providers"
+    )
+    models = next(
+        node for node in providers["element"]["children"] if node["key"] == "models"
+    )
+    model = next(node for node in models["variants"] if node["kind"] == "object")
+    capabilities = next(
+        node for node in model["children"] if node["key"] == "capabilities"
+    )
+    efforts = next(
+        node for node in capabilities["children"] if node["key"] == "reasoning_effort"
+    )
+    assert efforts["kind"] == "list"
+    assert efforts["nullable"] is True
+    assert efforts["choices"] == []
+    element = efforts["element"]
+    assert element["kind"] == "enum"
+    assert element["nullable"] is False
+    assert [choice["value"] for choice in element["choices"]] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
+    assert all(choice.get("doc") for choice in element["choices"])

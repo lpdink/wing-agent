@@ -286,7 +286,7 @@ class ModelProvider(ABC):
     def reasoning_support(self, model: str) -> ReasoningSupport:
         return ReasoningSupport()
 
-    def request_thinking(self, override: bool | None) -> bool:
+    def request_thinking(self, override: bool | None) -> bool | None:
         return self.thinking if override is None else override
 
     def request_reasoning_effort(self, override: str | None) -> str | None:
