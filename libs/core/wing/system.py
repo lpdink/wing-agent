@@ -43,6 +43,7 @@ class ReloadResult:
 
     ok: bool
     items: list[ReloadResultItem] = field(default_factory=list)
+    failed_settings: set[str] = field(default_factory=set)
 
 
 def record_step(
@@ -67,6 +68,27 @@ def record_step(
         return False
     items.append(ReloadResultItem(name=name, ok=True))
     return True
+
+
+def record_file_failures(
+    item: ReloadResultItem, path: str, indices: set[int]
+) -> set[str]:
+    paths = [f"{path}[{index}]" for index in sorted(indices)]
+    if paths:
+        item.detail = f"some files failed to load for {', '.join(paths)}"
+    return set(paths)
+
+
+def record_file_step(
+    items: list[ReloadResultItem], name: str, path: str, load: Callable[[], set[int]]
+) -> set[str]:
+    indices: set[int] = set()
+
+    def scan() -> None:
+        indices.update(load() or ())
+
+    record_step(items, name, scan)
+    return record_file_failures(items[-1], path, indices)
 
 
 # ============================================================
@@ -97,17 +119,19 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
         items.append(ReloadResultItem(name="config.yaml", ok=False, detail=str(e)))
         return ReloadResult(ok=False, items=items)
 
-    def _reload_hooks() -> None:
+    def _reload_hooks() -> set[int]:
         hooks.clear()
-        load_hooks(config.hooks)
+        return load_hooks(config.hooks)
 
-    record_step(items, "hooks", _reload_hooks)
+    failed_settings = record_file_step(items, "hooks", "hooks", _reload_hooks)
 
-    def _reload_commands() -> None:
+    def _reload_commands() -> set[int]:
         magic_registry.remove_by_source("prompt")
-        register_prompt_commands(config.commands.paths)
+        return register_prompt_commands(config.commands.paths)
 
-    record_step(items, "prompt commands", _reload_commands)
+    failed_settings.update(
+        record_file_step(items, "prompt commands", "commands.paths", _reload_commands)
+    )
 
     # provider 重建：共享池按新配置重建全部实例（先建后换——任一构建失败池保持
     # 原样）；旧实例退场（在途请求跑完后自动关闭，reload 对会话透明）。会话不再
@@ -147,4 +171,4 @@ async def reload_system(sm: SessionManager) -> ReloadResult:
     record_step(items, "log level", _reload_log_level)
 
     all_ok = all(item.ok for item in items)
-    return ReloadResult(ok=all_ok, items=items)
+    return ReloadResult(ok=all_ok, items=items, failed_settings=failed_settings)

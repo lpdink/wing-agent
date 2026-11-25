@@ -33,14 +33,22 @@ from wing.config import (
     ConfigProblem,
     GatewayConfig,
     ProblemKind,
+    SessionsConfig,
     load_config,
 )
 from wing.config.boot import BootFailure, BootResult, boot_config
+from wing.config.document import SettingsHistory, SparseDocument
 from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.request_context import get_request_context
 from wing.runtime import WingRuntime, WriteEffectResult
-from wing.system import ReloadResult, ReloadResultItem, record_step
+from wing.system import (
+    ReloadResult,
+    ReloadResultItem,
+    record_file_failures,
+    record_file_step,
+    record_step,
+)
 
 from .app import create_app
 from .frames import HARD_LIMIT_BYTES, Frame, build_frames
@@ -166,10 +174,19 @@ class GatewayServer:
         self.host = host
         self.port = port
         self._boot = boot if boot is not None else boot_config()
+        startup_config = self._boot.config
+        startup_host, startup_port = (
+            (startup_config.gateway.host, startup_config.gateway.port)
+            if startup_config is not None
+            else self._boot.endpoint or (DEFAULT_HOST, DEFAULT_PORT)
+        )
         # setup mode 的替身：``runtime`` 因此恒非 Optional——配置不可用不是
         # 「有时没有 runtime」，而是「除修复路径外一律 503」（守门 + 替身共同保证）。
         self._runtime: WingRuntime = _SetupRuntime(self)
         self._in_setup_mode = True
+        self.settings_lock = asyncio.Lock()
+        self.settings_history = SettingsHistory()
+        self._installed_sessions_config: SessionsConfig | None = None
         self._client_to_ws: dict[str, WebSocket] = {}
         self._ws_to_client: dict[WebSocket, str] = {}
         self._event_senders: dict[WebSocket, _EventSender] = {}
@@ -189,6 +206,11 @@ class GatewayServer:
                 # 而 status.valid=true（预检把用户送进正常启动链再吃一串 503）。
                 self._record_startup_failure(result)
         self._app = create_app(self)
+        self._startup_gateway_settings = {
+            "host": startup_host,
+            "port": startup_port,
+            "cors": {"origins": self.cors_origins},
+        }
 
     # ============================================================
     # 运行模式
@@ -269,10 +291,13 @@ class GatewayServer:
             return ReloadResult(ok=False, items=items)
 
         # ③ prompt 命令（配置里的 commands.paths）。
-        def _apply_prompt_commands() -> None:
-            register_prompt_commands(config.commands.paths)
-
-        if not record_step(items, "prompt commands", _apply_prompt_commands):
+        failed_settings = record_file_step(
+            items,
+            "prompt commands",
+            "commands.paths",
+            lambda: register_prompt_commands(config.commands.paths),
+        )
+        if not items[-1].ok:
             return ReloadResult(ok=False, items=items)
 
         # ④ runtime（hooks 随之加载；providers 池按需懒建）。
@@ -281,8 +306,11 @@ class GatewayServer:
         except Exception as e:
             items.append(ReloadResultItem(name="runtime", ok=False, detail=str(e)))
             log.error(f"setup mode: cannot enter operational mode — {e}")
-            return ReloadResult(ok=False, items=items)
+            return ReloadResult(ok=False, items=items, failed_settings=failed_settings)
         items.append(ReloadResultItem(name="runtime", ok=True))
+        failed_settings.update(
+            record_file_failures(items[-1], "hooks", runtime.failed_hook_patterns)
+        )
 
         # ⑤ 逐出 job + 归档 job + 后台任务（lifespan 的 startup 已跑过时补启；幂等）。
         # 这里必须直调 runtime.wake.start()，不能写 self._start_wake()：后者在
@@ -297,7 +325,7 @@ class GatewayServer:
                 runtime.wake.start()
 
         if not record_step(items, "background jobs", _start_background_jobs):
-            return ReloadResult(ok=False, items=items)
+            return ReloadResult(ok=False, items=items, failed_settings=failed_settings)
 
         # ⑥ auth 锁死警告（读**新**配置——auth_config 在 setup mode 下是安全默认值）。
         detail = self._warn_auth_lockout(config.gateway.auth)
@@ -305,11 +333,19 @@ class GatewayServer:
 
         # 全部成功：同一个同步块里原子翻转（请求处理之间看不到中间态）。
         self._runtime = runtime
+        self._installed_sessions_config = config.sessions
         self._in_setup_mode = False
         log.info(
             "setup mode exited: gateway is operational (config reloaded from disk)"
         )
-        return ReloadResult(ok=True, items=items)
+        return ReloadResult(ok=True, items=items, failed_settings=failed_settings)
+
+    def settings_startup(self) -> SparseDocument:
+        """Configuration captured when process resources were installed."""
+        data: dict[str, Any] = {"gateway": self._startup_gateway_settings}
+        if self._installed_sessions_config is not None:
+            data["sessions"] = self._installed_sessions_config.model_dump()
+        return SparseDocument(data=data)
 
     def _record_startup_failure(self, result: ReloadResult) -> None:
         """启动路径转入正常模式失败：**不静默降级**。

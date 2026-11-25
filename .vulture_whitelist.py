@@ -27,6 +27,10 @@ default_agent
 thinking_supported
 effort_options
 
+# Setting API 回执供 App 读取，通过 Pydantic 序列化出网。
+current_fingerprint
+pending_restart
+
 # 链上事件与工具 schema 字段
 created_at
 error_code

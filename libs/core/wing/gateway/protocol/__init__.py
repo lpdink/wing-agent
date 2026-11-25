@@ -62,6 +62,10 @@ from .session import (
     UpdateSessionResponse,
 )
 from .settings import (
+    EffectiveSettings,
+    SettingEffect,
+    SettingsConflict,
+    SettingsConflictResponse,
     SecretState,
     SettingChoice,
     SettingGroupProto,
@@ -160,6 +164,10 @@ __all__ = [
     "SettingGroupProto",
     "SettingNodeProto",
     "SettingProblem",
+    "EffectiveSettings",
+    "SettingEffect",
+    "SettingsConflict",
+    "SettingsConflictResponse",
     "SettingsGetResponse",
     "SettingsSchemaResponse",
     "SettingsSetRequest",

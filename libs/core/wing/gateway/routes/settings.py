@@ -32,26 +32,30 @@ from wing.config import (
 )
 from wing.config.document import (
     ConfigDocumentError,
+    SparseDocument,
     mask_secrets,
     problems_of,
     read_document,
     secret_states,
+    validate_document,
 )
 from wing.gateway.protocol import (
-    ErrorResponse,
     SettingProblem,
+    SettingsConflict,
+    SettingsConflictResponse,
     SettingsGetResponse,
     SettingsSchemaResponse,
     SettingsSetRequest,
     SettingsSetResponse,
     SettingsStatusResponse,
-    error_response,
 )
 from wing.gateway.projection import (
+    build_effective_settings,
     build_settings_apply_response,
     build_settings_problem,
     build_settings_schema,
     build_settings_secret_states,
+    pending_settings_restart,
 )
 from wing.gateway.routes._common import get_server
 from wing.gateway.routes.health import _get_version
@@ -148,13 +152,20 @@ async def settings_get(request: Request) -> SettingsGetResponse:
             problems=_projected_problems(server, [exc.as_problem()]),
             setup_mode=setup_mode,
             config_path=config_path,
+            effective=build_effective_settings(SparseDocument(data={}), catalog, None),
         )
 
+    server.settings_history.observe(fingerprint.value, doc, catalog)
+    config, problems = validate_document(doc, catalog)
     return SettingsGetResponse(
         values=mask_secrets(doc, catalog),
         secrets=build_settings_secret_states(secret_states(doc, catalog)),
         fingerprint=fingerprint.value,
-        problems=_projected_problems(server, problems_of(doc, catalog=catalog)),
+        problems=_projected_problems(server, problems),
+        effective=build_effective_settings(doc, catalog, config),
+        pending_restart=pending_settings_restart(
+            server.settings_startup(), None if setup_mode else config, catalog
+        ),
         setup_mode=setup_mode,
         config_path=config_path,
     )
@@ -177,8 +188,9 @@ async def settings_status(request: Request) -> SettingsStatusResponse:
     """
     server = get_server(request)
     setup_mode = server.in_setup_mode
+    catalog = build_catalog()
     try:
-        doc, fingerprint = read_document()
+        doc, fingerprint = read_document(catalog=catalog)
     except ConfigDocumentError as exc:
         return SettingsStatusResponse(
             valid=False,
@@ -187,7 +199,8 @@ async def settings_status(request: Request) -> SettingsStatusResponse:
             fingerprint=exc.fingerprint,
         )
 
-    problems = _projected_problems(server, problems_of(doc))
+    server.settings_history.observe(fingerprint.value, doc, catalog)
+    problems = _projected_problems(server, problems_of(doc, catalog=catalog))
     return SettingsStatusResponse(
         valid=(not setup_mode) and not problems,
         setup_mode=setup_mode,
@@ -199,7 +212,12 @@ async def settings_status(request: Request) -> SettingsStatusResponse:
 @router.post(
     "/api/settings/set",
     response_model=SettingsSetResponse,
-    responses={409: {"model": ErrorResponse, "description": "指纹不匹配（乐观并发）"}},
+    responses={
+        409: {
+            "model": SettingsConflictResponse,
+            "description": "指纹不匹配（乐观并发）",
+        }
+    },
     summary="保存配置（校验 → 备份 → 原子写 → 热重载）",
 )
 async def settings_set(
@@ -212,14 +230,40 @@ async def settings_set(
     - 写盘失败 → **500**（``OSError``：磁盘满 / 权限）。
     """
     server = get_server(request)
-    try:
-        result = await server.runtime.apply_settings(
-            document=body.document, base=body.base
+    catalog = build_catalog()
+    async with server.settings_lock:
+        setup = server.in_setup_mode
+        try:
+            result = await server.runtime.apply_settings(
+                document=body.document, base=body.base
+            )
+        except SettingsConflictError as exc:
+            assert body.base is not None
+            paths = server.settings_history.changes_since(
+                body.base, exc.fingerprint, exc.document, catalog
+            )
+            conflict = SettingsConflictResponse(
+                error="conflict",
+                detail=str(exc),
+                conflict=SettingsConflict(
+                    current_fingerprint=exc.fingerprint, changed_paths=paths
+                ),
+            )
+            return JSONResponse(
+                status_code=409, content=conflict.model_dump(exclude_unset=True)
+            )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=500, detail=f"failed to write config.yaml: {exc}"
+            ) from exc
+
+        if result.saved_document is not None:
+            server.settings_history.observe(
+                result.fingerprint, result.saved_document, catalog
+            )
+        pending = pending_settings_restart(
+            server.settings_startup(),
+            None if server.in_setup_mode else result.disk_config,
+            catalog,
         )
-    except SettingsConflictError as exc:
-        return error_response(409, str(exc), error="conflict")
-    except OSError as exc:
-        raise HTTPException(
-            status_code=500, detail=f"failed to write config.yaml: {exc}"
-        )
-    return build_settings_apply_response(result)
+        return build_settings_apply_response(result, pending, setup=setup)

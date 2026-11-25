@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable, Iterator, Mapping
+from collections import OrderedDict
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
+from secrets import token_bytes
 from typing import Any, Literal, NamedTuple, get_args
 
 import yaml
@@ -187,13 +189,18 @@ def read_document(
     except FileNotFoundError:
         return SparseDocument(data={}), ConfigFingerprint(value=ABSENT_FINGERPRINT)
 
+    return parse_document(raw, catalog or build_catalog())
+
+
+def parse_document(
+    raw: bytes, catalog: SettingNode
+) -> tuple[SparseDocument, ConfigFingerprint]:
+    """Project the document and fingerprint from the same bytes."""
     fingerprint = ConfigFingerprint(value=hashlib.sha256(raw).hexdigest())
     try:
         parsed = yaml.safe_load(raw.decode("utf-8"))
     except (yaml.YAMLError, UnicodeDecodeError) as exc:
-        raise ConfigDocumentError(
-            f"config.yaml 不是合法 YAML：{exc}", fingerprint.value
-        ) from exc
+        raise ConfigDocumentError(yaml_error_message(exc), fingerprint.value) from exc
     if parsed is None:
         parsed = {}
     if not isinstance(parsed, dict):
@@ -203,8 +210,22 @@ def read_document(
         )
 
     extra: list[ExtraKey] = []
-    data = _split_known(catalog or build_catalog(), parsed, "", extra)
+    data = _split_known(catalog, parsed, "", extra)
     return SparseDocument(data=data, extra=extra), fingerprint
+
+
+def yaml_error_message(exc: Exception, *, localized: bool = False) -> str:
+    # PyYAML's exception text can include the line containing a credential.
+    mark = getattr(exc, "problem_mark", None)
+    if mark is None:
+        return "config.yaml 不是合法 YAML"
+    line, column = mark.line + 1, mark.column + 1
+    where = (
+        f"第 {line} 行，第 {column} 列"
+        if localized
+        else f"line {line}, column {column}"
+    )
+    return f"config.yaml 不是合法 YAML（{where}）"
 
 
 def _split_known(
@@ -296,6 +317,50 @@ def _materialize_default(node: SettingNode) -> Any:
     if node.kind is SettingKind.MAP:
         return node.default if isinstance(node.default, dict) else {}
     return node.default
+
+
+def effective_values(
+    doc: SparseDocument, catalog: SettingNode, config: Config | None
+) -> tuple[dict[str, Any], dict[str, Literal["default", "override"]]]:
+    values = (
+        config.model_dump(mode="json")
+        if config is not None
+        else merge_with_defaults(doc, catalog)
+    )
+    sources: dict[str, Literal["default", "override"]] = {}
+
+    def visit(node: SettingNode, value: Any, original: Any, path: str) -> None:
+        if path:
+            sources[path] = "default" if original is _MISSING else "override"
+        if node.kind is SettingKind.OBJECT and isinstance(value, dict):
+            for child in node.children:
+                if child.key in value:
+                    child_original = (
+                        original.get(child.key, _MISSING)
+                        if isinstance(original, dict)
+                        else _MISSING
+                    )
+                    visit(
+                        child, value[child.key], child_original, _join(path, child.key)
+                    )
+        elif node.kind is SettingKind.LIST and isinstance(value, list):
+            for index, item in enumerate(value):
+                item_original = (
+                    original[index]
+                    if isinstance(original, list) and index < len(original)
+                    else _MISSING
+                )
+                item_path = f"{path}[{index}]"
+                template = item_template(node, item)
+                if template is None:
+                    sources[item_path] = (
+                        "default" if item_original is _MISSING else "override"
+                    )
+                else:
+                    visit(template, item, item_original, item_path)
+
+    visit(catalog, values, doc.data, "")
+    return mask_secrets(SparseDocument(data=values), catalog), sources
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -616,21 +681,25 @@ def _secret_leaves(
                 yield from _secret_leaves(template, item, f"{path}[{index}]")
 
 
-def _mask(node: SettingNode, value: Any) -> Any:
+def _mask(
+    node: SettingNode, value: Any, redact: Callable[[Any], Any] = lambda _: None
+) -> Any:
     if node.secret and node.kind is SettingKind.SECRET:
-        return None if value is not _MISSING else _MISSING
+        return redact(value)
     if node.kind is SettingKind.OBJECT and isinstance(value, dict):
         known = {child.key: child for child in node.children}
         out: dict[Any, Any] = {}
         for key, item in value.items():
             child = known.get(key)
-            out[key] = _mask(child, item) if child is not None else item
+            out[key] = _mask(child, item, redact) if child is not None else item
         return out
     if node.kind is SettingKind.LIST and isinstance(value, list):
         out_list: list[Any] = []
         for item in value:
             template = item_template(node, item)
-            out_list.append(_mask(template, item) if template is not None else item)
+            out_list.append(
+                _mask(template, item, redact) if template is not None else item
+            )
         return out_list
     return value
 
@@ -660,29 +729,33 @@ def problems_of(
     ``Config.model_construct`` 是宽容视图：字段级错误存在时 ``Config(**raw)``
     根本构造不出来，而跨字段检查恰好要在这种状态下给全量问题（见 ``problems.py``）。
     """
-    tree = catalog or build_catalog()
-    raw = merge_with_defaults(doc, tree)
-    return locate_problems(raw) + cross_field_problems(Config.model_construct(**raw))
+    _, problems = validate_document(doc, catalog or build_catalog())
+    return problems
+
+
+def validate_document(
+    doc: SparseDocument, catalog: SettingNode
+) -> tuple[Config | None, list[ConfigProblem]]:
+    raw = merge_with_defaults(doc, catalog)
+    config, problems = _validate(raw)
+    if config is not None:
+        return config, []
+    return None, problems + cross_field_problems(Config.model_construct(**raw))
 
 
 def locate_problems(raw: dict[str, Any]) -> list[ConfigProblem]:
-    """``Config(**raw)`` → ``ValidationError`` → 带规范路径的问题列表（**不抛异常**）。
+    """Translate field errors. The document validator locates cross-field errors."""
+    _, problems = _validate(raw)
+    return problems
 
-    只报**字段级**错误：模型级校验器的错误（``loc == ()``）由 ``cross_field_problems``
-    以精确路径给出同一文案的结构化版本（见 :func:`_translate_errors`）。
 
-    形态错误（顶层键不是字符串 / 值不是映射等，pydantic 抛 ``TypeError``）同样不抛：
-    报一条 ``path=None`` 的文档级问题。这是**公开面**——启动读取（``boot_config``）与
-    设置端点的三个读路径都直接调它，任何输入形态都必须能产出「问题清单」而不是 500 / 崩溃
-    （「永不让 TypeError 冒到用户面前」）。
-    """
+def _validate(raw: dict[str, Any]) -> tuple[Config | None, list[ConfigProblem]]:
     try:
-        Config(**raw)
+        return Config(**raw), []
     except ValidationError as exc:
-        return _translate_errors(exc.errors(), raw)
-    except Exception as exc:  # noqa: BLE001 — 兜底是本函数的契约（文档级问题，不抛）
-        return [malformed_document_problem(exc)]
-    return []
+        return None, _translate_errors(exc.errors(), raw)
+    except Exception as exc:  # noqa: BLE001 — shape errors become document problems
+        return None, [malformed_document_problem(exc)]
 
 
 def malformed_document_problem(exc: BaseException) -> ConfigProblem:
@@ -851,18 +924,29 @@ def changed_paths(
     - 一侧是标量而另一侧是容器 → 记该节点路径后停（不猜子路径）；
     - 比较对类型敏感（``True != 1``、``300 != 300.0``）——盘上的字节确实变了。
     """
-    out: list[str] = []
+    return list(setting_changes(old, new, catalog))
+
+
+def setting_changes(
+    old: SparseDocument, new: SparseDocument, catalog: SettingNode
+) -> dict[str, ApplyScope | None]:
+    """Ordered change paths and the scope of each resolvable leaf."""
+    out: dict[str, ApplyScope | None] = {}
     _diff(catalog, old.data, new.data, "", out)
     return out
 
 
 def _diff(
-    node: SettingNode, old_value: Any, new_value: Any, path: str, out: list[str]
+    node: SettingNode,
+    old_value: Any,
+    new_value: Any,
+    path: str,
+    out: dict[str, ApplyScope | None],
 ) -> None:
     if node.kind is SettingKind.OBJECT:
         if not _is_container(old_value, dict) or not _is_container(new_value, dict):
             if not _same(old_value, new_value):
-                out.append(path)
+                out[path] = None
             return
         old_map = old_value if isinstance(old_value, dict) else {}
         new_map = new_value if isinstance(new_value, dict) else {}
@@ -878,7 +962,7 @@ def _diff(
     if node.kind is SettingKind.LIST:
         if not _is_container(old_value, list) or not _is_container(new_value, list):
             if not _same(old_value, new_value):
-                out.append(path)
+                out[path] = None
             return
         old_list = old_value if isinstance(old_value, list) else []
         new_list = new_value if isinstance(new_value, list) else []
@@ -891,12 +975,12 @@ def _diff(
             item_path = f"{path}[{index}]"
             if template is None:
                 if not _same(old_item, new_item):
-                    out.append(item_path)
+                    out[item_path] = None
             else:
                 _diff(template, old_item, new_item, item_path, out)
         return
     if not _same(old_value, new_value):
-        out.append(path)
+        out[path] = node.apply
 
 
 def _is_container(value: Any, kind: type) -> bool:
@@ -909,6 +993,41 @@ def _same(left: Any, right: Any) -> bool:
     if left is _MISSING or right is _MISSING:
         return left is right
     return type(left) is type(right) and bool(left == right)
+
+
+class SettingsHistory:
+    """Recently observed revisions, with keyed digests at declared secret leaves."""
+
+    def __init__(self) -> None:
+        self._key = token_bytes(32)
+        self._documents: OrderedDict[str, SparseDocument] = OrderedDict()
+
+    def observe(
+        self, fingerprint: str, doc: SparseDocument, catalog: SettingNode
+    ) -> None:
+        if fingerprint not in self._documents:
+            self._documents[fingerprint] = SparseDocument(
+                data=_mask(catalog, doc.data, self._digest_secret)
+            )
+            if len(self._documents) > 16:
+                self._documents.popitem(last=False)
+        else:
+            self._documents.move_to_end(fingerprint)
+
+    def changes_since(
+        self, base: str, current: str, doc: SparseDocument | None, catalog: SettingNode
+    ) -> list[str] | None:
+        previous = self._documents.get(base)
+        if doc is None:
+            return None
+        self.observe(current, doc, catalog)
+        if previous is None:
+            return None
+        return changed_paths(previous, self._documents[current], catalog)
+
+    def _digest_secret(self, value: Any) -> bytes:
+        encoded = yaml.safe_dump(value).encode()
+        return hashlib.blake2b(encoded, key=self._key, digest_size=32).digest()
 
 
 def node_at_path(catalog: SettingNode, path: str) -> SettingNode | None:
@@ -962,15 +1081,21 @@ __all__ = [
     "PositionalSecret",
     "SecretResolution",
     "SecretState",
+    "SettingsHistory",
     "SparseDocument",
     "changed_paths",
+    "effective_values",
     "locate_problems",
     "mask_secrets",
     "merge_with_defaults",
     "node_at_path",
+    "parse_document",
     "problems_of",
     "read_document",
     "resolve_secrets",
     "restart_required_paths",
     "secret_states",
+    "setting_changes",
+    "validate_document",
+    "yaml_error_message",
 ]

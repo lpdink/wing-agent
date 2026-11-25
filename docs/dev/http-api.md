@@ -155,6 +155,14 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 > （当前唯一产出：原文件不可解析时"其中的密钥无法保留"——语法错的文件也能经这个端点修好）。
 > 保存成功会广播 `settings_changed` 事件（见下）。
 
+设置客户端还可消费向后兼容的扩展字段：
+
+- `get.effective` 为 `{values, sources}`，包含默认展开的磁盘配置和每条路径的 `default` / `override` 来源。密文仍为 `null`，保存继续使用稀疏 `get.values`。
+- `get.pending_restart` 与 `set.pending_restart` 为相对进程启动配置仍待重启的路径。配置无效或进程尚处于 setup mode 时为 `null`。
+- `set.written` 描述文件提交结果，`set.effects` 逐路径返回 `{path, scope, status, steps}`。步骤名称引用 `reload.results`，后者即使没有文档变化也提供本次重载结果。单个 Hook 或命令文件加载失败时，步骤 `detail` 包含相应 glob 路径，步骤 `ok` 继续表达整体阶段结果。
+- `409` 的 `conflict` 为 `{current_fingerprint, changed_paths}`，原有 `error` 和字符串 `detail` 继续可用。路径是最近观察到的 `base` 相对当前磁盘的差异。`[]` 表示无已声明设置差异，`null` 表示历史未覆盖或配置无法解析。
+
+
 #### 配置不可用时的降级面（setup mode）
 
 配置缺失 / 非法时网关**不再崩溃退出**：`boot_config()` 永不抛，网关以 **setup mode** 降级启动——
