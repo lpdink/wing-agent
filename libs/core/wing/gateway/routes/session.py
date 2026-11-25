@@ -651,6 +651,10 @@ async def update_session(
 ) -> UpdateSessionResponse:
     server = get_server(request)
 
+    if body.require_idle and body.model_extra:
+        raise HTTPException(
+            status_code=400, detail="unknown field in agent-only update"
+        )
     if body.validate_reasoning and body.model_extra:
         raise HTTPException(
             status_code=400, detail="unknown field in validated reasoning update"
@@ -684,7 +688,10 @@ async def update_session(
             workspace=body.workspace,
             tools=body.tools,
             validate_reasoning=body.validate_reasoning,
+            require_idle=body.require_idle,
         )
+    except SessionBusyError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
     except (OSError, UnicodeEncodeError) as e:
         if not body.validate_reasoning:
             if isinstance(e, UnicodeEncodeError):

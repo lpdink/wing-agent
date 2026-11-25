@@ -803,6 +803,7 @@ class WingRuntime:
         workspace: str | None = None,
         tools: list[str] | None = None,
         validate_reasoning: bool = False,
+        require_idle: bool = False,
     ) -> None:
         """统一更新 session 状态。
 
@@ -817,6 +818,23 @@ class WingRuntime:
                 工具引用无法解析
         """
         session = self._require_session(session_id)
+        if require_idle and (
+            agent is None
+            or validate_reasoning
+            or any(
+                v is not None
+                for v in (
+                    model_id,
+                    title,
+                    thinking,
+                    reasoning_effort,
+                    yolo,
+                    workspace,
+                    tools,
+                )
+            )
+        ):
+            raise ValueError("require_idle requires an agent-only update")
         if validate_reasoning:
             if any(
                 v is not None for v in (model_id, agent, title, yolo, workspace, tools)
@@ -835,16 +853,20 @@ class WingRuntime:
                         f"template '{agent}' not found, available: {available}"
                     )
 
-            await session.update_state(
-                model_id=model_id,
-                template=template,
-                title=title,
-                thinking=thinking,
-                reasoning_effort=reasoning_effort,
-                yolo=yolo,
-                workspace=workspace,
-                tools=tools,
-            )
+            if require_idle:
+                assert template is not None
+                await session.switch_template(template, require_idle=True)
+            else:
+                await session.update_state(
+                    model_id=model_id,
+                    template=template,
+                    title=title,
+                    thinking=thinking,
+                    reasoning_effort=reasoning_effort,
+                    yolo=yolo,
+                    workspace=workspace,
+                    tools=tools,
+                )
 
         # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo
         agent_switched = agent is not None

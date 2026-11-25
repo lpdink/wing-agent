@@ -1183,6 +1183,7 @@ class TestSessionUpdate:
             workspace=None,
             tools=None,
             validate_reasoning=False,
+            require_idle=False,
         )
 
     def test_validated_reasoning_persistence_failure(
@@ -1395,6 +1396,7 @@ class TestSessionUpdate:
             workspace="/tmp",
             tools=None,
             validate_reasoning=False,
+            require_idle=False,
         )
 
     def test_update_workspace_invalid(self, client: TestClient, mock_runtime):
