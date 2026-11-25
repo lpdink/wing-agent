@@ -179,7 +179,17 @@ async def test_interrupt_during_tool_execution_synthesizes_result(
     assert len(results) == 1, results
     assert results[0].data["tool_call_id"] == SLOW_CALL, results[0].data
     assert results[0].data["tool_result"] == INTERRUPTED_RESULT, results[0].data
-    assert results[0].data["tool_success"] is False, results[0].data
+    live = results[0].data
+    assert live["tool_success"] is False, live
+    history = await session.driver.http.request(
+        "GET", "/api/session/get", params={"session_id": session.session_id}
+    )
+    saved_assistant, saved_tool = history["messages"][1:]
+    assert saved_tool["tool_status"] == live["tool_status"] == "interrupted"
+    assert saved_tool["message_id"] == live["message_id"] == tool["message_id"]
+    assert saved_tool["message_at"] == live["message_at"]
+    assert "duration_ms" not in saved_tool and "duration_ms" not in live
+    assert history["events"][-1]["after_message_id"] == saved_assistant["message_id"]
 
     # ── 继续下一轮：合成结果参与下一轮请求，配对在请求体里同样成立 ──
     result = await session.chat("continue")

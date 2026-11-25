@@ -37,6 +37,7 @@ from wing.event import (
     UserMessageAcceptedEvent,
     wire_dump,
 )
+from wing.event.state_change import SessionHistory
 from wing.event_bus import event_bus
 from wing.media import SUPPORTED_IMAGE_MIMES, MediaAccess
 from wing.schema import ChainNode, MediaRef, Message, Tool
@@ -79,6 +80,23 @@ def serialize_message(msg: Message) -> dict:
         "content": msg.content or "",
         "uuid": msg.uuid,
     }
+    if msg.history_id is not None:
+        d["message_id"] = msg.history_id
+    if msg.message_at is not None:
+        d["message_at"] = msg.message_at.isoformat()
+    for field in (
+        "model",
+        "model_id",
+        "provider_name",
+        "model_display_name",
+        "stop_reason",
+        "tool_status",
+        "duration_ms",
+        "tool_args",
+    ):
+        value = getattr(msg, field)
+        if value is not None:
+            d[field] = value
     if msg.reasoning_content:
         d["reasoning_content"] = msg.reasoning_content
     if msg.tool_calls:
@@ -711,6 +729,27 @@ class Session:
         cm = self._context_manager
         return [serialize_message(msg) for msg in cm.get_context_window()]
 
+    def history_snapshot(self) -> SessionHistory:
+        agent = self.agent
+        turn_started_at = agent.turn_started_at
+        return SessionHistory(
+            messages=self.serialize_messages(),
+            uncommitted=agent.uncommitted_message(),
+            uncommitted_tools=agent.uncommitted_tools(),
+            uncommitted_tool_results=[
+                serialize_message(result) for result in agent.uncommitted_tool_results()
+            ],
+            tool_execution_timings=agent.tool_execution_timings(),
+            pending_user_messages=agent.pending_user_messages(),
+            events=[
+                wire_dump(event)
+                for event in self.context_manager.get_active_events(
+                    pending_ask_ids=agent.pending_ask_ids()
+                )
+            ],
+            turn_started_at=turn_started_at.isoformat() if turn_started_at else None,
+        )
+
     def sync_event(
         self,
         *,
@@ -720,24 +759,11 @@ class Session:
         refresh: bool = False,
     ) -> SyncSessionEvent | SessionHistoryRefreshedEvent:
         """Project the active history and all live state at the same point in time."""
-        cm = self.context_manager
-        agent = self.agent
         event_type = SessionHistoryRefreshedEvent if refresh else SyncSessionEvent
         return event_type(
+            **dict(self.history_snapshot()),
             session_id=self.session_id,
-            messages=self.serialize_messages(),
-            uncommitted=agent.uncommitted_message(),
-            uncommitted_tools=agent.uncommitted_tools(),
-            tool_execution_timings=agent.tool_execution_timings(),
-            pending_user_messages=agent.pending_user_messages(),
-            events=[
-                wire_dump(e)
-                for e in cm.get_active_events(pending_ask_ids=agent.pending_ask_ids())
-            ],
             status=self.status,
-            turn_started_at=(
-                agent.turn_started_at.isoformat() if agent.turn_started_at else None
-            ),
             agent=self.to_agent_info() if include_agent else None,
             name=self.session_name if include_agent else None,
             draft=draft,

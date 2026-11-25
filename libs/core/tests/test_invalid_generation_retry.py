@@ -206,7 +206,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_empty(), _text("hi")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), model="m")
+        msg = await loop._call_llm_validated(_Ctx())
 
         assert msg.content == "hi"
         assert provider.calls == 2
@@ -224,7 +224,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_thinking_only(), _text("hi")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), model="m")
+        msg = await loop._call_llm_validated(_Ctx())
 
         assert msg.content == "hi"
         assert provider.calls == 2
@@ -237,7 +237,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_attempt(_tool_call()["chunks"], unfinished=1)])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), model="m")
+        msg = await loop._call_llm_validated(_Ctx())
 
         assert msg.tool_calls is not None and msg.tool_calls[0].name == "Bash"
         assert provider.calls == 1
@@ -267,7 +267,7 @@ class TestInvalidGenerationRetry:
         loop = _make_loop(cm, provider)
         ctx = _Ctx()
 
-        msg = await loop._call_llm_validated(ctx, model="m")
+        msg = await loop._call_llm_validated(ctx)
 
         assert msg.content == "done"
         assert provider.calls == 2
@@ -291,7 +291,7 @@ class TestInvalidGenerationRetry:
         loop = _make_loop(cm, provider)
         ctx = _Ctx()
 
-        msg = await loop._call_llm_validated(ctx, model="m")
+        msg = await loop._call_llm_validated(ctx)
 
         assert msg.content == "final"
         assert provider.calls == 1
@@ -331,7 +331,7 @@ class TestInvalidGenerationRetry:
         loop._config = SimpleNamespace(max_retries=1, max_retry_delay=0.0)
 
         with pytest.raises(InvalidGenerationError):
-            await loop._call_llm_validated(_Ctx(), model="m")
+            await loop._call_llm_validated(_Ctx())
 
         assert provider.calls == 2  # 1 次 + 1 次重试
         assert cm.added == []
@@ -344,7 +344,7 @@ class TestInvalidGenerationRetry:
         loop = _make_loop(cm, provider)
 
         with pytest.raises(RuntimeError, match="boom"):
-            await loop._call_llm_validated(_Ctx(), model="m")
+            await loop._call_llm_validated(_Ctx())
 
         assert provider.calls == 1
 
@@ -355,7 +355,7 @@ class TestInvalidGenerationRetry:
         provider = _FakeProvider([_attempt([]), _text("hi")])
         loop = _make_loop(cm, provider)
 
-        msg = await loop._call_llm_validated(_Ctx(), model="m")
+        msg = await loop._call_llm_validated(_Ctx())
 
         assert msg.content == "hi"
         assert provider.calls == 2
@@ -383,7 +383,7 @@ class TestInvalidGenerationRetry:
         loop = _make_loop(cm, None)  # ty: ignore[invalid-argument-type]
         loop._current_provider = lambda: holder.provider
 
-        msg = await loop._call_llm_validated(_Ctx(), model="m")
+        msg = await loop._call_llm_validated(_Ctx())
 
         assert msg.content == "recovered"
         assert second.calls == 1

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from wing.chain import TrackedList
 from wing.common.logger import log
+from wing.event.base import HistoryNotice
 from wing.provider.base import ModelProvider
 from wing.schema import (
     AgentSkill,
@@ -817,6 +818,15 @@ class ContextManager:
         仅对 persist=true 的事件调用本方法——persist=false 的瞬态事件只
         广播、不落盘、不缓冲。
         """
+        if isinstance(event, HistoryNotice) and event.has_history_position:
+            event.after_message_id = next(
+                (
+                    node.history_id
+                    for node in reversed(self._messages)
+                    if isinstance(node, Message) and node.role in ("user", "assistant")
+                ),
+                None,
+            )
         self._messages.append(event)
 
     def _last_prompt_tokens(self) -> int | None:
@@ -911,7 +921,7 @@ class ContextManager:
         """返回活跃链上**可下发**的事实事件节点（按链序）——前端重放视图。
 
         过滤策略归属后端单点（前端只做能力分发，不编码"某类不得渲染"）：
-        - 仅事实类事件（`FACT_EVENTS`，与 persist 标记同处一文件）下发；
+        - 下发事实类事件（`FACT_EVENTS`）及需要定位的轮次触顶结果；
           存量日志里已写入的孪生记录（tool_call_result / llm_call_metrics）
           能加载进链但不在集合中，自然不下发（零迁移，前向容忍）；
         - `AskEvent` 额外按 `pending_ask_ids` 过滤——只下发**仍挂起**的提问
@@ -923,15 +933,23 @@ class ContextManager:
         from wing.event import FACT_EVENTS, AskEvent, WingEvent
 
         result: list[WingEvent] = []
+        after_message_id = None
         for e in self._messages:
+            if isinstance(e, Message) and e.role in ("user", "assistant"):
+                after_message_id = e.history_id
             if not isinstance(e, WingEvent):
                 continue
-            if e.type not in FACT_EVENTS:
+            notice = isinstance(e, HistoryNotice) and e.has_history_position
+            if e.type not in FACT_EVENTS and not notice:
                 continue
             if isinstance(e, AskEvent):
                 if pending_ask_ids is None or e.tool_call_id not in pending_ask_ids:
                     continue
-            result.append(e)
+            result.append(
+                e.model_copy(update={"after_message_id": after_message_id})
+                if notice
+                else e
+            )
         return result
 
     def get_context_stats(self) -> tuple[int, int]:

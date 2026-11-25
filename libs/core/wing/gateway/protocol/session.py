@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from wing.event import AgentInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
+from wing.event.state_change import SessionHistory
 from wing.schema import MediaRef
 from wing.session.override import AgentOverride
 
@@ -321,7 +322,7 @@ class SessionListResponse(BaseModel):
     sessions: list[SessionInfo] = Field(description="所有活跃 session 的摘要列表")
 
 
-class SessionGetResponse(BaseModel):
+class SessionGetResponse(SessionHistory):
     """session 详情响应。"""
 
     session_id: str = Field(description="session ID")
@@ -331,7 +332,6 @@ class SessionGetResponse(BaseModel):
     status: str = Field(
         default="idle", description="运行时状态: inactive|idle|working|waiting"
     )
-    messages: list[dict] = Field(description="消息历史列表")
     agent: AgentInfo | None = Field(default=None, description="当前 agent 配置信息")
 
 

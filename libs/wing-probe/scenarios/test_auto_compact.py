@@ -144,6 +144,17 @@ def _assert_applied(
     assert compact_node["unzip_last_uuid"] == material["unzip_last_uuid"]
     assert material["compressed_messages"] == 2, material
 
+    source_uuids = material["tail_source_uuids"]
+    assert source_uuids
+    for source_uuid, copy_uuid in zip(
+        source_uuids, material["tail_uuids"][: len(source_uuids)], strict=True
+    ):
+        source = before.by_uuid[source_uuid]
+        copy = after.by_uuid[copy_uuid]
+        for field in ("message_id", "message_at", "model", "model_id", "provider_name"):
+            assert copy.get(field) == source.get(field)
+        assert copy["message_id"] == source["message_id"]
+
     # 下一轮请求：前缀 = system + 压缩节点，被压缩区间逐字消失。
     context = _streamed(probe, model)[-1].context()
     assert context.all_messages[0].role == "system", context.describe()

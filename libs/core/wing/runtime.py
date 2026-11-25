@@ -666,7 +666,7 @@ class WingRuntime:
             "template_name": session.template_name,
             "workspace": session.session_workspace,
             "status": session.status,
-            "messages": session.serialize_messages(),
+            **dict(session.history_snapshot()),
             "agent": session.to_agent_info(),
         }
 

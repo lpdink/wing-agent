@@ -116,6 +116,17 @@ async def test_max_turns_reports_error_and_keeps_chain_paired(probe: Probe) -> N
     view.assert_chain_invariants()
     view.assert_no_transient_records()
 
+    history = await session.driver.http.request(
+        "GET", "/api/session/get", params={"session_id": session.session_id}
+    )
+    assert [event["type"] for event in history["events"]] == [
+        "diff_content",
+        "diff_content",
+        "turn_result",
+    ]
+    assert history["events"][-1] == result.data
+    assert result.data["after_message_id"] == history["messages"][-2]["message_id"]
+
     # ── workspace：两轮工具都真跑过 ──
     probe.files.assert_content(FIRST_FILE, equals="first")
     probe.files.assert_content(SECOND_FILE, equals="second")

@@ -95,7 +95,7 @@ async def test_manual_compact_chain_shape(probe: Probe) -> None:
     last_message_uuid = before.messages()[-1]["uuid"]
 
     response = await session.compact()
-    await session.watch.expect("compact_done", within=15)
+    notice = await session.watch.expect("compact_done", within=15)
     after = probe.history(session)
 
     assert response == {"ok": True, "original_tokens": 0, "compressed_tokens": 0}, (
@@ -122,6 +122,13 @@ async def test_manual_compact_chain_shape(probe: Probe) -> None:
     assert [event["type"] for event in after.events()] == ["compact_done"], (
         after.describe()
     )
+
+    history = await session.driver.http.request(
+        "GET", "/api/session/get", params={"session_id": session.session_id}
+    )
+    assert history["events"] == [notice.data]
+    assert notice.data["after_message_id"] == history["messages"][0]["message_id"]
+    assert "after_message_id" not in after.events()[0]
 
     # 旧节点不删（compact 是 append-only）。
     assert set(before.by_uuid) <= set(after.by_uuid), sorted(

@@ -377,6 +377,18 @@ pub struct SessionGetResponse {
     pub status: String,
     pub messages: Vec<serde_json::Value>,
     pub agent: Option<AgentInfo>,
+    pub turn_started_at: Option<DateTime<Utc>>,
+    pub uncommitted: Option<serde_json::Value>,
+    #[serde(default)]
+    pub uncommitted_tools: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub uncommitted_tool_results: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub tool_execution_timings: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    pub pending_user_messages: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub events: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -27,6 +27,7 @@ from .query_response import (
 )
 from .react import (
     AskEvent,
+    AssistantMessageCommittedEvent,
     AssistantTurnEvent,
     DiffContentEvent,
     DoneEvent,
@@ -156,6 +157,7 @@ __all__ = [
     "UserMessageQueuedEvent",
     "UserMessagesDroppedEvent",
     "DiffContentEvent",
+    "AssistantMessageCommittedEvent",
     "AssistantTurnEvent",
     "ToolResultTurnEvent",
     "TurnResultEvent",

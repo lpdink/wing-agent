@@ -310,13 +310,11 @@ class WingAgent:
         """
         from wing.session import serialize_message
 
-        acc = self._loop.current_acc
-        if acc is None:
-            return None
-        blocks = self.model_provider.snapshot_blocks(acc)
-        if not blocks:
-            return None
-        return serialize_message(Message(role="assistant", content_blocks=blocks))
+        message = self._loop.snapshot_message()
+        return serialize_message(message) if message is not None else None
+
+    def uncommitted_tool_results(self) -> list[Message]:
+        return self._executor.uncommitted_tool_results()
 
     def uncommitted_tools(self) -> list[dict]:
         """未终结 tool 调用的原始 args 片段列表（活工具卡渲染素材）。
@@ -334,7 +332,7 @@ class WingAgent:
                 "tool_name": v.tool_name,
                 "args_fragment": v.args_fragment,
             }
-            for v in self.model_provider.pending_tool_calls(acc)
+            for v in self._loop.generation_provider.pending_tool_calls(acc)
         ]
 
     def pending_ask_ids(self) -> set[str]:
@@ -841,8 +839,9 @@ class WingAgent:
 
     # ── 内部 ──
 
-    def _set_working(self, value: bool) -> None:
+    def _set_working(self, value: bool) -> datetime | None:
         self._turn_started_at = datetime.now(timezone.utc) if value else None
+        return self._turn_started_at
 
     def _fire_interrupt_hooks(self) -> None:
         """触发 interrupt hooks（如杀子进程）。"""
