@@ -10,9 +10,11 @@ WING_HOME 指到 tmp（config.yaml 写在那里），sessions 走 conftest 的�
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 from collections.abc import Iterator
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -438,10 +440,14 @@ class TestSettingsSet:
         before = _sha256(config_path)
         values, fingerprint = _get_doc(client)
         values["images"]["max_bytes"] = 33
-        with patch(
-            "wing.runtime.atomic_write_text",
-            side_effect=OSError("disk full"),
-        ):
+        from wing.common.fs import atomic_write_bytes
+
+        def fail_main_write(path: Path, data: bytes) -> None:
+            if path == config_path:
+                raise OSError("disk full")
+            atomic_write_bytes(path, data)
+
+        with patch("wing.runtime.atomic_write_bytes", side_effect=fail_main_write):
             resp = client.post(
                 "/api/settings/set", json={"base": fingerprint, "document": values}
             )
@@ -737,3 +743,68 @@ class TestSettingsEvent:
             changed=[], restart_required=[], setup_mode_exited=True, fingerprint="x"
         )
         assert wire_dump(event)["setup_mode_exited"] is True
+
+
+@pytest.mark.asyncio
+async def test_settings_save_waits_for_the_preceding_application(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from starlette.requests import Request
+
+    from wing.config import get_config_path
+    from wing.gateway.protocol import SettingsSetRequest, SettingsSetResponse
+    from wing.gateway.routes.settings import settings_set
+    from wing.gateway.server import GatewayServer
+    from wing.runtime import WriteEffectResult
+    from wing.system import ReloadResult, ReloadResultItem
+
+    monkeypatch.setenv("WING_HOME", str(tmp_path))
+    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+    config_path = get_config_path()
+    config_path.parent.mkdir()
+    config_path.write_text(VALID_YAML, encoding="utf-8")
+    reset_config()
+    server = GatewayServer()
+    request = Request({"type": "http", "app": server._app})
+    first_at_effect = asyncio.Event()
+    release_first = asyncio.Event()
+    second_at_route = asyncio.Event()
+    application_order = []
+
+    async def observe_write_effect() -> WriteEffectResult:
+        if not first_at_effect.is_set():
+            first_at_effect.set()
+            await release_first.wait()
+        application_order.append(yaml.safe_load(config_path.read_bytes())["steer"])
+        return WriteEffectResult(
+            reload=ReloadResult(True, [ReloadResultItem("config.yaml", True)])
+        )
+
+    monkeypatch.setattr(server.runtime, "post_write_effect", observe_write_effect)
+    document = yaml.safe_load(VALID_YAML)
+    first = SettingsSetRequest(document={**deepcopy(document), "steer": False})
+    second = SettingsSetRequest(document={**deepcopy(document), "steer": True})
+
+    async def save_second() -> SettingsSetResponse:
+        second_at_route.set()
+        result = await settings_set(second, request)
+        assert isinstance(result, SettingsSetResponse)
+        return result
+
+    try:
+        async with asyncio.timeout(5), asyncio.TaskGroup() as group:
+            first_task = group.create_task(settings_set(first, request))
+            await first_at_effect.wait()
+            first_fingerprint = _sha256(config_path)
+            second_task = group.create_task(save_second())
+            await second_at_route.wait()
+            assert _sha256(config_path) == first_fingerprint
+            assert not second_task.done()
+            release_first.set()
+        first_receipt = first_task.result()
+        assert isinstance(first_receipt, SettingsSetResponse)
+        assert first_receipt.fingerprint == first_fingerprint
+        assert second_task.result().fingerprint == _sha256(config_path)
+        assert application_order == [False, True]
+    finally:
+        reset_config()

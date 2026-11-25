@@ -28,6 +28,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 import yaml
 
@@ -254,7 +256,8 @@ agents:
 """
 
 #: 坏缩进（语法错的形态）：文件存在但读不出文档。
-SYNTAX_ERROR_CONFIG = "providers: [\n"
+SYNTAX_ERROR_SECRET = "probe-malformed-private-value"
+SYNTAX_ERROR_CONFIG = f'providers:\n  - api_key: "{SYNTAX_ERROR_SECRET}\n'
 
 
 def _fixed_document(probe: Probe) -> dict:
@@ -354,10 +357,18 @@ async def test_syntax_error_file_repairs_through_the_api(probe: Probe) -> None:
         assert problem["path"] is None, problem
         assert "不是合法 YAML" in problem["message"], problem
 
+        broken = await http.request("GET", "/api/settings/get")
+        assert broken["values"] == {}
+        assert broken["effective"]["values"]["steer"] is True
+        assert broken["effective"]["sources"]["steer"] == "default"
+        assert broken["pending_restart"] is None
+        assert SYNTAX_ERROR_SECRET not in json.dumps([broken, status])
+
         receipt = await http.request(
             "POST", "/api/settings/set", body={"document": _fixed_document(probe)}
         )
-        assert receipt["ok"] is True, receipt
+        assert receipt["ok"] is receipt["written"] is True, receipt
+        assert SYNTAX_ERROR_SECRET not in json.dumps(receipt)
         assert receipt["setup_mode_exited"] is True, receipt
         # 密钥无法保留是必然（文件读不出来）——回执显式告知。
         assert receipt["warnings"] == [
@@ -383,5 +394,51 @@ async def test_syntax_error_file_repairs_through_the_api(probe: Probe) -> None:
         assert result.data["result"] == "repaired", result.data
         request = probe.request(SETUP_MODEL, 0)
         assert request.context().messages[-1].content == "back?", request.describe()
+    finally:
+        await http.close()
+
+
+@pytest.mark.probe_env(connect=False, config_text="")
+@pytest.mark.asyncio
+async def test_empty_config_exposes_defaults_and_accepts_initial_setup(
+    probe: Probe,
+) -> None:
+    http = DriverHttp(probe.env.gateway_url, started_at=probe.env.started_at)
+    try:
+        current = await http.request("GET", "/api/settings/get")
+        assert current["setup_mode"] is True
+        assert current["values"] == {}
+        assert current["effective"]["values"]["steer"] is True
+        assert current["effective"]["sources"]["steer"] == "default"
+        assert current["pending_restart"] is None
+
+        failed = await http.request(
+            "POST",
+            "/api/settings/set",
+            body={"base": current["fingerprint"], "document": {}},
+        )
+        assert failed["ok"] is failed["written"] is False
+        assert failed["effects"] == []
+        assert failed["fingerprint"] == current["fingerprint"]
+        assert failed["problems"]
+        assert probe.env.config_path.read_bytes() == b""
+
+        document = _fixed_document(probe)
+        document["sessions"] = {"archive": {"sweep_interval_seconds": 12.0}}
+        saved = await http.request(
+            "POST",
+            "/api/settings/set",
+            body={"base": current["fingerprint"], "document": document},
+        )
+        assert saved["written"] is saved["setup_mode_exited"] is True
+        assert saved["pending_restart"] == []
+        assert "sessions.archive.sweep_interval_seconds" in saved["restart_required"]
+        assert {
+            "path": "sessions.archive.sweep_interval_seconds",
+            "scope": "restart",
+            "status": "applied",
+            "steps": [],
+        } in saved["effects"]
+        assert (await http.request("GET", "/api/settings/status"))["valid"] is True
     finally:
         await http.close()

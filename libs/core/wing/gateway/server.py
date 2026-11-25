@@ -33,9 +33,11 @@ from wing.config import (
     ConfigProblem,
     GatewayConfig,
     ProblemKind,
+    SessionsConfig,
     load_config,
 )
 from wing.config.boot import BootFailure, BootResult, boot_config
+from wing.config.document import SettingsHistory, SparseDocument
 from wing.event import WingEvent, wire_dump
 from wing.event_bus import event_bus
 from wing.request_context import get_request_context
@@ -170,6 +172,9 @@ class GatewayServer:
         # 「有时没有 runtime」，而是「除修复路径外一律 503」（守门 + 替身共同保证）。
         self._runtime: WingRuntime = _SetupRuntime(self)
         self._in_setup_mode = True
+        self.settings_lock = asyncio.Lock()
+        self.settings_history = SettingsHistory()
+        self._installed_sessions_config: SessionsConfig | None = None
         self._client_to_ws: dict[str, WebSocket] = {}
         self._ws_to_client: dict[WebSocket, str] = {}
         self._event_senders: dict[WebSocket, _EventSender] = {}
@@ -189,6 +194,12 @@ class GatewayServer:
                 # 而 status.valid=true（预检把用户送进正常启动链再吃一串 503）。
                 self._record_startup_failure(result)
         self._app = create_app(self)
+        startup_host, startup_port = self._boot.endpoint or (DEFAULT_HOST, DEFAULT_PORT)
+        self._startup_gateway_settings = {
+            "host": startup_host,
+            "port": startup_port,
+            "cors": {"origins": self.cors_origins},
+        }
 
     # ============================================================
     # 运行模式
@@ -305,11 +316,19 @@ class GatewayServer:
 
         # 全部成功：同一个同步块里原子翻转（请求处理之间看不到中间态）。
         self._runtime = runtime
+        self._installed_sessions_config = config.sessions
         self._in_setup_mode = False
         log.info(
             "setup mode exited: gateway is operational (config reloaded from disk)"
         )
         return ReloadResult(ok=True, items=items)
+
+    def settings_startup(self) -> SparseDocument:
+        """Configuration captured when process resources were installed."""
+        data: dict[str, Any] = {"gateway": self._startup_gateway_settings}
+        if self._installed_sessions_config is not None:
+            data["sessions"] = self._installed_sessions_config.model_dump()
+        return SparseDocument(data=data)
 
     def _record_startup_failure(self, result: ReloadResult) -> None:
         """启动路径转入正常模式失败：**不静默降级**。

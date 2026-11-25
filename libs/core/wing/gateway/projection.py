@@ -17,19 +17,28 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from wing.config import ConfigProblem, SettingGroup, SettingNode
+from wing.config import ApplyScope, Config, ConfigProblem, SettingGroup, SettingNode
 from wing.config.document import SecretState as SecretStateDomain
+from wing.config.document import (
+    SparseDocument,
+    changed_paths,
+    effective_values,
+    restart_required_paths,
+)
 from datetime import datetime
 
 from wing.event.query_response import BranchTargetInfo
 from wing.gateway.protocol import (
     BranchesResponse,
     ContextStatsInfo,
+    EffectiveSettings,
+    EffectStatus,
     ReloadResponse,
     ReloadResultItem,
     SecretState as SecretStateProto,
     SessionInfoResponse,
     SettingChoice,
+    SettingEffect,
     SettingGroupProto,
     SettingNodeProto,
     SettingProblem,
@@ -192,10 +201,86 @@ def build_reload_response(result: ReloadResult) -> ReloadResponse:
     )
 
 
-def build_settings_apply_response(result: SettingsApplyResult) -> SettingsSetResponse:
+def build_effective_settings(
+    doc: SparseDocument, catalog: SettingNode, config: Config | None
+) -> EffectiveSettings:
+    values, sources = effective_values(doc, catalog, config)
+    return EffectiveSettings(values=values, sources=sources)
+
+
+def pending_settings_restart(
+    startup: SparseDocument, config: Config | None, catalog: SettingNode
+) -> list[str] | None:
+    if config is None:
+        return None
+    current = SparseDocument(data=config.model_dump(include={"gateway", "sessions"}))
+    return restart_required_paths(changed_paths(startup, current, catalog), catalog)
+
+
+def _settings_steps(path: str, *, setup: bool) -> list[str]:
+    root = path.split(".", 1)[0].split("[", 1)[0]
+    if root == "providers":
+        step = "runtime" if setup else "provider"
+    elif root == "hooks":
+        step = "runtime" if setup else "hooks"
+    elif root == "commands":
+        step = "prompt commands"
+    elif root == "log":
+        step = "log level"
+    elif setup:
+        step = "auth" if path.startswith("gateway.auth.") else "runtime"
+    else:
+        return ["config.yaml"]
+    return ["config.yaml", step]
+
+
+def _settings_effects(
+    result: SettingsApplyResult, pending: list[str] | None, *, setup: bool
+) -> list[SettingEffect]:
+    if result.reload is None:
+        return []
+    by_step = {item.name: item.ok for item in result.reload.items}
+    effects = []
+    for path, scope in result.change_scopes.items():
+        steps: list[str] = []
+        status: EffectStatus
+        if scope is None:
+            status = "unknown"
+        elif scope is ApplyScope.READONLY:
+            status = "readonly"
+        elif scope is ApplyScope.RESTART:
+            if pending is None:
+                status = "unknown"
+            else:
+                status = "restart_required" if path in pending else "applied"
+        else:
+            required = _settings_steps(path, setup=setup)
+            steps = [step for step in required if step in by_step]
+            if any(not by_step[step] for step in steps):
+                status = "failed"
+            elif len(steps) != len(required) or (
+                setup and not result.setup_mode_exited
+            ):
+                status = "unknown"
+            else:
+                status = (
+                    "next_session" if scope is ApplyScope.NEXT_SESSION else "applied"
+                )
+        effects.append(
+            SettingEffect(path=path, scope=scope, status=status, steps=steps)
+        )
+    return effects
+
+
+def build_settings_apply_response(
+    result: SettingsApplyResult, pending: list[str] | None, *, setup: bool
+) -> SettingsSetResponse:
     """``SettingsApplyResult`` → POST /api/settings/set 的回执。"""
     return SettingsSetResponse(
         ok=result.ok,
+        written=result.ok,
+        pending_restart=pending,
+        effects=_settings_effects(result, pending, setup=setup),
         fingerprint=result.fingerprint,
         problems=[build_settings_problem(p) for p in result.problems],
         changed=list(result.changed),

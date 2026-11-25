@@ -196,6 +196,12 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 读端点**不经过 `server.runtime`**（纯函数 + 投影组合），写路径住在 runtime；服务端**不缓存文档**——
 每次 GET / POST 都现读磁盘，永远与文件一致。
 
+
+`get.effective` 的 `values` 由声明默认值与当前磁盘文档合成，有效文档使用校验后的类型。
+`sources` 按具体路径记录 `default` 或 `override`，显式填写等于默认值的值仍为 `override`。
+缺席的必填字段保持缺席，密文仍为 `null`，语法错误时可读取声明默认值。编辑器保存使用原有
+稀疏 `values`，保留密文 `null` 哨兵。进程和已有会话的应用状态以生效域与回执为准。
+
 保存事务（`WingRuntime.apply_settings`，唯一写盘路径）：
 
 ```
@@ -228,6 +234,20 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 | `setup_mode_exited` | 这次保存是否把网关从 setup mode 推进正常模式 |
 | `backup_path` | `.bak` 路径；磁盘上原来没有文件时为 `null` |
 | `warnings` | 非致命告知（与 `problems` 的区别：problems 让保存失败，warnings 只是提醒） |
+| `written` | 此次保存已完成配置文件写盘，热重载失败仍为 `true`。校验失败为 `false` |
+| `effects` | 此次变更的逐路径应用结果。`scope` 来自目录。`steps` 引用实际尝试过的重载阶段。状态为 `applied`、`next_session`、`restart_required`、`failed`、`unknown` 或 `readonly` |
+| `pending_restart` | 相对进程启动配置仍待重启的已知路径，`get` 同样返回。重复保存仍报告，复位到启动值或重启后消失。配置无效或处于 setup mode 时为 `null` |
+
+同一网关进程的 HTTP 保存串行经过指纹比较、写盘和重载。冲突回执保留 `error` 与字符串 `detail`，
+增 `conflict.current_fingerprint` 和 `conflict.changed_paths`。`changed_paths` 比较服务器近期观察过的
+稀疏基线与当前文件，两份文档可比较时返回目录路径，密文变更只暴露路径。`[]` 表示无已声明设置差异，
+`null` 表示最近的进程内历史无法提供基线或现文件无法解析。客户端处理前重新取得文档并保留本地草稿。
+
+`effects` 描述本次变更的应用结果。相关重载项失败时报告 `failed`，缺少足够信息时报告 `unknown`。
+重复保存仍可通过完整的 `reload.results` 查看各阶段重试结果。`pending_restart` 比较配置启动基线，
+`gateway.host` 与 `gateway.port` 的命令行覆盖属于进程部署参数。setup 原地注册的后台任务采用修复时的配置，
+应用结果会反映该状态。旧 `restart_required` 继续报告本次变更的重启域路径。
+
 
 `changed_paths` 的口径：对两棵稀疏文档做递归 diff，**列表按下标**（删除 `providers[0]` 会把后续项
 逐个记成 modified——这是"N 项变更"的展示粒度，不是三方合并）、类型敏感（`True != 1`、`300 != 300.0`）、
