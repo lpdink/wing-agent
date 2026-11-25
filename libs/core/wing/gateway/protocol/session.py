@@ -192,6 +192,10 @@ class UpdateSessionRequest(BaseModel):
         default=False,
         description="按当前模型校验 thinking / reasoning_effort；仅可与这两项一起提交",
     )
+    require_idle: bool = Field(
+        default=False,
+        description="仅用于单独切换 agent；会话有在途工作或正在关闭时返回 409",
+    )
 
 
 class TagSessionRequest(BaseModel):

@@ -380,7 +380,9 @@ class Session:
         session._metadata.template_name = template.name
         return session
 
-    async def switch_template(self, template: "AgentTemplate") -> None:
+    async def switch_template(
+        self, template: "AgentTemplate", *, require_idle: bool = False
+    ) -> None:
         """原地替换 agent，保留消息历史。
 
         在同一个 session 内：
@@ -393,9 +395,7 @@ class Session:
         # 干净关闭旧 agent 的 worker；provider 实例归共享池，不随 agent 关闭
         # （其他会话可能正在用，且新 agent 多半解析到同一实例）。
         old_agent = self._agent
-        await old_agent.shutdown(
-            notify=old_agent.status != "idle" or old_agent.has_pending_input
-        )
+        await old_agent.shutdown_for_template_switch(require_idle=require_idle)
 
         self._context_manager, self._agent = _build_runtime(
             template,

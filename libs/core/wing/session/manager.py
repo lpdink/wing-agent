@@ -1024,9 +1024,12 @@ class SessionManager:
 
         另加一条：**手动压缩在飞**——它是会话级独占操作（`WingAgent.compacting`），
         status 在压缩期间仍是 idle（压缩不是 turn），拆解会把它正在改写的链拆掉。
+        Agent 换入前的关闭阶段也钉住会话，保证替换中的 Session 仍由 manager 持有。
         """
         if session.status != "idle":
             return f"status={session.status}"
+        if session.agent.replacing:
+            return "agent is being replaced"
         if session.agent.compacting:
             return "compacting"
         if session.agent.has_pending_input:

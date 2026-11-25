@@ -63,6 +63,9 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 
 新客户端确认 `reasoning` 存在后，可在 `POST /api/session/update` 发送 `validate_reasoning: true` 和 `thinking`、`reasoning_effort` 中至少一项。该模式仅接收这两项更新，未知的请求字段、不可用的控件及未声明的力度返回 400。已物化的会话把本次设置一起持久化，写盘失败返回 500 并保留此前状态。草稿仍随物化落盘。旧请求沿用已有覆盖语义和顶层状态字段。成功回执仍为 `{"ok":true}`。收到 `session_state_changed` 或模型配置热重载后，可按原会话 ID 重读 `info`。切换模型保留显式覆盖，切换 Agent 模板重置模型、工具、thinking、effort、yolo、基础提示词和轮次限额，保留会话、历史、追加提示词与工作区。
 
+
+`POST /api/session/update` 支持 `{"session_id":"…","agent":"模板名","require_idle":true}`。该选项仅用于单独切换 Agent 模板。缺少 `agent`、混入其他变更或未知字段返回 400。会话有在途轮次、等待回答、排队或准备输入、手动压缩或正在关闭时返回 409，保留队列、历史和会话覆盖。准入检查与关闭投递闸门之间没有挂起点。换入新 Agent 前到达的输入会明确被拒绝，换入完成后可重试。成功响应仍为 `{"ok":true}`。省略或传 `false` 使用既有模板切换语义。客户端可通过 `/openapi.json` 中 `UpdateSessionRequest.properties.require_idle` 检测支持情况。
+
 > **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、无人订阅、
 > 非 memory 后端，且超过 `sessions.eviction.idle_ttl_seconds`）会被后台周期任务逐出内存——
 > 只回收 worker 与 provider client，`history.jsonl` / `metadata.json` 一概不动。
