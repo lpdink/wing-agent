@@ -1731,7 +1731,7 @@ mod tests {
 
     /// 小写 choices 拼写的端到端 round-trip；同时确认既有的大小写不敏感解析没被动过。
     #[test]
-    fn a_document_written_with_the_lowercase_choice_spellings_round_trips() {
+    fn rendering_choices_round_trip_in_sparse_and_full_dumps() {
         let doc = json!({
             "colors": {"preset": "light", "accent": "#ff00ff"},
             "layout": {"max_input_lines": 25},
@@ -1777,10 +1777,6 @@ mod tests {
             ThinkingMode::Visible
         );
         assert_eq!(
-            parse("rendering:\n  thinking: hidden\n").rendering.thinking,
-            ThinkingMode::Hidden
-        );
-        assert_eq!(
             parse("rendering:\n  math: Text\n").rendering.math,
             MathMode::Text
         );
@@ -1792,10 +1788,16 @@ mod tests {
             parse("rendering:\n  images: Auto\n").rendering.images,
             ImagesMode::Auto
         );
+        let full_dump = parsed.to_yaml();
         assert_eq!(
-            parse("rendering:\n  images: off\n").rendering.images,
-            ImagesMode::Off
+            doc_from_text(&full_dump)["rendering"],
+            json!({"thinking": "Hidden", "math": "Off", "images": "Off"}),
+            "{full_dump}"
         );
+        let full = parse(&full_dump);
+        assert_eq!(full.rendering.thinking, ThinkingMode::Hidden);
+        assert_eq!(full.rendering.math, MathMode::Off);
+        assert_eq!(full.rendering.images, ImagesMode::Off);
     }
 
     /// 取消注释注释掉的默认值 = 一份合法配置，且**生效值**就是默认值

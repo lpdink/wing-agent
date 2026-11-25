@@ -1035,7 +1035,7 @@ async fn dispatch_stdio(cli: Cli) -> ExitCode {
 
 /// Smart default: check if gateway is running, start if not, then enter TUI.
 async fn smart_default_tui() -> Result<()> {
-    let (host, port) = crate::stdio::ensure_gateway_running().await?;
+    let (host, port) = common::ensure_gateway().await?;
     run_tui(&host, port).await
 }
 

@@ -6,6 +6,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::io::IsTerminal;
+use std::ops::ControlFlow;
 use std::process::ExitCode;
 
 use anyhow::Result;
@@ -99,11 +100,44 @@ pub fn render_table(
 
 /// Ensure the gateway is running, returning `(host, port)`.
 ///
-/// Checks the health endpoint first; if the gateway is not reachable,
-/// starts it automatically. Delegates to `stdio::ensure_gateway_running()`
-/// which already implements the full discovery + auto-start logic.
+/// Checks the health endpoint first and starts the gateway if needed.
 pub async fn ensure_gateway() -> Result<(String, u16)> {
-    crate::stdio::ensure_gateway_running().await
+    let config = super::backend_config::read_backend_gateway_config();
+    let http_base = format!("http://{}:{}", config.host, config.port);
+    let already_running = match GatewayApiClient::new(&http_base, None) {
+        Ok(client) => matches!(client.health().await, Ok(h) if h.service == "wing-gateway"),
+        Err(_) => false,
+    };
+    if !already_running {
+        super::start::start_gateway(&config.host, config.port).await?;
+    }
+    Ok((config.host, config.port))
+}
+
+pub(crate) struct HeadlessGateway {
+    pub http: GatewayApiClient,
+    pub ws_url: String,
+    pub api_key: Option<String>,
+}
+
+pub(crate) async fn prepare_headless_gateway(
+    host: &str,
+    port: u16,
+    http_error: impl FnOnce(ApiClientError) -> anyhow::Error,
+) -> Result<ControlFlow<ExitCode, HeadlessGateway>> {
+    let http_base = format!("http://{host}:{port}");
+    let api_key = load_api_key();
+    let http = GatewayApiClient::new(&http_base, api_key.as_deref()).map_err(http_error)?;
+
+    // Setup mode rejects WebSocket handshakes, so obtain its diagnostics over HTTP first.
+    if let Some(code) = super::setup::preflight_or_report(&http, &http_base).await {
+        return Ok(ControlFlow::Break(code));
+    }
+    Ok(ControlFlow::Continue(HeadlessGateway {
+        http,
+        ws_url: format!("ws://{host}:{port}/ws"),
+        api_key,
+    }))
 }
 
 /// Load the API key from TUI config (if any).

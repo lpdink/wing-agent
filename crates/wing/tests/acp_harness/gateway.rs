@@ -3,7 +3,7 @@
 //! 设计：
 //!
 //! - 端口 `127.0.0.1:0` 临时分配，测试把 `host:port` 写进临时 `WING_HOME` 的
-//!   `core/config.yaml`；`wing acp` 的 `ensure_gateway_running` 健康检查打到这里
+//!   `core/config.yaml`；`wing acp` 的 `cmd::common::ensure_gateway` 健康检查打到这里
 //!   （`service == "wing-gateway"`），**不会**尝试拉起真网关；
 //! - HTTP 侧用 hyper（reqwest 的传递依赖，零新 crate）：13 个端点全是固定 JSON，
 //!   keep-alive / Content-Length 分帧等正确性交给 hyper；
