@@ -16,7 +16,12 @@ from pydantic import BaseModel, Field
 from wing.store import SessionUsage
 
 from .base import AgentInfo, HistoryNotice, SessionStatus, WingEvent
-from .react import PendingUserMessage, ToolExecutionTiming
+from .react import (
+    AssistantGeneration,
+    PendingUserMessage,
+    ToolExecution,
+    ToolExecutionTiming,
+)
 
 # ============================================================
 # Session 生命周期事件
@@ -33,11 +38,13 @@ class SessionHistory(BaseModel):
 
     messages: list[dict[str, Any]] = Field(default_factory=list)
     uncommitted: dict[str, Any] | None = None
+    assistant_generation: AssistantGeneration | None = None
     uncommitted_tools: list[dict[str, Any]] = Field(default_factory=list)
     uncommitted_tool_results: list[dict[str, Any]] = Field(default_factory=list)
     events: list[dict[str, Any]] = Field(default_factory=list)
     pending_user_messages: list[PendingUserMessage] = Field(default_factory=list)
     turn_started_at: str | None = None
+    tool_executions: dict[str, ToolExecution] = Field(default_factory=dict)
     tool_execution_timings: dict[str, ToolExecutionTiming] = Field(default_factory=dict)
 
 

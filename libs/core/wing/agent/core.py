@@ -30,6 +30,8 @@ from wing.event import (
     AskEvent,
     InterruptedEvent,
     NoticeEvent,
+    AssistantGeneration,
+    ToolExecution,
     ToolExecutionTiming,
     WingEvent,
 )
@@ -304,6 +306,12 @@ class WingAgent:
 
     def tool_execution_timings(self) -> dict[str, ToolExecutionTiming]:
         return self._executor.tool_execution_timings()
+
+    def assistant_generation(self) -> AssistantGeneration | None:
+        return self._loop.assistant_generation()
+
+    def tool_executions(self) -> dict[str, ToolExecution]:
+        return self._executor.tool_executions()
 
     def uncommitted_message(self) -> dict | None:
         """未提交的 assistant Message 投影（单个 Message 形状 dict | None）。

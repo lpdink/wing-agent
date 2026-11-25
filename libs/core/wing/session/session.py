@@ -718,11 +718,13 @@ class Session:
         return SessionHistory(
             messages=self.serialize_messages(),
             uncommitted=agent.uncommitted_message(),
+            assistant_generation=agent.assistant_generation(),
             uncommitted_tools=agent.uncommitted_tools(),
             uncommitted_tool_results=[
                 serialize_message(result) for result in agent.uncommitted_tool_results()
             ],
             tool_execution_timings=agent.tool_execution_timings(),
+            tool_executions=agent.tool_executions(),
             pending_user_messages=agent.pending_user_messages(),
             events=[
                 wire_dump(event)

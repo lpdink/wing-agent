@@ -120,7 +120,9 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         body = self._build_body(messages, model, tools, stream, options)
 
         if stream:
-            async for item in self._generate_stream(body, model, accumulator, options):
+            async for item in self._stream_attempt(
+                self._generate_stream(body, model, accumulator, options), accumulator
+            ):
                 yield item
         else:
             async for item in self._generate_sync(body, model, options):
@@ -504,10 +506,16 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                         yield out
                 elif event_type == "message_delta":
                     self._on_message_delta(state, data)
+                    if (
+                        state.stop_reason
+                        and accumulator is not None
+                        and accumulator.finished_at is None
+                    ):
+                        accumulator.finished_at = datetime.now(UTC)
                 elif event_type == "message_start":
                     self._on_message_start(state, data)
                 elif event_type == "message_stop":
-                    if accumulator is not None:
+                    if accumulator is not None and accumulator.finished_at is None:
                         accumulator.finished_at = datetime.now(UTC)
                     yield self._build_final_response(
                         state, model, request_id, header_rt_ms

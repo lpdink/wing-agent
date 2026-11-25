@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence, cast
@@ -182,17 +182,29 @@ class StreamAccumulator:
     provider.snapshot_blocks(accumulator)。
     """
 
-    __slots__ = ("state", "attempt", "finished_at")
+    __slots__ = ("state", "attempt", "finished_at", "discarded", "on_discard")
 
     def __init__(self) -> None:
         self.state: object | None = None
         self.attempt = 0
         self.finished_at: datetime | None = None
+        self.discarded = False
+        self.on_discard: Callable[[int], None] | None = None
 
     def start_attempt(self, state: object) -> None:
         self.state = state
         self.attempt += 1
         self.finished_at = None
+        self.discarded = False
+
+    def discard_attempt(self) -> None:
+        if self.discarded:
+            return
+        self.state = None
+        self.finished_at = None
+        self.discarded = True
+        if self.on_discard is not None:
+            self.on_discard(max(1, self.attempt))
 
 
 class ModelProvider(ABC):
@@ -264,6 +276,19 @@ class ModelProvider(ABC):
             self._inflight -= 1
             if self._retired and self._inflight == 0:
                 await self.aclose()
+
+    @staticmethod
+    async def _stream_attempt(
+        chunks: AsyncIterator[LLMResponse], accumulator: StreamAccumulator | None
+    ) -> AsyncIterator[LLMResponse]:
+        try:
+            async for chunk in chunks:
+                yield chunk
+        except Exception:
+            # Discard before the outer retry decorator announces or awaits backoff.
+            if accumulator is not None:
+                accumulator.discard_attempt()
+            raise
 
     @abstractmethod
     def _generate(

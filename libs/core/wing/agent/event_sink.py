@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 from wing.common.logger import log
 from wing.event import (
+    AssistantGenerationResetEvent,
     AssistantMessageCommittedEvent,
     AssistantTurnEvent,
     ContextStatsEvent,
@@ -43,6 +44,8 @@ from wing.event import (
     ToolCallEvent,
     ToolCallResultEvent,
     ToolCallStreamEvent,
+    ToolExecution,
+    ToolExecutionStartedEvent,
     ToolExecutionTiming,
     ToolExecutionTimingEvent,
     ToolResultTurnEvent,
@@ -264,14 +267,31 @@ class AgentEventSink:
 
     # ── Assistant turn ──
 
-    def assistant_turn(self, msg: Message, model: str) -> None:
-        self.emit(AssistantTurnEvent.from_message(msg, model, self._session_id))
+    def assistant_generation_reset(
+        self, message_id: str, generation_attempt: int
+    ) -> None:
+        self.emit(
+            AssistantGenerationResetEvent(
+                message_id=message_id,
+                generation_attempt=generation_attempt,
+            )
+        )
 
-    def assistant_message_committed(self, msg: Message, model: str) -> None:
+    def assistant_turn(
+        self, msg: Message, model: str, generation_attempt: int | None = None
+    ) -> None:
+        event = AssistantTurnEvent.from_message(msg, model, self._session_id)
+        event.generation_attempt = generation_attempt
+        self.emit(event)
+
+    def assistant_message_committed(
+        self, msg: Message, model: str, generation_attempt: int | None = None
+    ) -> None:
         event = AssistantMessageCommittedEvent.from_message(
             msg, model, self._session_id
         )
         event.stop_reason = msg.stop_reason
+        event.generation_attempt = generation_attempt
         self.emit(event)
 
     # ── Context stats ──
@@ -292,6 +312,15 @@ class AgentEventSink:
 
     def tool_started(self, tc: ToolCall) -> None:
         self.emit(ToolCallEvent.from_tool_call(tc, self._session_id))
+
+    def tool_execution_started(self, call_id: str, execution: ToolExecution) -> None:
+        self.emit(
+            ToolExecutionStartedEvent(
+                tool_call_id=call_id,
+                tool_name=execution.tool_name,
+                tool_args=execution.tool_args,
+            )
+        )
 
     def tool_execution_timing(self, call_id: str, timing: ToolExecutionTiming) -> None:
         self.emit(
@@ -335,14 +364,45 @@ class AgentEventSink:
 
     # ── LLM streaming events ──
 
-    def llm_text(self, content: str) -> None:
-        self.emit(TextEvent(session_id=self._session_id, content=content))
+    def llm_text(
+        self,
+        content: str,
+        *,
+        message_id: str | None = None,
+        generation_attempt: int | None = None,
+    ) -> None:
+        self.emit(
+            TextEvent(
+                content=content,
+                message_id=message_id,
+                generation_attempt=generation_attempt,
+            )
+        )
 
-    def llm_reasoning(self, content: str) -> None:
-        self.emit(ReasoningEvent(session_id=self._session_id, content=content))
+    def llm_reasoning(
+        self,
+        content: str,
+        *,
+        message_id: str | None = None,
+        generation_attempt: int | None = None,
+    ) -> None:
+        self.emit(
+            ReasoningEvent(
+                content=content,
+                message_id=message_id,
+                generation_attempt=generation_attempt,
+            )
+        )
 
     def llm_tool_call_delta(
-        self, tool_call_id: str, tool_name: str, args_fragment: str, is_final: bool
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        args_fragment: str,
+        is_final: bool,
+        *,
+        message_id: str | None = None,
+        generation_attempt: int | None = None,
     ) -> None:
         self.emit(
             ToolCallStreamEvent(
@@ -350,6 +410,8 @@ class AgentEventSink:
                 tool_call_id=tool_call_id,
                 tool_name=tool_name,
                 args_fragment=args_fragment,
+                message_id=message_id,
+                generation_attempt=generation_attempt,
                 is_final=is_final,
             )
         )

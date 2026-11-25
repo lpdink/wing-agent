@@ -339,7 +339,7 @@ FAST_EVICTION = {"eviction": {"idle_ttl_seconds": 1.0, "sweep_interval_seconds":
 
 - 只保 **`history` 链上的上下文事实**：链拓扑、记录配对、瞬态记录不落盘。**不做**"全事件类型 × `persist` 布尔矩阵"对账（二批）；
 - `assert_no_transient_records` 检查**全量记录**而非仅活跃链：瞬态记录一旦落盘，无论之后是否被 rewind / compact 移出链，都是持久化语义被破坏；
-- `TRANSIENT_EVENT_TYPES` 列出会话历史禁止持久化的瞬态事件（`text` / `reasoning` / `tool_call_stream` / `tool_call` / `tool_execution_timing` / `tool_call_result` / `assistant_turn` / `tool_result_turn` / `llm_call_metrics` / `user_message_queued` / `user_message_committed` / `user_messages_dropped` / `sync_session` / `session_history_refreshed` / `session_state_changed` / `session_init` / `context_stats` / `branch_targets` / `delivered` / `notice`）。新增会话级 `persist=False` 事件时同步 `wing_probe/history/invariants.py`。
+- `TRANSIENT_EVENT_TYPES` 列出会话历史禁止持久化的瞬态事件（`text` / `reasoning` / `tool_call_stream` / `tool_call` / `tool_execution_started` / `tool_execution_timing` / `tool_call_result` / `assistant_turn` / `assistant_generation_reset` / `tool_result_turn` / `llm_call_metrics` / `user_message_queued` / `user_message_committed` / `user_messages_dropped` / `sync_session` / `session_history_refreshed` / `session_state_changed` / `session_init` / `context_stats` / `branch_targets` / `delivered` / `notice`）。新增会话级 `persist=False` 事件时同步 `wing_probe/history/invariants.py`。
 - 事件断言锚定**事件序**，时间只作上限；并行工具用集合语义断言，不依赖完成顺序。
 
 ## 停机：快路径与优雅路径

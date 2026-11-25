@@ -19,13 +19,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
 
 from wing.common.logger import log
 from wing.common.truncate import head_tail_marker
 from wing.config import get_config, get_wing_home
-from wing.event import ToolExecutionTiming
+from wing.event import ToolExecution, ToolExecutionTiming
 from wing.hooks import hooks
 from wing.schema import MediaRef, Message, Tool, ToolCall, ToolError, ToolOutput
 from wing.schema.message import ToolResultStatus
@@ -104,6 +105,13 @@ def interrupted_tool_result(call: ToolCall, tool_args: dict | None = None) -> Me
     return message
 
 
+def _executed_args(call: ToolCall, executions: dict[str, ToolExecution]) -> dict | None:
+    execution = executions.get(call.id)
+    if execution is not None and execution.tool_args != call.arguments:
+        return execution.tool_args
+    return None
+
+
 class ToolExecutor:
     """工具并发执行器。"""
 
@@ -112,11 +120,15 @@ class ToolExecutor:
         self._tools: dict[str, Tool] = {}
         self._tool_clocks: dict[str, _ToolExecutionClock] = {}
         self._tool_results: dict[str, Message] = {}
+        self._tool_executions: dict[str, ToolExecution] = {}
 
     def tool_execution_timings(self) -> dict[str, ToolExecutionTiming]:
         return {
             call_id: clock.snapshot() for call_id, clock in self._tool_clocks.items()
         }
+
+    def tool_executions(self) -> dict[str, ToolExecution]:
+        return dict(self._tool_executions)
 
     def uncommitted_tool_results(self) -> list[Message]:
         return list(self._tool_results.values())
@@ -166,7 +178,8 @@ class ToolExecutor:
         # Batch-local ownership keeps late cancellation cleanup off the next batch's map.
         clocks: dict[str, _ToolExecutionClock] = {}
         self._tool_clocks = clocks
-        rewritten: dict[str, dict] = {}
+        executions: dict[str, ToolExecution] = {}
+        self._tool_executions = executions
         completed: dict[str, Message] = {}
         self._tool_results = completed
 
@@ -175,7 +188,7 @@ class ToolExecutor:
             log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={call_id}")
             token = _current_tool_call_id.set(call_id)
             try:
-                result = await self._execute_one(tc, model, clocks, rewritten)
+                result = await self._execute_one(tc, model, clocks, executions)
             except Exception as e:
                 log.error(f"exec_tool_calls: unexpected error in tool '{tc.name}': {e}")
                 content = f"Error executing tool '{tc.name}': {e}"
@@ -184,7 +197,7 @@ class ToolExecutor:
                     tool_call_id=call_id,
                     content=content,
                     tool_status="error",
-                    tool_args=rewritten.get(call_id),
+                    tool_args=_executed_args(tc, executions),
                     message_at=datetime.now(UTC),
                 )
                 result.assign_identity()
@@ -194,6 +207,7 @@ class ToolExecutor:
             finally:
                 clocks.pop(call_id, None)
                 _current_tool_call_id.reset(token)
+            executions.pop(call_id, None)
             completed[call_id] = result
             return result
 
@@ -230,7 +244,7 @@ class ToolExecutor:
                 if isinstance(item, Message):
                     results.append(item)
                     continue
-                result = interrupted_tool_result(tc, rewritten.get(tc.id))
+                result = interrupted_tool_result(tc, _executed_args(tc, executions))
                 results.append(result)
                 self._sink.tool_finished(
                     tc, INTERRUPTED_RESULT, success=False, model=model, message=result
@@ -244,13 +258,14 @@ class ToolExecutor:
             if self._tool_clocks is clocks:
                 self._tool_clocks = {}
                 self._tool_results = {}
+                self._tool_executions = {}
 
     async def _execute_one(
         self,
         tc: ToolCall,
         model: str,
         clocks: dict[str, _ToolExecutionClock],
-        rewritten: dict[str, dict],
+        executions: dict[str, ToolExecution],
     ) -> Message:
         """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。
 
@@ -283,7 +298,7 @@ class ToolExecutor:
                 tool_status=status,
                 duration_ms=duration_ms,
                 message_at=measured_at,
-                tool_args=rewritten.get(call_id),
+                tool_args=_executed_args(tc, executions),
             )
             message.assign_identity()
             self._sink.tool_finished(
@@ -323,8 +338,6 @@ class ToolExecutor:
             )
             if modified_tc is not None:
                 arguments = modified_tc.arguments
-                if arguments != tc.arguments:
-                    rewritten[call_id] = arguments
 
             # 参数过滤：远程工具（VAR_KEYWORD）全量透传
             sig = inspect.signature(tool.function)
@@ -336,6 +349,11 @@ class ToolExecutor:
             else:
                 actual_params = set(sig.parameters.keys())
                 call_args = {k: v for k, v in arguments.items() if k in actual_params}
+
+            execution = ToolExecution(tool_name=tc.name, tool_args=deepcopy(call_args))
+            executions[call_id] = execution
+            if executions is self._tool_executions:
+                self._sink.tool_execution_started(call_id, execution)
 
             measurement_token = _tool_execution_measurement.set(
                 partial(self._measure_tool_execution, clocks, call_id)
