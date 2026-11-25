@@ -268,7 +268,7 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 `tool_runtime` 角色连接时须经 `?client_id=<id>` 自选 client_id（admin 也可自选，未声明者服务端分配）；该 WS 是纯工具执行通道，不参与事件订阅。
 
-**ReAct 事件**（`event/react.py`）：`turn_started` · `user_message_accepted` · `text` · `reasoning` · `tool_call_stream` · `tool_call` · `tool_execution_timing` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `assistant_message_committed` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
+**ReAct 事件**（`event/react.py`）：`turn_started` · `user_message_accepted` · `text` · `reasoning` · `tool_call_stream` · `tool_call` · `tool_execution_started` · `tool_execution_timing` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `assistant_generation_reset` · `assistant_message_committed` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
 
 > `tool_call_stream`：LLM 生成工具参数期间的流式渲染事件，携带**增量原始 args 文本碎片**（`args_fragment`，首个事件含完整前缀）。后端不解析 partial JSON，前端自行累积 buffer 并容错解析渲染；参数生成结束后由 `tool_call` 事件携带权威解析结果。
 >
@@ -292,7 +292,7 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 ### 消息历史
 
-`GET /api/session/get`、`sync_session`、`session_history_refreshed` 共用同一份活跃链投影：`messages`、`events`、`uncommitted`、`uncommitted_tools`、`uncommitted_tool_results`、`pending_user_messages`、`tool_execution_timings`、`turn_started_at`。在 HTTP 首载后，以订阅的 WS 快照替换基线，再按 WS 到达序应用直播；HTTP 与 WS 无跨通道定序。`status` 是运行态权威。`turn_started` 与同一轮快照共用 UTC 起时 `turn_started_at`，空闲时省略或为 null。
+`GET /api/session/get`、`sync_session`、`session_history_refreshed` 共用同一份活跃链投影：`messages`、`events`、`uncommitted`、`assistant_generation`、`uncommitted_tools`、`uncommitted_tool_results`、`tool_executions`、`pending_user_messages`、`tool_execution_timings`、`turn_started_at`。在 HTTP 首载后，以订阅的 WS 快照替换基线，再按 WS 到达序应用直播；HTTP 与 WS 无跨通道定序。`status` 是运行态权威。`turn_started` 与同一轮快照共用 UTC 起时 `turn_started_at`，空闲时省略或为 null。
 
 | 位置 | 字段与用途 |
 | --- | --- |
@@ -302,6 +302,12 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 | `assistant_message_committed` | 流式中断或截断重试前保留助手内容的边界。与常规助手边界同形，`stop_reason` 是已提交 Message 的值（流式中断为 `interrupted`）。该事件用于定型本条消息，轮次终态看后续对应事件。 |
 | 工具结果 | 工具 Message、`uncommitted_tool_results` 和 `tool_call_result` 共用 `message_id`、`message_at`、`tool_call_id`、`tool_status`（`success` / `error` / `interrupted`）和可选 `duration_ms`。`tool_call_id` 关联助手 `tool_calls[].id`，调用参数从对应 `arguments` 获取。如果 hook 改写了参数，工具 Message 的 `tool_args` 给出直播结果使用的参数。直播保留 `tool_success` 和全文，历史正文仍遵循工具结果截断。 |
 | `events` | 活跃链序。`error`、`interrupted`、`compact_done` 和 `history_notice` 可用 `after_message_id` 锚定前一条用户或助手消息。没有前置消息时省略。`diff_content`、仍挂起的 `ask` 沿用 `tool_call_id`。 |
+
+`assistant_generation` 用 `message_id`、`generation_attempt`（从 1 开始）及 `phase` 表达在途状态。`provisional` 可以带早采样的 `uncommitted.message_at`，该尝试仍可能撤销。OpenAI 优先取 `finish_reason`，Anthropic 优先取 `stop_reason`，再使用各自的终止标记回退。`finalized` 表示助手内容已通过生成校验，`discarded` 表示本次尝试已撤销，快照不包含其正文、思考或工具片段。
+
+直播 `text`、`reasoning`、`tool_call_stream` 和助手定型边界携带消息身份及尝试序号。`assistant_generation_reset` 在退避 notice 与后续增量之前发出，用该身份与序号移除相应的临时投影。传输重试沿用逻辑消息身份，下一次尝试递增序号。退避中断不会提交已撤销的内容。消息时间描述生成结束，定型由 `assistant_turn`、`assistant_message_committed` 或快照 `phase: "finalized"` 表达。
+
+`tool_call` 保留模型调用参数。`tool_execution_started` 在工具函数调用前携带 `tool_call_id`、`tool_name`、本次将传给工具的 `tool_args`。`tool_executions` 按调用 ID 提供同形的在途参数；收到 `tool_call_result` 后由结果接管。未结算但已执行的工具继续使用其实际参数，取消也保留该目标。新增字段和非持久事件允许旧客户端忽略。
 
 直播的 `turn_result`（`subtype: "error_max_turns"`）收口轮次。历史用 `history_notice` 展示同一事实，复用 `uuid`、`subtype`、`errors`、`after_message_id`。手动压缩的直播 `compact_done.summary` 是新的摘要 Message。支持该字段的客户端将活跃消息替换成摘要并应用本条通知。历史快照的 `messages` 已含摘要，快照内 `compact_done` 只提供通知。
 

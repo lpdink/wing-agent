@@ -18,6 +18,7 @@ from wing.agent.tool_executor import (
     InterruptedToolResults,
     ToolExecutor,
 )
+from wing.event import ToolExecution
 from wing.schema import Tool, ToolCall
 
 pytestmark = pytest.mark.asyncio
@@ -30,6 +31,9 @@ class _Sink:
         self.finished: list[dict] = []
 
     def tool_started(self, tc: ToolCall) -> None:
+        pass
+
+    def tool_execution_started(self, call_id: str, execution: ToolExecution) -> None:
         pass
 
     def tool_finished(

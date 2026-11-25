@@ -17,7 +17,12 @@ from wing.agent.tool_executor import (
     InterruptedToolResults,
     ToolExecutor,
 )
-from wing.event import ToolCallResultEvent, ToolExecutionTimingEvent, WingEvent
+from wing.event import (
+    ToolCallResultEvent,
+    ToolExecutionStartedEvent,
+    ToolExecutionTimingEvent,
+    WingEvent,
+)
 from wing.event_bus import event_bus
 from wing.schema import ToolCall
 
@@ -79,11 +84,16 @@ async def test_tool_execution_snapshots_advance_then_freeze(clock, observed_exec
 
     assert [event.type for event in live] == [
         "tool_call",
+        "tool_execution_started",
         "tool_execution_timing",
         "tool_execution_timing",
         "tool_call_result",
         "tool_result_turn",
     ]
+    started = next(
+        event for event in live if isinstance(event, ToolExecutionStartedEvent)
+    )
+    assert started.tool_call_id == CALL.id and started.tool_args == CALL.arguments
     assert _timings(live) == [(True, 0, 10), (False, 2500, 10)]
     running, finished = snapshots
     assert set(running) == set(finished) == {CALL.id}

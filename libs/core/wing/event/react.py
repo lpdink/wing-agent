@@ -20,13 +20,31 @@ if TYPE_CHECKING:
     from wing.schema import Message, ToolCall
 
 
-class TextEvent(WingEvent):
+class _GenerationEvent(WingEvent):
+    message_id: str | None = None
+    generation_attempt: int | None = None
+
+
+class AssistantGeneration(BaseModel):
+    message_id: str
+    generation_attempt: int
+    phase: Literal["provisional", "discarded", "finalized"]
+
+
+class AssistantGenerationResetEvent(WingEvent):
+    type: Literal["assistant_generation_reset"] = "assistant_generation_reset"
+    persist: ClassVar[bool] = False
+    message_id: str
+    generation_attempt: int
+
+
+class TextEvent(_GenerationEvent):
     type: Literal["text"] = "text"
     persist: ClassVar[bool] = False
     content: str
 
 
-class ReasoningEvent(WingEvent):
+class ReasoningEvent(_GenerationEvent):
     type: Literal["reasoning"] = "reasoning"
     persist: ClassVar[bool] = False
     content: str
@@ -49,6 +67,17 @@ class ToolCallEvent(WingEvent):
         )
 
 
+class ToolExecution(BaseModel):
+    tool_name: str
+    tool_args: dict[str, Any]
+
+
+class ToolExecutionStartedEvent(WingEvent, ToolExecution):
+    type: Literal["tool_execution_started"] = "tool_execution_started"
+    persist: ClassVar[bool] = False
+    tool_call_id: str
+
+
 class ToolExecutionTiming(BaseModel):
     elapsed_ms: int
     running: bool
@@ -62,7 +91,7 @@ class ToolExecutionTimingEvent(WingEvent):
     timing: ToolExecutionTiming
 
 
-class ToolCallStreamEvent(WingEvent):
+class ToolCallStreamEvent(_GenerationEvent):
     """Streaming tool call args fragment — emitted during LLM generation.
 
     Carries the incremental raw args text accumulated since the last event
@@ -70,7 +99,8 @@ class ToolCallStreamEvent(WingEvent):
     accumulate fragments and partial-parse locally for real-time rendering;
     the runtime forwards provider text as-is and never parses partial args.
     Coexists with ToolCallEvent: this fires during arg generation,
-    ToolCallEvent fires when execution begins (authoritative parsed args).
+    ToolCallEvent carries the model arguments. ToolExecutionStartedEvent carries
+    the arguments passed to the tool.
     """
 
     type: Literal["tool_call_stream"] = "tool_call_stream"
@@ -318,7 +348,7 @@ def _claude_stop_reason(msg: Message) -> str:
     return mapped if mapped is not None else "end_turn"
 
 
-class _AssistantMessageEvent(WingEvent):
+class _AssistantMessageEvent(_GenerationEvent):
     """Turn 级别的 assistant 完整消息（对应 Claude SDKAssistantMessage）。
 
     在 _call_llm() 返回完整 assistant 消息后、ToolExecutor.execute() 之前 emit。
@@ -331,7 +361,6 @@ class _AssistantMessageEvent(WingEvent):
     persist: ClassVar[bool] = False
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     content_blocks: list[dict]
-    message_id: str | None = None
     message_at: str | None = None
     model: str = ""
     model_id: str | None = None

@@ -379,6 +379,9 @@ pub struct SessionGetResponse {
     pub agent: Option<AgentInfo>,
     pub turn_started_at: Option<DateTime<Utc>>,
     pub uncommitted: Option<serde_json::Value>,
+    pub assistant_generation: Option<serde_json::Value>,
+    #[serde(default)]
+    pub tool_executions: serde_json::Map<String, serde_json::Value>,
     #[serde(default)]
     pub uncommitted_tools: Vec<serde_json::Value>,
     #[serde(default)]
@@ -1828,18 +1831,30 @@ mod tests {
         assert!(legacy.uncommitted_tool_results.is_empty());
         assert!(legacy.tool_execution_timings.is_empty());
         assert!(legacy.turn_started_at.is_none());
+        assert!(legacy.assistant_generation.is_none());
+        assert!(legacy.tool_executions.is_empty());
 
         let current: SessionGetResponse = serde_json::from_value(serde_json::json!({
             "session_id": "s1", "messages": [],
             "events": [{"type": "history_notice", "subtype": "error_max_turns"}],
             "uncommitted_tool_results": [{"tool_call_id": "c1", "tool_status": "error"}],
             "tool_execution_timings": {"c2": {"elapsed_ms": 12, "running": true}},
+            "tool_executions": {"c2": {"tool_name": "Read", "tool_args": {"path": "live.txt"}}},
+            "assistant_generation": {"message_id": "m1", "generation_attempt": 2, "phase": "finalized"},
             "turn_started_at": "2026-11-25T15:20:00+00:00"
         }))
         .unwrap();
         assert_eq!(current.events[0]["subtype"], "error_max_turns");
         assert_eq!(current.uncommitted_tool_results[0]["tool_status"], "error");
         assert_eq!(current.tool_execution_timings["c2"]["elapsed_ms"], 12);
+        assert_eq!(
+            current.tool_executions["c2"]["tool_args"]["path"],
+            "live.txt"
+        );
+        assert_eq!(
+            current.assistant_generation.unwrap()["generation_attempt"],
+            2
+        );
         assert_eq!(
             current.turn_started_at.unwrap().to_rfc3339(),
             "2026-11-25T15:20:00+00:00"

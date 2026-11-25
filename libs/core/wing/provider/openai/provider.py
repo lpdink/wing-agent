@@ -124,7 +124,9 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         body = self._build_body(messages, model, tools, stream, options)
 
         if stream:
-            async for item in self._generate_stream(body, model, accumulator):
+            async for item in self._stream_attempt(
+                self._generate_stream(body, model, accumulator), accumulator
+            ):
                 yield item
         else:
             async for item in self._generate_sync(body, model):

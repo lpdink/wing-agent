@@ -18,6 +18,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log, utf8_safe
@@ -25,6 +26,7 @@ from wing.common.utils import require_utf8
 from wing.common.with_retry import with_retry
 from wing.config import get_config
 from wing.config.models import ProviderConfig, resolve_model_display_name
+from wing.event import AssistantGeneration
 from wing.hooks import hooks
 from wing.request_context import reset_request_context, set_request_context
 from wing.schema import ContentBlock, LLMUsage, Message, usage_wire
@@ -170,6 +172,29 @@ class ReActLoop:
                 "message_at": self._current_acc.finished_at or message.message_at,
             }
         )
+
+    def _generation_attempt(self) -> int:
+        return max(1, self._current_acc.attempt) if self._current_acc is not None else 1
+
+    def assistant_generation(self) -> AssistantGeneration | None:
+        message = self._generation_message
+        if message is None or message.message_id is None:
+            return None
+        if self._current_acc is not None and self._current_acc.discarded:
+            phase = "discarded"
+        elif message.content_blocks is not None:
+            phase = "finalized"
+        else:
+            phase = "provisional"
+        return AssistantGeneration(
+            message_id=message.message_id,
+            generation_attempt=self._generation_attempt(),
+            phase=phase,
+        )
+
+    def _discard_generation(self) -> None:
+        if self._current_acc is not None:
+            self._current_acc.discard_attempt()
 
     def generation_finished(self) -> bool:
         return (
@@ -369,7 +394,7 @@ class ReActLoop:
         assistant_msg = await self._call_llm_validated(ctx)
         model = assistant_msg.model or self._current_model()
 
-        self._sink.assistant_turn(assistant_msg, model)
+        self._sink.assistant_turn(assistant_msg, model, self._generation_attempt())
 
         ctx.record_usage(assistant_msg.usage)
         ctx.record_text(assistant_msg.content)
@@ -480,7 +505,7 @@ class ReActLoop:
             # 只记被丢弃的尝试（token 真花掉了）；正常返回的消息由 _llm_turn
             # 统一记账——wrapper 同处再记会让收尾调用双计。
             ctx.record_usage(assistant_msg.usage)
-            self._clear_generation()
+            self._discard_generation()
             raise InvalidGenerationError(
                 "模型本轮未产出 content，也没有收敛的 tool call"
                 "（空响应 / 流被截断；reasoning 不作为收尾依据）"
@@ -489,8 +514,10 @@ class ReActLoop:
         if self._has_unfinished_tool_calls(provider):
             ctx.record_usage(assistant_msg.usage)
             self._cm.add_messages([assistant_msg])
+            self._sink.assistant_message_committed(
+                assistant_msg, model, self._generation_attempt()
+            )
             self._clear_generation()
-            self._sink.assistant_message_committed(assistant_msg, model)
             raise InvalidGenerationError(
                 "模型本轮有 content 但 tool call 未收敛（流被截断）："
                 "content 已提交，未收敛的 tool call 未提交"
@@ -565,8 +592,12 @@ class ReActLoop:
             if spec is not None
             else None,
         )
-        message.assign_identity()
+        message_id = message.assign_identity()
         self._generation_message = message
+        if accumulator is not None:
+            accumulator.on_discard = partial(
+                self._sink.assistant_generation_reset, message_id
+            )
 
         try:
             async for chunk in provider.generate(
@@ -584,11 +615,20 @@ class ReActLoop:
                     last_usage = None
                     stop_reason = None
 
+                generation_attempt = self._generation_attempt()
                 if chunk.reasoning_content:
-                    self._sink.llm_reasoning(chunk.reasoning_content)
+                    self._sink.llm_reasoning(
+                        chunk.reasoning_content,
+                        message_id=message_id,
+                        generation_attempt=generation_attempt,
+                    )
 
                 if chunk.content:
-                    self._sink.llm_text(chunk.content)
+                    self._sink.llm_text(
+                        chunk.content,
+                        message_id=message_id,
+                        generation_attempt=generation_attempt,
+                    )
 
                 if chunk.content_blocks is not None:
                     # provider 产出的权威块数组（最终 chunk 携带）
@@ -604,14 +644,15 @@ class ReActLoop:
                             tool_name=delta.name,
                             args_fragment=delta.args_fragment,
                             is_final=delta.is_final,
+                            message_id=message_id,
+                            generation_attempt=generation_attempt,
                         )
 
                 # 终止原因**不随 token 走**：OpenAI 兼容的终结帧只带零 token
                 # 元信息（避免与带内 usage 双计）但携带 stop_reason——若只在
                 # 非零 usage 分支取值，它会被整个跳过，Message.stop_reason
                 # 恒为 null（max_tokens 截断审计失效）。取值与 metrics 发射
-                # 解耦：任一帧给了非 None 值就更新（provider 层传输重试在同一
-                # generate() 内重放流时跨尝试累积，与 last_usage 同构）。
+                # 解耦：同一次传输尝试中任一帧给了非 None 值就更新。
                 if chunk.usage.stop_reason is not None:
                     stop_reason = chunk.usage.stop_reason
 
@@ -668,8 +709,10 @@ class ReActLoop:
                 interrupted_calls = message.tool_calls or []
                 tool_results = [interrupted_tool_result(tc) for tc in interrupted_calls]
                 self._cm.add_messages([message, *tool_results])
+                self._sink.assistant_message_committed(
+                    message, model, self._generation_attempt()
+                )
                 self._clear_generation()
-                self._sink.assistant_message_committed(message, model)
                 for tc, result in zip(interrupted_calls, tool_results, strict=True):
                     self._sink.tool_finished(
                         tc,
@@ -685,7 +728,7 @@ class ReActLoop:
         ):
             # 流未正常结束（无权威块数组）：无效轮次——由 _call_llm_validated
             # 的有界重试收口（Anthropic 在 message_stop 前被切断即此形态）。
-            self._clear_generation()
+            self._discard_generation()
             raise InvalidGenerationError(
                 "provider did not emit authoritative content_blocks "
                 "(stream ended without a complete block array)"
