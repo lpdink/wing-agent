@@ -126,11 +126,15 @@ async def test_guarded_replacement_after_stale_idle_read(templates: Probe) -> No
     session = await probe.session(effort="high", yolo=True, tools=["Glob"])
     external = await Driver.connect(probe.env)
     try:
-        assert (await session.info())["status"] == "idle"
+        info = await session.info()
+        assert info["status"] == "idle"
+        assert info["can_switch_template_safely"] is True
         with probe.provider.hold_first_content(OLD_MODEL) as reached:
             sent = await external.http.send_message(session.session_id, "external turn")
             await asyncio.wait_for(reached.wait(), timeout=8)
-            assert (await session.info())["status"] == "working"
+            info = await session.info()
+            assert info["status"] == "working"
+            assert info["can_switch_template_safely"] is True
             queued = await session.send("queued input")
             await session.watch.expect(
                 "user_message_queued", where={"origin_request_id": queued}

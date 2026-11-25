@@ -397,6 +397,9 @@ class SessionInfoResponse(BaseModel):
     template_name: str | None = Field(
         default=None, description="当前会话使用的 Agent 模板"
     )
+    can_switch_template_safely: bool = Field(
+        description="网关兑现模板切换的 require_idle 准入，与当前会话是否空闲无关"
+    )
     session_name: str | None = Field(default=None, description="session 名称")
     workdir: str | None = Field(
         default=None,
