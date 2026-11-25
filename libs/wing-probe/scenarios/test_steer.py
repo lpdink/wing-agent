@@ -262,6 +262,8 @@ async def test_steer_syncs_batched_input_after_every_tool_result(
             assert matches == [
                 {
                     "uuid": commit.data["message_uuid"],
+                    "message_id": commit.data["message_id"],
+                    "message_at": commit.data["message_at"],
                     "role": "user",
                     "content": commit.data["content"],
                     "media": commit.data["media"],

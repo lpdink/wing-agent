@@ -35,13 +35,15 @@ from wing.event import (
     SettingsChangedEvent,
     WingEvent,
 )
-from wing.common.fs import atomic_write_bytes, atomic_write_text
+from wing.common.fs import atomic_write_bytes
 from wing.common.logger import log
 from wing.common.utils import validate_request_id
 from wing.context import CacheLedger, empty_report
 from wing.metrics import usage_report as build_usage_report
 from wing.event_bus import event_bus
 from wing.config import (
+    ApplyScope,
+    Config,
     ConfigProblem,
     ModelGroup,
     build_catalog,
@@ -54,11 +56,12 @@ from wing.config.document import (
     ConfigFingerprint,
     PositionalSecret,
     SparseDocument,
-    changed_paths,
-    problems_of,
+    parse_document,
     read_document,
     resolve_secrets,
     restart_required_paths,
+    setting_changes,
+    validate_document,
 )
 from wing.hooks import load_hooks
 from wing.request_context import (
@@ -67,7 +70,7 @@ from wing.request_context import (
     set_request_context,
 )
 from collections.abc import Collection, Iterable, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from wing.schema import MediaRef
 from wing.session import (
     Session,
@@ -153,11 +156,27 @@ class SettingsConflictError(RuntimeError):
     重试路径缩短一步。
     """
 
-    def __init__(self, fingerprint: str) -> None:
+    def __init__(
+        self, fingerprint: str, document: SparseDocument | None = None
+    ) -> None:
         super().__init__(
             f"config.yaml changed on disk (current fingerprint: {fingerprint})"
         )
         self.fingerprint = fingerprint
+        self.document = document
+
+
+SettingEffectStatus = Literal[
+    "applied", "next_session", "restart_required", "failed", "unknown", "readonly"
+]
+
+
+@dataclass(frozen=True)
+class SettingsFieldEffect:
+    path: str
+    scope: ApplyScope | None
+    status: SettingEffectStatus
+    steps: list[str]
 
 
 @dataclass
@@ -177,10 +196,80 @@ class SettingsApplyResult:
     reload: ReloadResult | None = None
     setup_mode_exited: bool = False
     backup_path: str | None = None
+    change_scopes: dict[str, ApplyScope | None] = field(default_factory=dict)
+    saved_document: SparseDocument | None = None
+    disk_config: Config | None = None
     warnings: list[str] = field(default_factory=list)
     """非致命的告知：如「原配置文件无法解析，其中的密钥无法保留」、
     「密钥被丢弃」/「密钥按位置保留」。
     与 ``problems`` 的区别：problems 让保存失败（``ok=False``），warnings 只是提醒。"""
+
+    def field_effects(
+        self, pending: list[str] | None, *, setup: bool
+    ) -> list[SettingsFieldEffect]:
+        reload = self.reload
+        if reload is None:
+            return []
+        by_step = {item.name: item.ok for item in reload.items}
+        effects = []
+        for path, scope in self.change_scopes.items():
+            steps: list[str] = []
+            status: SettingEffectStatus
+            if scope is None:
+                status = "unknown"
+            elif scope is ApplyScope.READONLY:
+                status = "readonly"
+            elif scope is ApplyScope.RESTART:
+                if pending is None:
+                    status = "unknown"
+                else:
+                    status = "restart_required" if path in pending else "applied"
+            else:
+                required = _settings_steps(path, scope, setup=setup)
+                steps = [step for step in required if step in by_step]
+                if path in reload.failed_settings or any(
+                    not by_step[step] for step in steps
+                ):
+                    status = "failed"
+                elif len(steps) != len(required) or (
+                    setup
+                    and (
+                        not self.setup_mode_exited
+                        or (_uses_provider_client(path) and scope is ApplyScope.HOT)
+                    )
+                ):
+                    status = "unknown"
+                else:
+                    status = (
+                        "next_session"
+                        if scope is ApplyScope.NEXT_SESSION
+                        else "applied"
+                    )
+            effects.append(SettingsFieldEffect(path, scope, status, steps))
+        return effects
+
+
+def _uses_provider_client(path: str) -> bool:
+    return path.startswith("providers[") or path == "user_agent.preset"
+
+
+def _settings_steps(path: str, scope: ApplyScope, *, setup: bool) -> list[str]:
+    root = path.split(".", 1)[0].split("[", 1)[0]
+    if scope is ApplyScope.NEXT_SESSION:
+        return ["config.yaml", "runtime"] if setup else ["config.yaml"]
+    if _uses_provider_client(path):
+        step = "runtime" if setup else "provider"
+    elif root == "hooks":
+        step = "runtime" if setup else "hooks"
+    elif root == "commands":
+        step = "prompt commands"
+    elif root == "log":
+        step = "log level"
+    elif setup:
+        step = "auth" if path.startswith("gateway.auth.") else "runtime"
+    else:
+        return ["config.yaml"]
+    return ["config.yaml", step]
 
 
 @dataclass
@@ -274,7 +363,7 @@ class WingRuntime:
 
         install_audit()
 
-        load_hooks(get_config().hooks)
+        self.failed_hook_patterns = load_hooks(get_config().hooks)
         # TODO(future): config 驱动的 backend 选择（sessions.backend / dsn）——
         # SQL 后端（SQLite/PG/Supabase）到来时的扩展点。
         stores: dict[str, SessionStore] = {
@@ -666,7 +755,7 @@ class WingRuntime:
             "template_name": session.template_name,
             "workspace": session.session_workspace,
             "status": session.status,
-            "messages": session.serialize_messages(),
+            **dict(session.history_snapshot()),
             "agent": session.to_agent_info(),
         }
 
@@ -708,6 +797,7 @@ class WingRuntime:
                 original_tokens=original,
                 compressed_tokens=compressed,
                 model=session.agent.model,
+                summary=next(iter(session.serialize_messages()), None),
             ),
             session=session,
         )
@@ -802,10 +892,12 @@ class WingRuntime:
         yolo: bool | None = None,
         workspace: str | None = None,
         tools: list[str] | None = None,
+        validate_reasoning: bool = False,
+        require_idle: bool = False,
     ) -> None:
         """统一更新 session 状态。
 
-        委托给 Session.update_state()，计算 event 字段后发射事件。
+        委托给 Session，更新成功后广播变更。
 
         Args:
             model_id: 切换模型（引用 providers[].models 的 id；未命中 ValueError）
@@ -816,26 +908,55 @@ class WingRuntime:
                 工具引用无法解析
         """
         session = self._require_session(session_id)
-
-        template = None
-        if agent is not None:
-            template = self.template_manager.get(agent)
-            if template is None:
-                available = self.template_manager.all_names
-                raise LookupError(
-                    f"template '{agent}' not found, available: {available}"
+        if require_idle and (
+            agent is None
+            or validate_reasoning
+            or any(
+                v is not None
+                for v in (
+                    model_id,
+                    title,
+                    thinking,
+                    reasoning_effort,
+                    yolo,
+                    workspace,
+                    tools,
                 )
+            )
+        ):
+            raise ValueError("require_idle requires an agent-only update")
+        if validate_reasoning:
+            if any(
+                v is not None for v in (model_id, agent, title, yolo, workspace, tools)
+            ):
+                raise ValueError(
+                    "validated reasoning updates only accept thinking and reasoning_effort"
+                )
+            session.update_reasoning(thinking, reasoning_effort, validate=True)
+        else:
+            template = None
+            if agent is not None:
+                template = self.template_manager.get(agent)
+                if template is None:
+                    available = self.template_manager.all_names
+                    raise LookupError(
+                        f"template '{agent}' not found, available: {available}"
+                    )
 
-        await session.update_state(
-            model_id=model_id,
-            template=template,
-            title=title,
-            thinking=thinking,
-            reasoning_effort=reasoning_effort,
-            yolo=yolo,
-            workspace=workspace,
-            tools=tools,
-        )
+                if require_idle:
+                    await session.switch_template(template, require_idle=True)
+
+            if not require_idle:
+                await session.update_state(
+                    model_id=model_id,
+                    template=template,
+                    title=title,
+                    thinking=thinking,
+                    reasoning_effort=reasoning_effort,
+                    yolo=yolo,
+                    workspace=workspace,
+                    tools=tools,
+                )
 
         # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo
         agent_switched = agent is not None
@@ -929,6 +1050,7 @@ class WingRuntime:
 
         # ① 现读磁盘（服务端不缓存文档：文件只有几 KB，现读就没有失效问题）。
         warnings: list[str] = []
+        readable = True
         try:
             current_doc, current_fp = read_document(catalog=catalog)
         except ConfigDocumentError as exc:
@@ -940,10 +1062,13 @@ class WingRuntime:
             current_doc = SparseDocument(data={})
             current_fp = ConfigFingerprint(value=exc.fingerprint)
             warnings.append(UNPARSEABLE_CONFIG_WARNING)
+            readable = False
 
         # ② 乐观并发：指纹不匹配 → 409（不写盘）。
         if base is not None and base != current_fp.value:
-            raise SettingsConflictError(current_fp.value)
+            raise SettingsConflictError(
+                current_fp.value, current_doc if readable else None
+            )
 
         # ③ 密文回填：null = 保留磁盘现值（真实值只在这里被读、从不回显）。
         #    列表项按**身份**配对（identity_field）；配不上且长度变化 / 槽位已被认领
@@ -965,12 +1090,24 @@ class WingRuntime:
         )
 
         # ④ 校验（字段级 + 跨字段）：有 problem 就到此为止——全有或全无。
-        problems = problems_of(incoming, catalog=catalog)
-        if problems:
+        config, problems = validate_document(incoming, catalog)
+        if config is not None:
+            # Use the exact committed bytes for the fingerprint, reload and receipt.
+            encoded = emit_config_yaml(
+                incoming.data, catalog, extra=current_doc.extra
+            ).encode()
+            new_doc, new_fp = parse_document(encoded, catalog)
+            disk_config, problems = validate_document(new_doc, catalog)
+        else:
+            disk_config = None
+        if disk_config is None:
             return SettingsApplyResult(
                 ok=False,
                 fingerprint=current_fp.value,
                 problems=problems,
+                disk_config=validate_document(current_doc, catalog)[0]
+                if readable
+                else None,
                 warnings=warnings,
             )
 
@@ -986,15 +1123,14 @@ class WingRuntime:
 
         # ⑥ 规范形 YAML（未知键取自磁盘文档并原样写回；读不出文档时没有未知键可保留）
         #    + 原子写。
-        text = emit_config_yaml(incoming.data, catalog, extra=current_doc.extra)
-        atomic_write_text(config_path, text)
-        _, new_fp = read_document()
+        atomic_write_bytes(config_path, encoded)
 
         # ⑦ 生效（失败不回滚——配置本身合法，回执逐项报告）。
         effect = await self.post_write_effect()
 
         # ⑧ 差异 → changed / restart_required（只读叶子路径的 apply）。
-        changed = changed_paths(current_doc, incoming, catalog)
+        scopes = setting_changes(current_doc, new_doc, catalog)
+        changed = list(scopes)
         restart = restart_required_paths(changed, catalog)
 
         # ⑨ 广播（global scope：所有客户端都该知道配置变了）。日志只写 path，不写值。
@@ -1020,6 +1156,9 @@ class WingRuntime:
             reload=effect.reload,
             setup_mode_exited=effect.setup_mode_exited,
             backup_path=backup_path,
+            change_scopes=scopes,
+            saved_document=new_doc,
+            disk_config=disk_config,
             warnings=warnings,
         )
 

@@ -651,6 +651,14 @@ async def update_session(
 ) -> UpdateSessionResponse:
     server = get_server(request)
 
+    if body.require_idle and body.model_extra:
+        raise HTTPException(
+            status_code=400, detail="unknown field in agent-only update"
+        )
+    if body.validate_reasoning and body.model_extra:
+        raise HTTPException(
+            status_code=400, detail="unknown field in validated reasoning update"
+        )
     if all(
         v is None
         for v in (
@@ -679,7 +687,22 @@ async def update_session(
             yolo=body.yolo,
             workspace=body.workspace,
             tools=body.tools,
+            validate_reasoning=body.validate_reasoning,
+            require_idle=body.require_idle,
         )
+    except SessionBusyError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except (OSError, UnicodeEncodeError) as e:
+        if not body.validate_reasoning:
+            if isinstance(e, UnicodeEncodeError):
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            raise
+        log.warning(
+            f"Session {body.session_id}: reasoning settings not persisted ({e})"
+        )
+        raise HTTPException(
+            status_code=500, detail="could not persist reasoning settings"
+        ) from e
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

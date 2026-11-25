@@ -17,19 +17,28 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from wing.config import ConfigProblem, SettingGroup, SettingNode
+from wing.config import Config, ConfigProblem, SettingGroup, SettingNode
 from wing.config.document import SecretState as SecretStateDomain
+from wing.config.document import (
+    SparseDocument,
+    changed_paths,
+    effective_values,
+    restart_required_paths,
+)
 from datetime import datetime
 
 from wing.event.query_response import BranchTargetInfo
 from wing.gateway.protocol import (
     BranchesResponse,
     ContextStatsInfo,
+    EffectiveSettings,
     ReloadResponse,
     ReloadResultItem,
     SecretState as SecretStateProto,
     SessionInfoResponse,
+    SessionReasoningInfo,
     SettingChoice,
+    SettingEffect,
     SettingGroupProto,
     SettingNodeProto,
     SettingProblem,
@@ -46,6 +55,7 @@ from wing.wake import WakeTrigger
 def build_session_info(session: Session) -> SessionInfoResponse:
     """GET /api/session/info 响应——session 运行时状态快照。"""
     status = session.agent.get_status()
+    support, thinking, effort = session.agent.reasoning_controls()
     cm = session.agent.context_manager
     return SessionInfoResponse(
         model=status["model"],
@@ -58,7 +68,15 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         context_window_tokens=status["context_window_tokens"],
         thinking=status["thinking"],
         reasoning_effort=status["reasoning_effort"],
+        reasoning=SessionReasoningInfo(
+            thinking=thinking,
+            thinking_supported=support.thinking,
+            effort=effort,
+            effort_options=list(support.effort) if support.effort is not None else None,
+        ),
         yolo=session.agent.yolo,
+        template_name=session.template_name,
+        can_switch_template_safely=True,
         session_name=session.session_name,
         workdir=session.session_workspace,
         parent_session_id=session.parent_session_id,
@@ -185,6 +203,7 @@ def build_reload_response(result: ReloadResult) -> ReloadResponse:
     """
     return ReloadResponse(
         ok=result.ok,
+        failed_settings=sorted(result.failed_settings),
         results=[
             ReloadResultItem(name=item.name, ok=item.ok, detail=item.detail)
             for item in result.items
@@ -192,10 +211,39 @@ def build_reload_response(result: ReloadResult) -> ReloadResponse:
     )
 
 
-def build_settings_apply_response(result: SettingsApplyResult) -> SettingsSetResponse:
+def build_effective_settings(
+    doc: SparseDocument, catalog: SettingNode, config: Config | None
+) -> EffectiveSettings:
+    values, sources = effective_values(doc, catalog, config)
+    return EffectiveSettings(values=values, sources=sources)
+
+
+def pending_settings_restart(
+    startup: SparseDocument, config: Config | None, catalog: SettingNode
+) -> list[str] | None:
+    if config is None:
+        return None
+    current = SparseDocument(data=config.model_dump(include=set(startup.data)))
+    return restart_required_paths(changed_paths(startup, current, catalog), catalog)
+
+
+def build_settings_apply_response(
+    result: SettingsApplyResult, pending: list[str] | None, *, setup: bool
+) -> SettingsSetResponse:
     """``SettingsApplyResult`` → POST /api/settings/set 的回执。"""
     return SettingsSetResponse(
         ok=result.ok,
+        written=result.ok,
+        pending_restart=pending,
+        effects=[
+            SettingEffect(
+                path=effect.path,
+                scope=effect.scope,
+                status=effect.status,
+                steps=effect.steps,
+            )
+            for effect in result.field_effects(pending, setup=setup)
+        ],
         fingerprint=result.fingerprint,
         problems=[build_settings_problem(p) for p in result.problems],
         changed=list(result.changed),

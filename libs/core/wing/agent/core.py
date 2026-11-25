@@ -12,7 +12,8 @@ import functools
 import inspect
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,8 @@ from wing.event import (
     AskEvent,
     InterruptedEvent,
     NoticeEvent,
+    AssistantGeneration,
+    ToolExecution,
     ToolExecutionTiming,
     WingEvent,
 )
@@ -46,6 +49,7 @@ from .tool_executor import ToolExecutor, _current_tool_call_id
 if TYPE_CHECKING:
     from wing.event import PendingUserMessage
     from wing.media import MediaAccess
+    from wing.provider.base import ReasoningSupport
 
 
 # ── 打断收口阶梯 ──
@@ -165,6 +169,7 @@ class WingAgent:
         # `_arm_worker_renewal`）与 interrupt 的直接重建都不再发生——"逐出后
         # 又被复活"必须不可能。
         self._closing: bool = False
+        self._replacing = False
         # 在飞的手动压缩（会话级独占操作，见 `compact`）。它持有 inbox 取出口闸门，
         # 期间 worker 取不到任何输入；interrupt / shutdown 据此取消它。
         self._compact_task: asyncio.Task[tuple[int, int]] | None = None
@@ -265,6 +270,8 @@ class WingAgent:
         return self._inbox.input_request_ids
 
     def require_input_id_available(self, request_id: str | None) -> None:
+        # 入口预检早于送达事件与 Session.post 的元数据写入。
+        self._require_open()
         self.input_request_ids.require_available(request_id)
 
     def require_feedback_waiter(self, tool_call_id: str) -> None:
@@ -300,6 +307,12 @@ class WingAgent:
     def tool_execution_timings(self) -> dict[str, ToolExecutionTiming]:
         return self._executor.tool_execution_timings()
 
+    def assistant_generation(self) -> AssistantGeneration | None:
+        return self._loop.assistant_generation()
+
+    def tool_executions(self) -> dict[str, ToolExecution]:
+        return self._executor.tool_executions()
+
     def uncommitted_message(self) -> dict | None:
         """未提交的 assistant Message 投影（单个 Message 形状 dict | None）。
 
@@ -310,13 +323,11 @@ class WingAgent:
         """
         from wing.session import serialize_message
 
-        acc = self._loop.current_acc
-        if acc is None:
-            return None
-        blocks = self.model_provider.snapshot_blocks(acc)
-        if not blocks:
-            return None
-        return serialize_message(Message(role="assistant", content_blocks=blocks))
+        message = self._loop.snapshot_message()
+        return serialize_message(message) if message is not None else None
+
+    def uncommitted_tool_results(self) -> list[Message]:
+        return self._executor.uncommitted_tool_results()
 
     def uncommitted_tools(self) -> list[dict]:
         """未终结 tool 调用的原始 args 片段列表（活工具卡渲染素材）。
@@ -326,7 +337,7 @@ class WingAgent:
         参数文本（后端不解析，前端经既有局部解析路径渲染）。
         """
         acc = self._loop.current_acc
-        if acc is None:
+        if acc is None or self._loop.generation_finished():
             return []
         return [
             {
@@ -334,7 +345,7 @@ class WingAgent:
                 "tool_name": v.tool_name,
                 "args_fragment": v.args_fragment,
             }
-            for v in self.model_provider.pending_tool_calls(acc)
+            for v in self._loop.generation_provider.pending_tool_calls(acc)
         ]
 
     def pending_ask_ids(self) -> set[str]:
@@ -442,6 +453,14 @@ class WingAgent:
             return self._thinking
         return self.model_provider.thinking
 
+    def reasoning_controls(self) -> tuple[ReasoningSupport, bool | None, str | None]:
+        provider = self.model_provider
+        return (
+            provider.reasoning_support(self.model),
+            provider.request_thinking(self._thinking),
+            provider.request_reasoning_effort(self._reasoning_effort),
+        )
+
     def request_options(self) -> RequestOptions:
         """本次模型调用的会话级参数（provider 无状态化的唯一注入点）。
 
@@ -470,14 +489,21 @@ class WingAgent:
         media: list[MediaRef] | None = None,
     ) -> None:
         """接收用户消息或 feedback。media 非空时消息携带媒体引用（字节在存储）。"""
-        if self._closing:
-            raise SessionBusyError("session is replacing or shutting down its agent")
+        self._require_open()
         item = await self._inbox.post(
             content, request_id, role, tool_call_id, media=media
         )
         pending = item.pending_user_message() if item is not None else None
         if pending is not None:
             self._sink.user_message_queued(pending)
+
+    @property
+    def replacing(self) -> bool:
+        return self._replacing
+
+    def _require_open(self) -> None:
+        if self._closing:
+            raise SessionBusyError("session is replacing or shutting down its agent")
 
     @property
     def compacting(self) -> bool:
@@ -640,6 +666,38 @@ class WingAgent:
             f"dropped={len(dropped)}"
         )
         return dropped
+
+    @asynccontextmanager
+    async def template_replacement(self, *, require_idle: bool) -> AsyncIterator[None]:
+        """关闭旧 Agent 并保留回滚能力，直到调用方装配好候选。"""
+        if self.replacing:
+            raise SessionBusyError("session is replacing its agent")
+        if require_idle and (
+            self._closing
+            or self.status != "idle"
+            or self.has_pending_input
+            or self.preparing_input
+            or self.compacting
+            or self._interrupt_lock.locked()
+        ):
+            raise SessionBusyError(
+                "session is busy; wait until idle before switching agent templates"
+            )
+        # shutdown 先同步关闭投递入口，再等待 worker 收口。
+        self._replacing = True
+        try:
+            await self.shutdown(notify=self.status != "idle" or self.has_pending_input)
+            yield
+        except BaseException:
+            self._closing = False
+            worker = self._worker
+            if worker.done():
+                self._worker = self._spawn_worker()
+            else:
+                self._arm_worker_renewal(worker)
+            raise
+        finally:
+            self._replacing = False
 
     async def shutdown(self, *, notify: bool = False) -> None:
         """显式关闭 Agent：取消阶梯收口，不重建 worker。
@@ -841,8 +899,9 @@ class WingAgent:
 
     # ── 内部 ──
 
-    def _set_working(self, value: bool) -> None:
+    def _set_working(self, value: bool) -> datetime | None:
         self._turn_started_at = datetime.now(timezone.utc) if value else None
+        return self._turn_started_at
 
     def _fire_interrupt_hooks(self) -> None:
         """触发 interrupt hooks（如杀子进程）。"""

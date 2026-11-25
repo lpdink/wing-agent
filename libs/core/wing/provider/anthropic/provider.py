@@ -17,12 +17,14 @@ import copy
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
+from wing.config import resolve_model_capabilities
 from wing.provider.anthropic.serialize import _SerializeMixin
 from wing.provider.anthropic.stream import (
     _StreamMixin,
@@ -32,6 +34,7 @@ from wing.provider.anthropic.stream import (
 from wing.provider.base import (
     ModelProvider,
     PendingToolView,
+    ReasoningSupport,
     RequestOptions,
     StreamAccumulator,
     pending_views,
@@ -117,7 +120,9 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         body = self._build_body(messages, model, tools, stream, options)
 
         if stream:
-            async for item in self._generate_stream(body, model, accumulator, options):
+            async for item in self._stream_attempt(
+                self._generate_stream(body, model, accumulator, options), accumulator
+            ):
                 yield item
         else:
             async for item in self._generate_sync(body, model, options):
@@ -173,30 +178,53 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         """
         return self._thinking_enabled(self._extra_body)
 
+    def reasoning_support(self, model: str) -> ReasoningSupport:
+        thinking = self._thinking_override_view(self._extra_body, True)["thinking"]
+        budget = thinking["budget_tokens"]
+        if self._thinking_type(self._extra_body) not in (
+            None,
+            "enabled",
+            "disabled",
+        ) or (
+            not isinstance(budget, int) or not 1024 <= budget < self.config.max_tokens
+        ):
+            return ReasoningSupport()
+        capabilities = resolve_model_capabilities(self.config, model)
+        return ReasoningSupport(thinking=capabilities.thinking)
+
+    def request_thinking(self, override: bool | None) -> bool | None:
+        if override is not None:
+            return override
+        if "thinking" not in self._extra_body:
+            return False
+        mode = self._thinking_type(self._extra_body)
+        if mode in ("enabled", "adaptive"):
+            return True
+        return False if mode == "disabled" else None
+
+    @staticmethod
+    def _thinking_type(extra_body: dict) -> object:
+        thinking = extra_body.get("thinking")
+        return thinking.get("type") if isinstance(thinking, dict) else None
+
     @staticmethod
     def _thinking_enabled(extra_body: dict) -> bool:
         """extra_body 是否启用 thinking（Anthropic 官方开关：thinking.type=enabled）。"""
-        tb = extra_body.get("thinking")
-        return isinstance(tb, dict) and tb.get("type") == "enabled"
+        return AnthropicProvider._thinking_type(extra_body) == "enabled"
 
     @staticmethod
     def _thinking_override_view(extra_body: dict, override: bool) -> dict:
         """会话级 thinking 覆盖的 per-request extra_body 视图（不改共享状态）。
 
-        启用时缺 budget_tokens 则补默认预算（Anthropic 要求 type=enabled 必带
-        budget）；关闭只改 type、保留 budget——序列化时按 Anthropic 校验剥离
-        （disabled 不得携带 budget），再启用时用户原预算原样恢复。
+        启用读取原有预算和显示设置，关闭对象只携带 type。
         """
-        view = dict(extra_body)
-        tb = view.get("thinking")
-        tb = dict(tb) if isinstance(tb, dict) else {}
-        if override:
-            tb["type"] = "enabled"
-            tb.setdefault("budget_tokens", _DEFAULT_THINKING_BUDGET)
-        else:
-            tb["type"] = "disabled"
-        view["thinking"] = tb
-        return view
+        if not override:
+            return {**extra_body, "thinking": {"type": "disabled"}}
+        configured = extra_body.get("thinking")
+        thinking = dict(configured) if isinstance(configured, dict) else {}
+        thinking["type"] = "enabled"
+        thinking.setdefault("budget_tokens", _DEFAULT_THINKING_BUDGET)
+        return {**extra_body, "thinking": thinking}
 
     # ─── Request Building ─────────────────────────────────────────
 
@@ -412,6 +440,13 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         options: RequestOptions | None = None,
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
+        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
+        # 快照只反映当前尝试，与消费者看到的内容一致）
+        state = _StreamState()
+        state.sent_ts = t0  # 首 token RT 的计时起点
+        if accumulator is not None:
+            accumulator.start_attempt(state)
+
         try:
             req = self._client.build_request(
                 "POST",
@@ -435,13 +470,6 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 f"LLM response header timeout after {self.timeout_first_chunk}s "
                 f"(no response to the streaming request)"
             )
-
-        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
-        # 快照只反映当前尝试，与消费者看到的内容一致）
-        state = _StreamState()
-        state.sent_ts = t0  # 首 token RT 的计时起点
-        if accumulator is not None:
-            accumulator.state = state
 
         request_id = resp.headers.get("request-id", "")
         # 响应头到达时刻（首包 RT）——只是首 token RT 的兜底：服务端常常先把流
@@ -478,9 +506,17 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                         yield out
                 elif event_type == "message_delta":
                     self._on_message_delta(state, data)
+                    if (
+                        state.stop_reason
+                        and accumulator is not None
+                        and accumulator.finished_at is None
+                    ):
+                        accumulator.finished_at = datetime.now(UTC)
                 elif event_type == "message_start":
                     self._on_message_start(state, data)
                 elif event_type == "message_stop":
+                    if accumulator is not None and accumulator.finished_at is None:
+                        accumulator.finished_at = datetime.now(UTC)
                     yield self._build_final_response(
                         state, model, request_id, header_rt_ms
                     )

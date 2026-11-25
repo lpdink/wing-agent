@@ -11,58 +11,49 @@ from __future__ import annotations
 import uuid as _uuid
 from typing import Any, ClassVar, Literal
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from wing.store import SessionUsage
 
-from .base import AgentInfo, SessionStatus, WingEvent
-from .react import PendingUserMessage, ToolExecutionTiming
+from .base import AgentInfo, HistoryNotice, SessionStatus, WingEvent
+from .react import (
+    AssistantGeneration,
+    PendingUserMessage,
+    ToolExecution,
+    ToolExecutionTiming,
+)
 
 # ============================================================
 # Session 生命周期事件
 # ============================================================
 
 
-class _SessionSnapshot(WingEvent):
-    """同步 session 完整状态。
+class SessionHistory(BaseModel):
+    """HTTP 首载、订阅快照与历史刷新的共同投影。
 
-    订阅快照与主动历史刷新共用此投影。
-
-    status：必填的运行状态（idle / working / waiting）。订阅方直接使用该值；
-      working / waiting 表示 turn 在飞行，即使当时的两个未提交投影都是空的。
-      字段缺失或取值未知时解码失败。
-    turn_started_at：当前 turn 的开始时刻（UTC ISO 字符串），无进行中 turn 时
-      为 null——前端据此恢复已耗时而非从 resume 时刻重算
-
-    四组重放素材，订阅方 MUST 按 `messages → uncommitted → uncommitted_tools
-    → events` 的顺序组装，随后无缝衔接 live 流。快照与 live 事件 MUST 按到达序
-    应用（网关的送达序 == 发射序；乱序会让快照覆盖更晚的 live 状态）：
-
-    session_id：新 session 的 id（事件发给订阅新 session 的 client）
-    messages：已提交 Message 投影列表（活跃链）
-    uncommitted：**单个**未提交 assistant Message 投影（turn 进行中已终结块，
-      可为 null）——与中断补提交同源（同一个 snapshot_blocks）
-    uncommitted_tools：未终结 tool 调用的原始 args 片段列表
-      （`[{tool_call_id, tool_name, args_fragment}]`），前端经既有 live
-      ToolCallStream 分支局部解析渲染活工具卡
-    events：活跃链上的**事实类**事件节点（按链序，过滤规则见 get_active_events）
-    tool_execution_timings：未提交工具的执行计时（按 tool_call_id 索引）
-    pending_user_messages：尚未提交的输入，准备中的批次在队首
-    agent：该 session 的 AgentInfo
-    name：session 名称
-    draft：用户还没发出去的草稿（rewind/fork 时可能有）
+    依次组装 messages、uncommitted、uncommitted_tools、uncommitted_tool_results、
+    events。pending_user_messages 中准备中的批次排在队首。turn_started_at 是
+    当前 turn 的 UTC 起时，空闲时为 null。
     """
+
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    uncommitted: dict[str, Any] | None = None
+    assistant_generation: AssistantGeneration | None = None
+    uncommitted_tools: list[dict[str, Any]] = Field(default_factory=list)
+    uncommitted_tool_results: list[dict[str, Any]] = Field(default_factory=list)
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    pending_user_messages: list[PendingUserMessage] = Field(default_factory=list)
+    turn_started_at: str | None = None
+    tool_executions: dict[str, ToolExecution] = Field(default_factory=dict)
+    tool_execution_timings: dict[str, ToolExecutionTiming] = Field(default_factory=dict)
+
+
+class _SessionSnapshot(WingEvent, SessionHistory):
+    """订阅与主动刷新共用的快照，随后按 WS 到达序衔接 live 流。"""
 
     persist: ClassVar[bool] = False
     session_id: str
-    messages: list[dict[str, Any]] = Field(default_factory=list)
-    uncommitted: dict[str, Any] | None = None
-    uncommitted_tools: list[dict[str, Any]] = Field(default_factory=list)
-    events: list[dict[str, Any]] = Field(default_factory=list)
-    pending_user_messages: list[PendingUserMessage] = Field(default_factory=list)
     status: SessionStatus
-    turn_started_at: str | None = None
-    tool_execution_timings: dict[str, ToolExecutionTiming] = Field(default_factory=dict)
     agent: AgentInfo | None = None
     name: str | None = None
     draft: str | None = None
@@ -104,7 +95,7 @@ class SessionStateChangedEvent(WingEvent):
     agent: str | None = None
 
 
-class InterruptedEvent(WingEvent):
+class InterruptedEvent(HistoryNotice):
     type: Literal["interrupted"] = "interrupted"
     dropped_request_ids: list[str] = Field(default_factory=list)
     """打断丢弃的请求 ID，包含准备批次和打断入口处的积压输入。
@@ -116,8 +107,10 @@ class InterruptedEvent(WingEvent):
     此字段——前端按缺失（而非空列表）回落"全部丢弃"的兼容形态。"""
 
 
-class CompactDoneEvent(WingEvent):
+class CompactDoneEvent(HistoryNotice):
     type: Literal["compact_done"] = "compact_done"
+    disk_exclude: ClassVar[frozenset[str]] = HistoryNotice.disk_exclude | {"summary"}
+    summary: dict[str, Any] | None = None
     original_tokens: int
     compressed_tokens: int
     model: str = ""

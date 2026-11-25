@@ -153,7 +153,10 @@ emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘�
 （**结构性三元组** `ExtraKey(父容器前缀, 原始键名, 值)`，如 `("gateway", "weird", …)` /
 `("providers[0]", "foo", …)`；freeform map 的内部键不算），
 保存时从**磁盘文档**取回、写在父容器已知键之后，上面一行
-`# unknown key (not recognized by this wing version)`；父容器自己缺席时兜底写在文件末尾。
+`# unknown key (not recognized by this wing version)`。父容器缺席时，条目追加在文件末尾。
+如果与根部已有键或声明键重名，则在 `_wing_orphaned_settings` 列表中记录原 `parent`、`key` 和 `value`。
+该键已被占用时追加下划线，直到找到空闲键。后续保存按未知根键保留备份。确认不再需要时，在 `config.yaml`
+中手动删除相应条目或整个备份根键。需要恢复时，从备份条目取出原值并放回正确的父容器。
 ——新版本写的键，旧版本编辑时**不能吃掉**（这是"安全"与"毁掉用户配置"的分界线）。
 **键名不参与任何字符串切分**：`gateway.foo.bar` 这种「键名本身含点」的未知键必须原地写回
 （曾经用 `rpartition(".")` 反推父容器，会把键挪到错误的名字 / 位置）。
@@ -196,6 +199,12 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 读端点**不经过 `server.runtime`**（纯函数 + 投影组合），写路径住在 runtime；服务端**不缓存文档**——
 每次 GET / POST 都现读磁盘，永远与文件一致。
 
+
+`get.effective` 的 `values` 由声明默认值与当前磁盘文档合成，有效文档使用校验后的类型。
+`sources` 按具体路径记录 `default` 或 `override`，显式填写等于默认值的值仍为 `override`。
+缺席的必填字段保持缺席，密文仍为 `null`，语法错误时可读取声明默认值。编辑器保存使用原有
+稀疏 `values`，保留密文 `null` 哨兵。进程和已有会话的应用状态以生效域与回执为准。
+
 保存事务（`WingRuntime.apply_settings`，唯一写盘路径）：
 
 ```
@@ -228,6 +237,25 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 | `setup_mode_exited` | 这次保存是否把网关从 setup mode 推进正常模式 |
 | `backup_path` | `.bak` 路径；磁盘上原来没有文件时为 `null` |
 | `warnings` | 非致命告知（与 `problems` 的区别：problems 让保存失败，warnings 只是提醒） |
+| `written` | 此次保存已完成配置文件写盘，热重载失败仍为 `true`。校验失败为 `false` |
+| `effects` | 此次变更的逐路径应用结果。`scope` 来自目录。`steps` 引用实际尝试过的重载阶段。状态为 `applied`、`next_session`、`restart_required`、`failed`、`unknown` 或 `readonly` |
+| `pending_restart` | 磁盘值与本进程已经装配的值仍有差异的重启域路径，`get` 同样返回。重复保存仍报告。配置无效或处于 setup mode 时为 `null` |
+
+同一网关进程的 HTTP 保存和手动重载沿用同一把应用锁。锁覆盖配置读取、写盘和运行期应用。冲突回执保留 `error` 与字符串 `detail`，
+增 `conflict.current_fingerprint` 和 `conflict.changed_paths`。`changed_paths` 比较服务器近期观察过的
+稀疏基线与当前文件，两份文档可比较时返回目录路径，密文变更只暴露路径。`[]` 表示无已声明设置差异，
+`null` 表示最近的进程内历史无法提供基线或现文件无法解析。客户端处理前重新取得文档并保留本地草稿。
+
+`effects` 描述本次变更的应用结果。相关重载项失败时报告 `failed`，缺少足够信息时报告 `unknown`。
+重复保存仍可通过完整的 `reload.results` 查看各阶段重试结果。Hook 与 prompt 命令的 glob 命中文件加载失败时，
+逐路径回执报告 `failed`。保存的 `reload.failed_settings` 和手动重载的 `failed_settings` 均返回本次
+可以定位的资源失败路径。重复保存也会重新检查文件，即使 `changed` 为空。步骤 `detail` 继续点名配置路径，
+原有步骤的 `ok` 仍表示整步是否中止。阶段级异常继续看 `results[].ok`。
+setup 中 Provider 保持惰性构造，相关热字段在首启回执中报告 `unknown`。`pending_restart` 由已装配的
+网关和会话配置比较得出，监听地址和端口包含本次进程实际采用的命令行覆盖。两侧值一致时清除相应路径。
+setup 修复后原有监听和 CORS 中间件仍使用启动时的值，原地注册的后台任务采用修复时的配置。
+旧 `restart_required` 继续报告本次变更的重启域路径。
+
 
 `changed_paths` 的口径：对两棵稀疏文档做递归 diff，**列表按下标**（删除 `providers[0]` 会把后续项
 逐个记成 modified——这是"N 项变更"的展示粒度，不是三方合并）、类型敏感（`True != 1`、`300 != 300.0`）、
@@ -320,7 +348,7 @@ git-tracked 的 `config.yaml` + `.bak`。
 | `hooks[]` | `hot` | 热重载第 2 项 `hooks.clear() + load_hooks()` |
 | `commands.paths[]` | `hot` | 热重载第 3 项 `remove_by_source("prompt") + register_prompt_commands()` |
 | `log.level` | `hot` | 热重载**末项**：`setup_logger` 幂等重挂 handler（每日文件日志恒 DEBUG，不受此项影响） |
-| `user_agent.preset` | `hot` | `get_headers()` 每次调用读 |
+| `user_agent.preset` | `hot` | Provider 构造 HTTP 客户端时读取，随共享池重建应用 |
 
 **热重载的逐项名字序是对外契约**（probe `test_system_reload` 钉住，只许在**末尾**追加）：
 

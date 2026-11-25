@@ -17,12 +17,16 @@ import asyncio
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
+from functools import partial
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log, utf8_safe
 from wing.common.utils import require_utf8
 from wing.common.with_retry import with_retry
 from wing.config import get_config
+from wing.config.models import ProviderConfig, resolve_model_display_name
+from wing.event import AssistantGeneration
 from wing.hooks import hooks
 from wing.request_context import reset_request_context, set_request_context
 from wing.schema import ContentBlock, LLMUsage, Message, usage_wire
@@ -32,9 +36,9 @@ from wing.store import HistoryWriteUncertain
 from .event_sink import AgentEventSink
 from .inbox import Inbound, Inbox
 from .tool_executor import (
-    INTERRUPTED_RESULT,
     InterruptedToolResults,
     ToolExecutor,
+    interrupted_tool_result,
 )
 
 if TYPE_CHECKING:
@@ -102,7 +106,7 @@ class ReActLoop:
         current_tools: Callable[[], list[Tool]],
         current_options: Callable[[], "RequestOptions"],
         stream: bool = True,
-        set_working: Callable[[bool], None] | None = None,
+        set_working: Callable[[bool], datetime | None] | None = None,
     ) -> None:
         self._executor = tool_executor
         self._sink = sink
@@ -126,7 +130,9 @@ class ReActLoop:
         # _call_llm 入口新建并登记，轮提交/中断补提交/turn 收口后置空。
         # 未提交投影（uncommitted_message / uncommitted_tools）按需快照它，
         # 不缓存副本。
-        self._current_acc: "StreamAccumulator | None" = None
+        self._current_acc: StreamAccumulator | None = None
+        self._generation_provider: ModelProvider | None = None
+        self._generation_message: Message | None = None
 
     @property
     def _config(self) -> object | None:
@@ -148,6 +154,60 @@ class ReActLoop:
     def current_acc(self) -> "StreamAccumulator | None":
         """当前一轮 LLM 调用的流累积状态（None 表示无进行中轮次）。"""
         return self._current_acc
+
+    @property
+    def generation_provider(self) -> ModelProvider:
+        return self._generation_provider or self._current_provider()
+
+    def snapshot_message(self) -> Message | None:
+        if self._current_acc is None:
+            return None
+        blocks = self.generation_provider.snapshot_blocks(self._current_acc)
+        if not blocks:
+            return None
+        message = self._generation_message or Message(role="assistant")
+        return message.model_copy(
+            update={
+                "content_blocks": blocks,
+                "message_at": self._current_acc.finished_at or message.message_at,
+            }
+        )
+
+    def _generation_attempt(self) -> int:
+        return max(1, self._current_acc.attempt) if self._current_acc is not None else 1
+
+    def assistant_generation(self) -> AssistantGeneration | None:
+        message = self._generation_message
+        if message is None or message.message_id is None:
+            return None
+        if self._current_acc is not None and self._current_acc.discarded:
+            phase = "discarded"
+        elif message.content_blocks is not None:
+            phase = "finalized"
+        else:
+            phase = "provisional"
+        return AssistantGeneration(
+            message_id=message.message_id,
+            generation_attempt=self._generation_attempt(),
+            phase=phase,
+        )
+
+    def _discard_generation(self) -> None:
+        if self._current_acc is not None:
+            self._current_acc.discard_attempt()
+
+    def generation_finished(self) -> bool:
+        return (
+            self._current_acc is not None and self._current_acc.finished_at is not None
+        ) or (
+            self._generation_message is not None
+            and self._generation_message.content_blocks is not None
+        )
+
+    def _clear_generation(self) -> None:
+        self._current_acc = None
+        self._generation_provider = None
+        self._generation_message = None
 
     @property
     def preparing_input(self) -> bool:
@@ -206,6 +266,8 @@ class ReActLoop:
                 requeued = True
                 suppress_drop = True
                 return None
+            message.assign_identity()
+            message.message_at = datetime.now(UTC)
             if can_call:
                 try:
                     if steer:
@@ -253,8 +315,7 @@ class ReActLoop:
         """处理一个 turn：drain inbox → merge → ReAct loop → TurnResult/Done。"""
         first = await self._inbox.get()
         batch = [first] + self._inbox.drain()
-        if self._set_working:
-            self._set_working(True)
+        turn_started_at = self._set_working(True) if self._set_working else None
 
         token = set_request_context(request_id=first.request_id, session_id=self._cm.id)
         ctx = _TurnAccumulator()
@@ -265,7 +326,7 @@ class ReActLoop:
             )
             if message is None:
                 return
-            self._sink.turn_started()
+            self._sink.turn_started(turn_started_at)
 
             while True:
                 if not self._can_call_llm(ctx.num_turns):
@@ -318,7 +379,7 @@ class ReActLoop:
             # 兜底置空当前 accumulator（错误/取消路径轮边界未触达时；
             # 正常路径轮边界已置空，此处幂等）。未提交投影随之失效——
             # turn 收口后不再有"进行中内容"。
-            self._current_acc = None
+            self._clear_generation()
             if self._set_working:
                 self._set_working(False)
             reset_request_context(token)
@@ -330,11 +391,10 @@ class ReActLoop:
 
         Returns: True 需要继续下一轮，False 对话结束。
         """
-        model = self._current_model()
+        assistant_msg = await self._call_llm_validated(ctx)
+        model = assistant_msg.model or self._current_model()
 
-        assistant_msg = await self._call_llm_validated(ctx, model=model)
-
-        self._sink.assistant_turn(assistant_msg, model)
+        self._sink.assistant_turn(assistant_msg, model, self._generation_attempt())
 
         ctx.record_usage(assistant_msg.usage)
         ctx.record_text(assistant_msg.content)
@@ -352,7 +412,7 @@ class ReActLoop:
         # 轮边界：本轮内容已提交进链（assistant Message + tool 结果），
         # 当前 accumulator 置空——未提交投影失效，避免中途订阅者把已提交
         # 内容经投影再渲染一次（多轮 turn 的双重渲染）。
-        self._current_acc = None
+        self._clear_generation()
 
         if (
             interrupted_exc is None
@@ -377,7 +437,7 @@ class ReActLoop:
     # ── 生成有效性（无效轮次重试）─────────────────
 
     @with_retry(label="模型生成", retry_on=(InvalidGenerationError,))
-    async def _call_llm_validated(self, ctx: "_TurnAccumulator", model: str) -> Message:
+    async def _call_llm_validated(self, ctx: _TurnAccumulator) -> Message:
         """一次 LLM 生成 + 轮有效性校验；无效则抛错交给装饰器有界重试。
 
         有效性规则（上游「空响应 / 截断」的容错——判定放 loop 层而非
@@ -412,7 +472,7 @@ class ReActLoop:
         compaction_applied = ctx.compaction_applied
         ctx.compaction_applied = False
         llm_result = await self._cm.get_messages_for_llm(
-            model=model,
+            model=self._current_model(),
             model_provider=self._current_provider(),
             current_tools=self._current_tools,
             options=self._current_options(),
@@ -423,6 +483,7 @@ class ReActLoop:
         # 在途迭代之间因此不存在竞态窗口（provider/base.py 的退场语义）。
         # options 同理重解析：会话级开关（thinking / effort）与探针都取发送时刻的值。
         provider = self._current_provider()
+        model = self._current_model()
         options = self._current_options()
         call_options = (
             replace(options, cache_parts=llm_result.cache_parts)
@@ -444,7 +505,7 @@ class ReActLoop:
             # 只记被丢弃的尝试（token 真花掉了）；正常返回的消息由 _llm_turn
             # 统一记账——wrapper 同处再记会让收尾调用双计。
             ctx.record_usage(assistant_msg.usage)
-            self._current_acc = None
+            self._discard_generation()
             raise InvalidGenerationError(
                 "模型本轮未产出 content，也没有收敛的 tool call"
                 "（空响应 / 流被截断；reasoning 不作为收尾依据）"
@@ -453,7 +514,10 @@ class ReActLoop:
         if self._has_unfinished_tool_calls(provider):
             ctx.record_usage(assistant_msg.usage)
             self._cm.add_messages([assistant_msg])
-            self._current_acc = None
+            self._sink.assistant_message_committed(
+                assistant_msg, model, self._generation_attempt()
+            )
+            self._clear_generation()
             raise InvalidGenerationError(
                 "模型本轮有 content 但 tool call 未收敛（流被截断）："
                 "content 已提交，未收敛的 tool call 未提交"
@@ -502,6 +566,7 @@ class ReActLoop:
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
         stop_reason: str | None = None
+        completed_at: datetime | None = None
         # 缓存账本本次调用只记一次账（上游多帧报 usage 时按第一帧）。
         observed = False
         # 本次调用从发起到 usage 帧的时长（会话用量账本的 llm_time_ms 来源）。
@@ -510,6 +575,29 @@ class ReActLoop:
         # （resume）与中断补提交按需快照同一个对象。
         accumulator = provider.create_accumulator()
         self._current_acc = accumulator
+        attempt = accumulator.attempt if accumulator is not None else None
+        self._generation_provider = provider
+        provider_config = getattr(provider, "config", None)
+        spec = (
+            provider_config.find_model(model)
+            if isinstance(provider_config, ProviderConfig)
+            else None
+        )
+        message = Message(
+            role="assistant",
+            model=model,
+            model_id=spec.effective_id if spec is not None else None,
+            provider_name=getattr(provider, "name", None),
+            model_display_name=resolve_model_display_name(provider_config, model)
+            if spec is not None
+            else None,
+        )
+        message_id = message.assign_identity()
+        self._generation_message = message
+        if accumulator is not None:
+            accumulator.on_discard = partial(
+                self._sink.assistant_generation_reset, message_id
+            )
 
         try:
             async for chunk in provider.generate(
@@ -520,15 +608,34 @@ class ReActLoop:
                 accumulator=accumulator,
                 options=options,
             ):
+                if accumulator is not None and accumulator.attempt != attempt:
+                    attempt = accumulator.attempt
+                    content_blocks = None
+                    completed_at = None
+                    last_usage = None
+                    stop_reason = None
+
+                generation_attempt = self._generation_attempt()
                 if chunk.reasoning_content:
-                    self._sink.llm_reasoning(chunk.reasoning_content)
+                    self._sink.llm_reasoning(
+                        chunk.reasoning_content,
+                        message_id=message_id,
+                        generation_attempt=generation_attempt,
+                    )
 
                 if chunk.content:
-                    self._sink.llm_text(chunk.content)
+                    self._sink.llm_text(
+                        chunk.content,
+                        message_id=message_id,
+                        generation_attempt=generation_attempt,
+                    )
 
                 if chunk.content_blocks is not None:
                     # provider 产出的权威块数组（最终 chunk 携带）
                     content_blocks = chunk.content_blocks
+                    completed_at = (
+                        accumulator.finished_at if accumulator is not None else None
+                    ) or datetime.now(UTC)
 
                 if chunk.tool_call_deltas:
                     for delta in chunk.tool_call_deltas:
@@ -537,14 +644,15 @@ class ReActLoop:
                             tool_name=delta.name,
                             args_fragment=delta.args_fragment,
                             is_final=delta.is_final,
+                            message_id=message_id,
+                            generation_attempt=generation_attempt,
                         )
 
                 # 终止原因**不随 token 走**：OpenAI 兼容的终结帧只带零 token
                 # 元信息（避免与带内 usage 双计）但携带 stop_reason——若只在
                 # 非零 usage 分支取值，它会被整个跳过，Message.stop_reason
                 # 恒为 null（max_tokens 截断审计失效）。取值与 metrics 发射
-                # 解耦：任一帧给了非 None 值就更新（provider 层传输重试在同一
-                # generate() 内重放流时跨尝试累积，与 last_usage 同构）。
+                # 解耦：同一次传输尝试中任一帧给了非 None 值就更新。
                 if chunk.usage.stop_reason is not None:
                     stop_reason = chunk.usage.stop_reason
 
@@ -588,43 +696,45 @@ class ReActLoop:
             # 中断补提交：快照当前 accumulator（与 resume 未提交投影同源）。
             partial_blocks = provider.snapshot_blocks(self._current_acc)
             if partial_blocks:
-                partial_msg = Message(
-                    role="assistant",
-                    content_blocks=partial_blocks,
-                    usage=last_usage,
-                    stop_reason="interrupted",
-                )
+                message.content_blocks = partial_blocks
+                if accumulator is not None:
+                    message.message_at = accumulator.finished_at
+                    if accumulator.attempt != attempt:
+                        last_usage = None
+                message.message_at = message.message_at or datetime.now(UTC)
+                message.usage = last_usage
+                message.stop_reason = "interrupted"
                 # 已终结未执行的 tool_use → 合成打断结果补配对（先落链，
                 # 再广播关卡片事件——日志是事实源，广播是投影）。
-                interrupted_calls = partial_msg.tool_calls or []
-                tool_results = [
-                    Message(
-                        role="tool",
-                        tool_call_id=tc.id,
-                        content=INTERRUPTED_RESULT,
-                    )
-                    for tc in interrupted_calls
-                ]
-                self._cm.add_messages([partial_msg] + tool_results)
-                for tc in interrupted_calls:
+                interrupted_calls = message.tool_calls or []
+                tool_results = [interrupted_tool_result(tc) for tc in interrupted_calls]
+                self._cm.add_messages([message, *tool_results])
+                self._sink.assistant_message_committed(
+                    message, model, self._generation_attempt()
+                )
+                self._clear_generation()
+                for tc, result in zip(interrupted_calls, tool_results, strict=True):
                     self._sink.tool_finished(
-                        tc, INTERRUPTED_RESULT, success=False, model=model
+                        tc,
+                        result.content or "",
+                        success=False,
+                        model=model,
+                        message=result,
                     )
-                # 补提交完成：内容已进链，未提交投影失效（不再双重渲染）。
-                self._current_acc = None
             raise
 
-        if content_blocks is None:
+        if content_blocks is None or (
+            accumulator is not None and accumulator.attempt != attempt
+        ):
             # 流未正常结束（无权威块数组）：无效轮次——由 _call_llm_validated
             # 的有界重试收口（Anthropic 在 message_stop 前被切断即此形态）。
-            self._current_acc = None
+            self._discard_generation()
             raise InvalidGenerationError(
                 "provider did not emit authoritative content_blocks "
                 "(stream ended without a complete block array)"
             )
-        return Message(
-            role="assistant",
-            content_blocks=content_blocks,
-            usage=last_usage,
-            stop_reason=stop_reason,
-        )
+        message.content_blocks = content_blocks
+        message.message_at = completed_at
+        message.usage = last_usage
+        message.stop_reason = stop_reason
+        return message

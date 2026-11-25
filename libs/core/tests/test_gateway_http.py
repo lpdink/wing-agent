@@ -26,6 +26,7 @@ from wing.context import CompactionAborted
 from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
 from wing.gateway.routes import health as health_route
+from wing.provider.base import ReasoningSupport
 from wing.session import SessionArchivedError, TagMutation
 from wing.store import ArchivedSession, SessionUsage, TagMeta
 
@@ -962,7 +963,12 @@ class TestSessionInfo:
 
     def test_info_ok(self, client: TestClient, mock_runtime):
         """正常获取 session 运行时状态。"""
-        mock_session = MagicMock()
+        mock_session = MagicMock(template_name="default")
+        mock_session.agent.reasoning_controls.return_value = (
+            ReasoningSupport(thinking=True, effort=("low", "high")),
+            True,
+            "high",
+        )
         agent = mock_session.agent
         cm = agent.context_manager
         cm.get_context_stats.return_value = (5, 1000)
@@ -1007,6 +1013,14 @@ class TestSessionInfo:
         assert data["context_window_tokens"] == 128000
         assert data["thinking"] is True
         assert data["reasoning_effort"] == "high"
+        assert data["template_name"] == "default"
+        assert data["can_switch_template_safely"] is True
+        assert data["reasoning"] == {
+            "thinking": True,
+            "thinking_supported": True,
+            "effort": "high",
+            "effort_options": ["low", "high"],
+        }
         assert data["yolo"] is False
         assert data["session_name"] == "Test Session"
         assert data["workdir"] == "/tmp/ws"
@@ -1025,7 +1039,12 @@ class TestSessionInfo:
 
     def test_info_no_workspace(self, client: TestClient, mock_runtime):
         """Session 无 workspace 时 workdir 为 null；未声明展示名时为 null。"""
-        mock_session = MagicMock()
+        mock_session = MagicMock(template_name=None)
+        mock_session.agent.reasoning_controls.return_value = (
+            ReasoningSupport(thinking=None, effort=None),
+            False,
+            None,
+        )
         mock_session.agent.get_status.return_value = {
             "model": "gpt-4o",
             "api_url": "https://api.openai.com",
@@ -1056,12 +1075,19 @@ class TestSessionInfo:
         assert resp.status_code == 200
         assert resp.json()["workdir"] is None
         assert resp.json()["model_display_name"] is None
+        assert resp.json()["reasoning"]["thinking_supported"] is None
+        assert resp.json()["reasoning"]["effort_options"] is None
         assert resp.json()["last_turn_end"] is None
         assert resp.json()["last_turn_subtype"] is None
 
     def test_info_includes_status(self, client: TestClient, mock_runtime):
         """info 响应携带运行时 status（如 waiting）。"""
-        mock_session = MagicMock()
+        mock_session = MagicMock(template_name=None)
+        mock_session.agent.reasoning_controls.return_value = (
+            ReasoningSupport(thinking=None, effort=None),
+            False,
+            None,
+        )
         mock_session.agent.get_status.return_value = {
             "model": "gpt-4o",
             "api_url": "https://api.openai.com",
@@ -1091,6 +1117,7 @@ class TestSessionInfo:
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
         assert resp.json()["status"] == "waiting"
+        assert resp.json()["can_switch_template_safely"] is True
 
     def test_info_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
@@ -1157,7 +1184,24 @@ class TestSessionUpdate:
             yolo=None,
             workspace=None,
             tools=None,
+            validate_reasoning=False,
+            require_idle=False,
         )
+
+    def test_validated_reasoning_persistence_failure(
+        self, client: TestClient, mock_runtime
+    ):
+        mock_runtime.update_session = AsyncMock(side_effect=OSError("write failed"))
+        resp = client.post(
+            "/api/session/update",
+            json={
+                "session_id": "test-id",
+                "thinking": False,
+                "validate_reasoning": True,
+            },
+        )
+        assert resp.status_code == 500
+        assert resp.json()["detail"] == "could not persist reasoning settings"
 
     def test_update_agent(self, client: TestClient, mock_runtime):
         """切换 agent 模板。"""
@@ -1353,6 +1397,8 @@ class TestSessionUpdate:
             yolo=None,
             workspace="/tmp",
             tools=None,
+            validate_reasoning=False,
+            require_idle=False,
         )
 
     def test_update_workspace_invalid(self, client: TestClient, mock_runtime):

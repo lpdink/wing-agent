@@ -9,10 +9,11 @@ interrupt / release / rewind）。字段与文案即线格式：改动等于改�
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from wing.event import AgentInfo, SessionInfo
 from wing.event.query_response import BranchTargetInfo
+from wing.event.state_change import SessionHistory
 from wing.schema import MediaRef
 from wing.session.override import AgentOverride
 
@@ -168,6 +169,8 @@ class RewindRequest(BaseModel):
 class UpdateSessionRequest(BaseModel):
     """POST /api/session/update 请求——统一 session 状态变更。"""
 
+    model_config = ConfigDict(extra="allow")
+
     session_id: str = Field(description="目标 session ID")
     model_id: str | None = Field(
         default=None,
@@ -184,6 +187,14 @@ class UpdateSessionRequest(BaseModel):
     tools: list[str] | None = Field(
         default=None,
         description="切换工具集（全量替换，ref 格式：namespace.name 或裸名）",
+    )
+    validate_reasoning: bool = Field(
+        default=False,
+        description="按当前模型校验 thinking / reasoning_effort；仅可与这两项一起提交",
+    )
+    require_idle: bool = Field(
+        default=False,
+        description="仅用于单独切换 agent；会话有在途工作或正在关闭时返回 409",
     )
 
 
@@ -321,7 +332,7 @@ class SessionListResponse(BaseModel):
     sessions: list[SessionInfo] = Field(description="所有活跃 session 的摘要列表")
 
 
-class SessionGetResponse(BaseModel):
+class SessionGetResponse(SessionHistory):
     """session 详情响应。"""
 
     session_id: str = Field(description="session ID")
@@ -331,7 +342,6 @@ class SessionGetResponse(BaseModel):
     status: str = Field(
         default="idle", description="运行时状态: inactive|idle|working|waiting"
     )
-    messages: list[dict] = Field(description="消息历史列表")
     agent: AgentInfo | None = Field(default=None, description="当前 agent 配置信息")
 
 
@@ -340,6 +350,17 @@ class ContextStatsInfo(BaseModel):
 
     message_count: int = Field(description="当前消息数量")
     total_tokens: int = Field(description="当前上下文 token 总数")
+
+
+class SessionReasoningInfo(BaseModel):
+    """当前 provider 实际请求值及当前模型可编辑的推理选项。"""
+
+    thinking: bool | None = Field(description="透传值无法解释为 thinking 开关时为 null")
+    thinking_supported: bool | None = Field(description="null 表示模型能力未知")
+    effort: str | None = Field(description="实际请求中的会话力度字符串")
+    effort_options: list[str] | None = Field(
+        description="null 表示未知，空列表表示不支持"
+    )
 
 
 class SessionInfoResponse(BaseModel):
@@ -369,7 +390,16 @@ class SessionInfoResponse(BaseModel):
     reasoning_effort: str | None = Field(
         default=None, description=f"推理力度: {_EFFORT_VALUES}"
     )
+    reasoning: SessionReasoningInfo = Field(
+        description="实际请求值及当前模型的推理控件能力"
+    )
     yolo: bool = Field(description="yolo 模式是否开启")
+    template_name: str | None = Field(
+        default=None, description="当前会话使用的 Agent 模板"
+    )
+    can_switch_template_safely: bool = Field(
+        description="网关兑现模板切换的 require_idle 准入，与当前会话是否空闲无关"
+    )
     session_name: str | None = Field(default=None, description="session 名称")
     workdir: str | None = Field(
         default=None,

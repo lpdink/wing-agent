@@ -36,7 +36,7 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | GET | `/api/session/media` | 读取媒体字节（**原始字节响应**，非 JSON）：`?session_id=<sid>&media_id=<id>` → `Content-Type`（由 magic bytes 现读；嗅探不出回落 `application/octet-stream`）+ `ETag: "<id>"` + `Cache-Control: private, max-age=31536000, immutable`（内容寻址 = 字节永不变更）+ `X-Content-Type-Options: nosniff`。`media_id` 必须是 64 位小写 hex（防路径穿越的闸门在存储层路径拼接之前）；**非法 id 与对象不存在同价 404**（`media not found`，不给探测反馈）；幽灵会话 404（`session not found`）；归档会话 404 + `error="session_archived"`。**不水合**已逐出会话（与上传 / tag 同款纯解析）——读一张图不把 inactive 会话翻成活跃；老共享池 miss 回退时照既有契约**物化**进会话目录。memory 后端天然可读（字节在进程内桶里）。鉴权开启时 `?api_key=` 可用（见下「鉴权与 RBAC」） |
 | POST | `/api/session/files` | 上传**用户文件**（**原始字节体**：`?session_id=<sid>&name=<n>`，body = 文件字节，非 JSON / 非 multipart；`name` **必填**——agent 与用户都靠名字识别它，缺省 400）。落点 `<sessions-root>/<sid>/files/<实际名>`（**保留原名**，agent 的 Read 看得懂）；响应 `{ok, file:{name, path, bytes}}`——`name` 是**实际落盘名**（同名异字节冲突时带 `-2` / `-3` 后缀；大小写 / Unicode 归一化不敏感的文件系统上，请求名是别名时也以磁盘真名为准），`path` 是网关宿主机**绝对路径**（消费方把它写进消息正文 `[file: 名 · 大小 · 路径]`；memory 后端为 null——没有本地文件，如实降级）。收包顺序：会话存在（404）→ 名字卫生（400，**不读 body**）→ `Content-Length` 预检（声明值超 `files.max_bytes` 直接 400，**不收包**）→ 收包 → 字节闸门（非空 / 真实字节兜底 ≤ `files.max_bytes`）；失败一律**零存储副作用**（不建目录、不写字节）。**同名同字节幂等**（返回既有路径、不重写）；**同名异字节递增后缀、绝不覆盖**（链上的 `[file: …]` 引用指向既有那份）。名字规则：非空 / UTF-8 可编码 / ≤ 128 字节（中文名合法）/ 无路径分隔符 / 无 `..` / 不以 `.` 开头 / 无 ASCII 控制符。**不水合**已逐出会话；归档会话 404 + `error="session_archived"` |
 | GET | `/api/session/list` | 列出所有 session（跨 store 聚合）；`status: inactive` = 不在内存（未加载 / 已逐出）。每个条目携带 `tags`（插入序；无标签为空数组）、`tag_meta`（每个标签的记录，当前含 `added_at` 打标时间；键集 ⊆ tags）与 `parent_session_id`（血缘：创建者会话 id，根会话为 null），以及生效模型的四件套 `model_id`（引用词）/ `model_name`（调用名）/ `provider_name` / `model_display_name`（口径同 `/api/session/info`；在内存的会话取 live agent，未加载的按 resume 链解析盘上记录，解析不出的降级路径为 null，展示层回落 展示名 → 调用名 → 引用词）；以及**收口事实** `last_turn_end`（最近一次收口轮次的结束时刻，本地 naive ISO，与 `last_interaction` 同口径）与 `last_turn_subtype`（该轮的 `turn_result` subtype：`success` / `error_during_execution` / `error_max_turns`，逐字透传不收敛）——两字段取自 metadata（**冷读磁盘**，不水合、不建会话）：未加载 / 已逐出的会话同样携带，这是「已完成」收件箱跨逐出、跨重启的事实源；下一次收口覆盖（两轮之间反映上一轮），中断**不写**（中断沿 CancelledError 收场、不发 `turn_result`——用户主动停止不是交付），旧会话 / 还没有收口过为 null；**物化后无名但有标的会话也列出**（name 为 null，例如首条消息是纯图；标签随物化落盘，"只建不用"的空会话不在列表里——见 [architecture.md](architecture.md)「会话物化」）。**顺序是契约**：活跃（`status != inactive`，= 已在内存的工作集）在前，组内按 `last_interaction` 降序（缺失 / 不可解析时回退 session id 前缀 `YYYYMMDD-HHMMSS`，都没有按 0），完全并列则按 session id 升序（全序，避免顺序随 store 枚举漂移）。后端只定这个基准序；前端在其上加**自己的语义叠加**——当前是「`pin` 标签置顶」（组内按 `tag_meta.pin.added_at` 降序，后 pin 的更靠前；缺时间的**仍然置顶**，只在置顶组内排在有时间者之后——时间口径：写者只产出 naive 本地 ISO；比较时 naive 值按固定基准、带偏移值按瞬时——两类混排（手改数据）是已知边界，且前后端对 naive 取的基准不同、不互为一致性合约），以及**会话树序与搜索分层**：血缘森林序（子节点跟随父、兄弟组内 pin 优先 → **子树注意力**（自己或任一后代 `waiting`）优先 → 子树活跃降序；根节点的 pin 连子树整棵上浮、子节点的 pin 只在兄弟组内排前——见 [session-lineage.md](session-lineage.md)；`wing ps --tree` 与 TUI 的 `/ss` 共用同一契约，`/ss` 默认只画**一层**（该 scope 的直接子，一行不少）与 `/ss <args>` 搜索态的 exact > prefix > contains 分层（搜索态跨层全量匹配、平铺显示、不带树前缀）；后端不感知 `pin`（它只是普通标签），后端基准序不看状态优先级（`waiting` 不提前——注意力是前端树序的键）与 workspace。可选**子集过滤**（查询参数，逗号分隔）：`status=idle,working,waiting` 只保留状态命中者（取值域 = 状态全集）；`tag=pin,crew` 只保留**携带全部**给定标签的行（AND，与 `wing ps --tag` 的既有标签口径一致；`/ss <args>` 的 args 是 id / 标题 / workspace 的子串匹配，与标签无关）；`parent=<sid>` 只保留 **parent 逐字等于**该值的行（直接子——不含父自己、不含孙辈；单值参数）；同时给出即 AND。**过滤 = 子集**：结果是全量列表的**子序列**（同样的行、同样的相对顺序，只是少了几行），聚合成本与不过滤时相同——省下的是响应体积与调用方的清洗 / 合并成本。「在内存的会话」（能在跑的那批，含完整行）即 `status=idle,working,waiting`：会话列表 / rail 的状态轮询走它，不必每次拉全量——注意可见性规则先于过滤生效（无名且无标的会话本就不在列表里，过滤不会让它出现）；旧网关不识别这些参数时会静默返回全量（仍是正确的超集——消费方按 id 处理多出来的行即可）。非法取值一律 400（未知状态 / 空段 / **同一参数重复给出**——多值用单个逗号分隔参数表达；标签取值按写入侧同一套规则校验（`wing.session.tags.validate_tag`），词法非法（空 / 超长 / 空白 / 控制符 / `-` 开头）即 400；`parent` 按 session id 的卫生规则校验，词法非法（空 / 路径分隔符 / `..` / 点开头 / 控制符 / 超长）即 400）；**语法合法但不存在**的标签 / 父是空结果（词表开放，无从枚举——字面匹配，不是错误） |
-| GET | `/api/session/get` | 获取 session 详情 |
+| GET | `/api/session/get` | 获取 session 详情和与 WS 快照同形的消息、工具及通知投影（见下文「消息历史」） |
 | GET | `/api/session/info` | 运行时状态，含 `model`（调用名）+ `model_id`（引用词；不可用时 null）+ `provider_name`（运行期事实）+ `model_display_name`（展示名；未声明 = null，前端回落 `model`）、`context_stats`、`skills_info`、`reasoning_effort`、`parent_session_id`（血缘：创建者会话 id；根会话为 null，弱引用不保证父当前可解析）、`tags`（会话标签）、`tag_meta`（标签记录，含 `added_at`）、`last_turn_end` / `last_turn_subtype`（最近一次收口轮次的结束时刻与 subtype，口径同 `/api/session/list`；从未收口过（含首轮即中断）为 null，已收口过再中断保留上一轮值）与 `usage`（会话用量账本：计数 `user_messages` / `llm_calls` / `tool_calls` / `turns` + token `prompt_tokens` / `completion_tokens` / `cached_tokens` + 时长 `llm_time_ms` / `tool_time_ms`，跨 release / 网关重启延续；旧会话 / 无记录读出即全零，不回填。口径：`llm_*` 只计 ReAct 循环内的调用（压缩等旁路不计），tool 只计真实执行的调用（参数非法 / 未知工具的短路与中断合成不计）。命中率 = `cached_tokens / prompt_tokens`、工作时长 = `llm_time_ms + tool_time_ms` 由客户端推导——线格式不含派生值） |
 | GET | `/api/session/branches` | 可回退 / 分叉的消息节点 |
 | GET | `/api/session/cache` | KV 前缀缓存账本（`summary` 理论/实际命中率 + `forks` 分叉归因 + `calls` 逐次调用）：`?session_id=<sid>&limit=<1..200>`（`session_id` 必填；`limit` 缺省 20，作用于 forks / calls 各自，新→旧）。**不水合**会话——纯解析 + 读一份边车 JSON；会话不存在 / 无账本返回 200 + 全 0 summary + 空数组（**不 404**，前端与 CLI 都按同一条路径渲染「还没数据」）。字段表、verdict / blame 语义与排错手册见 [cache-accounting.md](cache-accounting.md) |
@@ -48,6 +48,23 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/release` | 逐出 session 内存态（只回收内存，磁盘不动）：忽略空闲时长，不忽略钉住条件——忙碌 / inbox 有待处理输入 / 被订阅 / 非持久后端以 409 拒绝；本就不在内存返回 `released: false`（幂等） |
 | POST | `/api/session/archive` | **设置会话的归档状态**（幂等）。body `{session_id, archived?}`：`archived` 缺省 `true` = 归档（会话目录移入 `<sessions root>/.archive/`）；`false` = 恢复（移回 live 区）。响应 `{ok, session_id, archived, changed, detail}`——`archived` 是操作后的状态、`changed` 说明本次是否真的移动（`detail` ∈ `archived` / `already archived` / `restored` / `not archived` / `nothing to archive`——最后一档 = 内存中的空会话，从未落盘、没有可移动的东西）。**归档是纯移动**（不改任何字节）；**恢复会刷新会话的 `last_interaction`**——恢复是显式兴趣信号，否则自动 sweep 会按旧年龄在下一轮立刻把它收回去（resume 刻意**不写** metadata——「空转 resume 零写盘」是既有不变量——所以「刚打开的旧会话」由 sweep 的「内存中的会话不动」规则保护）。钉住条件同 release（忙碌 / 排队输入 / 被订阅 / 非归档后端（memory）以 409 拒绝）；空闲可收回的会话先逐出再移动。未知 id 404（归档区未命中即普通 `not_found`） |
 | GET | `/api/session/archive` | 列出归档区条目（**读网关侧索引** `.archive/index.json`，不扫会话目录；索引缺失 / 损坏时按目录重建，`archived_at` 为 null）。条目 = 归档时刻事实快照（`id` / `name`（标题回退同 ps）/ `workspace` / `template_name` / `last_interaction` / `archived_at` / `tags`）+ 投影期补全的模型四件套（与 `/api/session/list` 同一读法）。按最后交互时间降序。`wing archive --list` 对应的端点 |
+
+
+`GET /api/session/info` 的 `template_name` 是当前 Agent 模板。`reasoning` 对象提供当前模型的请求值和可编辑选项：
+
+| 字段 | 含义 |
+|------|------|
+| `thinking` | 当前请求使用的 thinking 设置。Anthropic 的 adaptive 模式视为开启，非标准透传值显示为 `null` |
+| `thinking_supported` | `true` 可编辑，`false` 不支持此开关，`null` 表示模型能力未知 |
+| `effort` | OpenAI 兼容请求实际发送的会话 `reasoning_effort` 字符串，包括 provider 默认及 `extra_body` 回落。无字符串值时为 `null` |
+| `effort_options` | 有序可编辑档位。`[]` 表示不支持，`null` 表示能力未知。既有覆盖或透传配置的值可以在列表之外 |
+
+在模型对象的 `capabilities` 中声明 `thinking: true` 和 `reasoning_effort: [low, high]`，以该模型实际接受的请求字段和档位为准。可用档位为 `low`、`medium`、`high`、`xhigh`、`max`。Anthropic 协议在网关内支持传统 thinking 开关与预算，adaptive 或无有效预算时禁止通过此控件切换。现有 Anthropic 序列化没有会话力度映射，`effort_options` 恒为 `[]`。
+
+新客户端确认 `reasoning` 存在后，可在 `POST /api/session/update` 发送 `validate_reasoning: true` 和 `thinking`、`reasoning_effort` 中至少一项。该模式仅接收这两项更新，未知的请求字段、不可用的控件及未声明的力度返回 400。已物化的会话把本次设置一起持久化，写盘失败返回 500 并保留此前状态。草稿仍随物化落盘。旧请求沿用已有覆盖语义和顶层状态字段。成功回执仍为 `{"ok":true}`。收到 `session_state_changed` 或模型配置热重载后，可按原会话 ID 重读 `info`。切换模型保留显式覆盖，切换 Agent 模板重置模型、工具、thinking、effort、yolo、基础提示词和轮次限额，保留会话、历史、追加提示词与工作区。
+
+
+`POST /api/session/update` 支持 `{"session_id":"…","agent":"模板名","require_idle":true}`。该选项仅用于单独切换 Agent 模板。缺少 `agent`、混入其他变更或未知字段返回 400。会话有在途轮次、等待回答、排队或准备输入、手动压缩或正在关闭时返回 409，保留队列、历史和会话覆盖。准入检查与关闭投递闸门之间没有挂起点。换入新 Agent 前到达的输入会明确被拒绝，换入完成后可重试。成功响应仍为 `{"ok":true}`。省略或传 `false` 使用既有模板切换语义。`GET /api/session/info` 顶层 `can_switch_template_safely: true` 表示当前网关兑现此准入。该能力在忙碌会话上也为 `true`，提交时仍需发送 `require_idle: true`。字段缺失或为 `false` 时，客户端应禁用依赖该准入的模板切换。能力检测可直接使用会话详情。
 
 > **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、无人订阅、
 > 非 memory 后端，且超过 `sessions.eviction.idle_ttl_seconds`）会被后台周期任务逐出内存——
@@ -140,6 +157,14 @@ RPC 风格（不是 RESTful）：目录 / 取值 / 状态 / 保存各一个端�
 > **不做假热更**（`gateway.port` 改了也不会换端口监听）；`warnings` 是非致命告知
 > （当前唯一产出：原文件不可解析时"其中的密钥无法保留"——语法错的文件也能经这个端点修好）。
 > 保存成功会广播 `settings_changed` 事件（见下）。
+
+设置客户端还可消费向后兼容的扩展字段：
+
+- `get.effective` 为 `{values, sources}`，包含默认展开的磁盘配置和每条路径的 `default` / `override` 来源。密文仍为 `null`，保存继续使用稀疏 `get.values`。
+- `get.pending_restart` 与 `set.pending_restart` 为磁盘配置相对当前进程已装配值仍待重启的路径。监听地址/端口含 CLI 覆盖，setup 原地装配的后台任务采用修复时的值。配置无效或进程尚处于 setup mode 时为 `null`。
+- `set.written` 描述文件提交结果，`set.effects` 逐路径返回 `{path, scope, status, steps}`。步骤名称引用 `reload.results`，后者即使没有文档变化也提供本次重载结果。单个 Hook 或命令文件加载失败时，保存的 `reload.failed_settings` 和手动重载的 `failed_settings` 同样返回可定位的设置路径，步骤 `detail` 继续列出这些路径，步骤 `ok` 继续表达整体阶段结果。
+- `409` 的 `conflict` 为 `{current_fingerprint, changed_paths}`，原有 `error` 和字符串 `detail` 继续可用。路径是最近观察到的 `base` 相对当前磁盘的差异。`[]` 表示无已声明设置差异，`null` 表示历史未覆盖或配置无法解析。
+
 
 #### 配置不可用时的降级面（setup mode）
 
@@ -268,7 +293,7 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 `tool_runtime` 角色连接时须经 `?client_id=<id>` 自选 client_id（admin 也可自选，未声明者服务端分配）；该 WS 是纯工具执行通道，不参与事件订阅。
 
-**ReAct 事件**（`event/react.py`）：`turn_started` · `user_message_accepted` · `text` · `reasoning` · `tool_call_stream` · `tool_call` · `tool_execution_timing` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
+**ReAct 事件**（`event/react.py`）：`turn_started` · `user_message_accepted` · `text` · `reasoning` · `tool_call_stream` · `tool_call` · `tool_execution_started` · `tool_execution_timing` · `tool_call_result` · `diff_content` · `ask` · `assistant_turn` · `assistant_generation_reset` · `assistant_message_committed` · `tool_result_turn` · `turn_result`（subtype: success / error_during_execution / error_max_turns）· `done` · `llm_call_metrics`。
 
 > `tool_call_stream`：LLM 生成工具参数期间的流式渲染事件，携带**增量原始 args 文本碎片**（`args_fragment`，首个事件含完整前缀）。后端不解析 partial JSON，前端自行累积 buffer 并容错解析渲染；参数生成结束后由 `tool_call` 事件携带权威解析结果。
 >
@@ -281,14 +306,41 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 | 事件 | 字段 | 发射时机 |
 | --- | --- | --- |
 | `user_message_queued` | `origin_request_id`, `content`, `media` | 通过入口校验和命令展开并进入 inbox 后。命中 Ask waiter 的定向答复仍走工具结果路径 |
-| `user_message_committed` | `message_uuid`, `origin_request_ids`, `content`, `media` | hook 处理后的 user Message 入链后，每批一次。新 turn 在 `turn_started` 前，steer 在全部工具结果之后、下一次模型调用前 |
+| `user_message_committed` | `message_uuid`, `message_id`, `message_at`, `origin_request_ids`, `content`, `media` | hook 处理后的 user Message 入链后，每批一次。新 turn 在 `turn_started` 前，steer 在全部工具结果之后、下一次模型调用前 |
 | `user_messages_dropped` | `origin_request_ids` | 准备提交的批次因失败或取消被丢弃。中断或模板替换时，`interrupted.dropped_request_ids` 提供全部已确认丢弃的 ID，包含队列项和兼容旧客户端需要的准备批次 ID |
 
 `origin_request_id` 对应发送端的 `request_id`。`media` 使用 `MediaRef[]`，无附件为 `[]`。三个事件仅广播。订阅快照的 `messages` 承载已提交记录，`pending_user_messages` 按顺序提供 `{origin_request_id, content, media}`，包括正在等待 hook 的批次。字段存在（含 `[]`）表示支持这些事件。
 
-收到提交时按 `origin_request_ids` 清理待处理项，以 `message_uuid` 去重并放入历史。`user_message_accepted` 仍按原始输入逐条发射，供旧客户端与用量记账使用。主动历史刷新使用 `session_history_refreshed`，字段和 `sync_session` 相同。自动压缩换链后用它发送有效 UUID，也用于历史写入结果不明后的队列对账。旧客户端忽略新类型，继续按 `user_message_accepted` 处理原有队列。新订阅、补快照及回退继续收到 `sync_session`。
+收到提交时按 `origin_request_ids` 清理待处理项，以 `message_id` 去重并放入历史（旧网关回落 `message_uuid`）。`user_message_accepted` 仍按原始输入逐条发射，供旧客户端与用量记账使用。主动历史刷新使用 `session_history_refreshed`，字段和 `sync_session` 相同。自动压缩换链后用它发送有效 UUID，也用于历史写入结果不明后的队列对账。旧客户端忽略新类型，继续按 `user_message_accepted` 处理原有队列。新订阅、补快照及回退继续收到 `sync_session`。
 
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
+
+### 消息历史
+
+`GET /api/session/get`、`sync_session`、`session_history_refreshed` 共用同一份活跃链投影：`messages`、`events`、`uncommitted`、`assistant_generation`、`uncommitted_tools`、`uncommitted_tool_results`、`tool_executions`、`pending_user_messages`、`tool_execution_timings`、`turn_started_at`。在 HTTP 首载后，以订阅的 WS 快照替换基线，再按 WS 到达序应用直播；HTTP 与 WS 无跨通道定序。`status` 是运行态权威。`turn_started` 与同一轮快照共用 UTC 起时 `turn_started_at`，空闲时省略或为 null。
+
+| 位置 | 字段与用途 |
+| --- | --- |
+| Message | `message_id` 是会话内的稳定消息身份，`uuid` 是 fork/rewind 的链坐标。保留区重链会换坐标，保留原消息身份。旧记录回落 `uuid`。`message_at` 是带偏移的 UTC ISO 8601 时间，无可靠值时省略。 |
+| `user_message_committed` | `message_id` 与 `message_at` 对应提交后的 Message。时间在输入 hook 结束、送入链时采样。同批输入仍合成一条消息。 |
+| `assistant_turn`、助手 Message | 直播在生成结束后、工具执行前发出，提供 `message_id`、`message_at`、调用时的 `model`（调用名）、`model_id`（配置引用词）、`provider_name`、`model_display_name`。这些值与已提交及生成结束后的 `uncommitted` 对应。生成中的 `uncommitted` 可以带身份和模型，收到上游生成终止信号后即可带结束时间。生成定型后不再下发半截工具调用。 |
+| `assistant_message_committed` | 流式中断或截断重试前保留助手内容的边界。与常规助手边界同形，`stop_reason` 是已提交 Message 的值（流式中断为 `interrupted`）。该事件用于定型本条消息，轮次终态看后续对应事件。 |
+| 工具结果 | 工具 Message、`uncommitted_tool_results` 和 `tool_call_result` 共用 `message_id`、`message_at`、`tool_call_id`、`tool_status`（`success` / `error` / `interrupted`）和可选 `duration_ms`。`tool_call_id` 关联助手 `tool_calls[].id`，调用参数从对应 `arguments` 获取。hook 改写或签名过滤使实参与原参数不同时，工具 Message 记录 `tool_args` 覆盖值。直播 `tool_call_result.tool_args` 始终是参数对象，沿用原参数或提供该覆盖值。直播保留 `tool_success` 和全文，历史正文仍遵循工具结果截断。 |
+| `events` | 活跃链序。`error`、`interrupted`、`compact_done` 和 `history_notice` 可用 `after_message_id` 锚定前一条用户或助手消息。没有前置消息时省略。`diff_content`、仍挂起的 `ask` 沿用 `tool_call_id`。 |
+
+`assistant_generation` 用 `message_id`、`generation_attempt`（从 1 开始）及 `phase` 表达在途状态。`provisional` 可以带早采样的 `uncommitted.message_at`，该尝试仍可能撤销。OpenAI 优先取 `finish_reason`，Anthropic 优先取 `stop_reason`，再使用各自的终止标记回退。`finalized` 表示助手内容已通过生成校验，`discarded` 表示本次尝试已撤销，快照不包含其正文、思考或工具片段。
+
+直播 `text`、`reasoning`、`tool_call_stream` 和助手定型边界携带消息身份及尝试序号。`assistant_generation_reset` 在退避 notice 与后续增量之前发出，用该身份与序号移除相应的临时投影。传输重试沿用逻辑消息身份，下一次尝试递增序号。退避中断不会提交已撤销的内容。消息时间描述生成结束，定型由 `assistant_turn`、`assistant_message_committed` 或快照 `phase: "finalized"` 表达。
+
+`tool_call` 保留模型调用参数。`tool_execution_started` 在实参确定后、工具函数调用前发送 `tool_call_id` 和 `tool_name`。`tool_executions` 按调用 ID 提供在途执行，每项含 `tool_name`。签名过滤或 hook 改写导致实参有变化时，两个投影均附完整的 `tool_args` 覆盖值。字段缺失时继续使用该调用的模型参数。显式 `{}` 表示过滤后无实参。
+
+内置 `AskUserQuestion` 接受定向反馈后，`tool_call_result`、已提交工具 Message 和 `uncommitted_tool_results` 使用同一可选 `ask_outcome`。`answered` 表示接受普通答复，`cancelled` 表示接受取消哨兵 `__wing_ask_cancelled__`。两种结算的 `tool_status` 都是 `success`，`after_tool_call` 仍可改写正文。会话停止由 `tool_status: "interrupted"` 表达。旧记录、普通工具、远程同名工具及未结算的提问可省略 `ask_outcome`。消费方按会话与 `tool_call_id` 对账，历史缺值按未知处理。
+
+收到 `tool_call_result` 后由结果接管实际参数，取消也保留已经开始执行的目标。工具 Message 和 `uncommitted_tool_results` 延续相同的可选覆盖值。`tool_call_result.tool_args` 保持对既有客户端的完整参数对象契约。
+
+直播的 `turn_result`（`subtype: "error_max_turns"`）收口轮次。历史用 `history_notice` 展示同一事实，复用 `uuid`、`subtype`、`errors`、`after_message_id`。手动压缩的直播 `compact_done.summary` 是新的摘要 Message。支持该字段的客户端将活跃消息替换成摘要并应用本条通知。历史快照的 `messages` 已含摘要，快照内 `compact_done` 只提供通知。
+
+客户端从 `message_at` 格式化本地日期和时间。旧消息与链上合成记录可能没有可靠时间、历史模型或工具终态，缺值按未知处理。日志 `ts`、其他事件时间及当前会话模型保持各自口径。
 
 > **`sync_session.usage`（用量基线）**：与 `status` / `turn_started_at` 同刻的会话用量账本快照（形状同 `/api/session/info.usage`），是前端累计的**唯一**基线来源——快照与快照之后的 live 事件走同一条有序 WS 通道，"基线 = 快照值、增量 = 其后 `llm_call_metrics` 之和"精确成立。**不要**拿 HTTP `/api/session/info.usage` 做基线：两个通道无跨通道定序，快照可能已包含尚在途的事件（重复计数）或在它之后才到（丢增量）。旧网关不带这个字段——按零基线显示（只累计订阅后的增量）；前端也可退化为**只读快照口径**：轮末回拉 `/api/session/info.usage` 仅作展示、零累加，不得与 WS 增量混算（混算即前述重复计数/丢增量）。两种口径都合法，二选一即可（wing-app 的旧网关路径采用后者）。
 
