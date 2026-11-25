@@ -23,9 +23,10 @@ skills_info
 service
 default_agent
 
-# 会话详情的推理控件能力（GET /api/session/info）
+# 会话详情的控件能力（GET /api/session/info）
 thinking_supported
 effort_options
+can_switch_template_safely
 
 # 链上事件与工具 schema 字段
 created_at

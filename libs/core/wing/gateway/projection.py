@@ -68,6 +68,7 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         ),
         yolo=session.agent.yolo,
         template_name=session.template_name,
+        can_switch_template_safely=True,
         session_name=session.session_name,
         workdir=session.session_workspace,
         parent_session_id=session.parent_session_id,

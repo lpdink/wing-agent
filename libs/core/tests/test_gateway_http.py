@@ -1014,6 +1014,7 @@ class TestSessionInfo:
         assert data["thinking"] is True
         assert data["reasoning_effort"] == "high"
         assert data["template_name"] == "default"
+        assert data["can_switch_template_safely"] is True
         assert data["reasoning"] == {
             "thinking": True,
             "thinking_supported": True,
@@ -1116,6 +1117,7 @@ class TestSessionInfo:
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
         assert resp.status_code == 200
         assert resp.json()["status"] == "waiting"
+        assert resp.json()["can_switch_template_safely"] is True
 
     def test_info_not_found(self, client: TestClient, mock_runtime):
         """Session 不存在返回 404。"""
