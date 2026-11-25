@@ -17,14 +17,8 @@ from wing.agent.tool_executor import (
     InterruptedToolResults,
     ToolExecutor,
 )
-from wing.event import (
-    ToolCallResultEvent,
-    ToolExecutionStartedEvent,
-    ToolExecutionTimingEvent,
-    WingEvent,
-)
+from wing.event import ToolCallResultEvent, ToolExecutionTimingEvent, WingEvent
 from wing.event_bus import event_bus
-from wing.hooks import hooks
 from wing.schema import ToolCall
 
 pytestmark = pytest.mark.asyncio
@@ -65,17 +59,9 @@ def _timings(live: list[WingEvent]) -> list[tuple[bool, int, float | None]]:
     ]
 
 
-async def test_tool_execution_snapshots_advance_then_freeze(
-    clock, observed_executor, monkeypatch
-):
+async def test_tool_execution_snapshots_advance_then_freeze(clock, observed_executor):
     executor, live = observed_executor
     snapshots = []
-
-    def unexpected_copy(*args, **kwargs):
-        raise AssertionError("unchanged tool parameters must not be deep-copied")
-
-    monkeypatch.setattr(tool_executor, "deepcopy", unexpected_copy)
-    monkeypatch.setattr(ToolCall, "model_copy", unexpected_copy)
 
     async def tool() -> str:
         with measure_tool_execution(10):
@@ -93,16 +79,11 @@ async def test_tool_execution_snapshots_advance_then_freeze(
 
     assert [event.type for event in live] == [
         "tool_call",
-        "tool_execution_started",
         "tool_execution_timing",
         "tool_execution_timing",
         "tool_call_result",
         "tool_result_turn",
     ]
-    started = next(
-        event for event in live if isinstance(event, ToolExecutionStartedEvent)
-    )
-    assert started.tool_call_id == CALL.id and started.tool_args is None
     assert _timings(live) == [(True, 0, 10), (False, 2500, 10)]
     running, finished = snapshots
     assert set(running) == set(finished) == {CALL.id}
@@ -112,39 +93,6 @@ async def test_tool_execution_snapshots_advance_then_freeze(
     result = next(event for event in live if isinstance(event, ToolCallResultEvent))
     assert result.tool_success and result.duration_ms == 7000
     assert executor.tool_execution_timings() == {}
-
-
-async def test_in_place_hook_keeps_original_arguments_and_detects_a_type_change(
-    observed_executor,
-):
-    executor, live = observed_executor
-    call = ToolCall(id=CALL.id, name=CALL.name, arguments={"options": {"flag": 1}})
-
-    @hooks.on("before_tool_call")
-    def rewrite(working: ToolCall) -> None:
-        working.arguments["options"]["flag"] = True
-
-    async def tool(options: dict) -> str:
-        assert options["flag"] is True
-        return "done"
-
-    executor.set_tools({call.name: make_tool(call.name, tool)})
-    try:
-        (message,) = await executor.execute([call], "test-model")
-    finally:
-        hooks.off("before_tool_call", rewrite)
-
-    assert message.content == "done"
-    assert call.arguments["options"]["flag"] is not True
-    started = next(
-        event for event in live if isinstance(event, ToolExecutionStartedEvent)
-    )
-    result = next(event for event in live if isinstance(event, ToolCallResultEvent))
-    assert started.tool_args is not None
-    assert message.tool_args is not None
-    assert started.tool_args["options"]["flag"] is True
-    assert result.tool_args["options"]["flag"] is True
-    assert message.tool_args["options"]["flag"] is True
 
 
 @pytest.mark.parametrize(

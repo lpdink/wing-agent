@@ -50,8 +50,7 @@ async def test_new_schema_normalized_into_event():
         ],
         ctx,
     )
-    assert result.content == "配色方案: 深色主题"
-    assert result.ask_outcome == "answered"
+    assert result == "配色方案: 深色主题"
     assert ctx.event is not None
     assert ctx.timeout == 6000
     (q,) = ctx.event.questions
@@ -112,8 +111,7 @@ async def test_cancel_sentinel_translated():
         [{"id": "q1", "header": "Q", "question": "proceed?"}],
         ctx,
     )
-    assert result.content == CANCEL_RESULT
-    assert result.ask_outcome == "cancelled"
+    assert result == CANCEL_RESULT
 
 
 @pytest.mark.asyncio
@@ -123,8 +121,7 @@ async def test_free_form_question_without_options():
         [{"id": "q1", "header": "聊天", "question": "说点什么？"}],
         ctx,
     )
-    assert result.content == "随便聊聊"
-    assert result.ask_outcome == "answered"
+    assert result == "随便聊聊"
     assert ctx.event is not None
     assert ctx.event.questions[0]["options"] == []
 

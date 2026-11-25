@@ -467,7 +467,7 @@ def test_declared_field_scale_is_pinned() -> None:
     """规模断言：声明字段总数固定（增删一个 ``S(...)`` 字段必须同步这里与
     ``test_config_spec.py::test_field_count_is_sane``）；路径不重复。"""
     declared = _declared(build_catalog())
-    assert len(declared) == 79
+    assert len(declared) == 77
     paths = [node.path for node in declared]
     assert len(set(paths)) == len(paths)
 

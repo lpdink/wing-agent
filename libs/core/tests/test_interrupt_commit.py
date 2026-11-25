@@ -251,7 +251,11 @@ class TestInterruptDuringStreaming:
             yield LLMResponse(content="never")  # pragma: no cover
 
         # accumulator 协议：caller 持有容器，取消后 snapshot 半截块
+        class _Acc:
+            state = object()
+
         monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        monkeypatch.setattr(agent.model_provider, "create_accumulator", lambda: _Acc())
         monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: blocks)
 
         _start_turn(agent)
@@ -300,7 +304,11 @@ class TestInterruptDuringStreaming:
             await asyncio.sleep(30)
             yield LLMResponse(content="never")  # pragma: no cover
 
+        class _Acc:
+            state = object()
+
         monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        monkeypatch.setattr(agent.model_provider, "create_accumulator", lambda: _Acc())
         monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: [])
 
         _start_turn(agent)
@@ -346,7 +354,11 @@ class TestInterruptDuringStreaming:
             await asyncio.sleep(30)
             yield LLMResponse(content="never")  # pragma: no cover
 
+        class _Acc:
+            state = object()
+
         monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        monkeypatch.setattr(agent.model_provider, "create_accumulator", lambda: _Acc())
         monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: blocks)
 
         events: list[Any] = []
@@ -442,6 +454,9 @@ class TestInterruptDuringStreaming:
             yield LLMResponse(content="never")  # pragma: no cover
 
         monkeypatch.setattr(agent.model_provider, "generate", _blocking_generate)
+        monkeypatch.setattr(
+            agent.model_provider, "create_accumulator", lambda: object()
+        )
         monkeypatch.setattr(agent.model_provider, "snapshot_blocks", lambda acc: blocks)
 
         _start_turn(agent)

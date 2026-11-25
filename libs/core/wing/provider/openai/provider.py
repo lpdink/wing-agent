@@ -11,18 +11,16 @@ import copy
 
 import asyncio
 import time
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
-from wing.config import get_headers, resolve_model_capabilities
+from wing.config import get_headers
 from wing.provider.base import (
     ModelProvider,
     PendingToolView,
-    ReasoningSupport,
     RequestOptions,
     StreamAccumulator,
     parse_tool_args,
@@ -125,9 +123,7 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         body = self._build_body(messages, model, tools, stream, options)
 
         if stream:
-            async for item in self._stream_attempt(
-                self._generate_stream(body, model, accumulator), accumulator
-            ):
+            async for item in self._generate_stream(body, model, accumulator):
                 yield item
         else:
             async for item in self._generate_sync(body, model):
@@ -189,30 +185,7 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         请求会带什么」的口径（会话侧生效值 = 覆盖 ?? 基线，见
         `WingAgent.thinking`）。
         """
-        return bool(self._request_thinking(None))
-
-    def reasoning_support(self, model: str) -> ReasoningSupport:
-        capabilities = resolve_model_capabilities(self.config, model)
-        effort = capabilities.reasoning_effort
-        return ReasoningSupport(
-            thinking=capabilities.thinking,
-            effort=tuple(dict.fromkeys(effort)) if effort is not None else None,
-        )
-
-    def _request_thinking(self, override: bool | None) -> object:
-        return self._extra_body["enable_thinking"] if override is None else override
-
-    def request_thinking(self, override: bool | None) -> bool | None:
-        thinking = self._request_thinking(override)
-        return thinking if isinstance(thinking, bool) else None
-
-    def _request_effort(self, override: str | None) -> object:
-        effort = self.config.reasoning_effort if override is None else override
-        return effort or self._extra_body.get("reasoning_effort")
-
-    def request_reasoning_effort(self, override: str | None) -> str | None:
-        effort = self._request_effort(override)
-        return effort if isinstance(effort, str) else None
+        return bool(self._extra_body.get("enable_thinking", True))
 
     # ─── Request Building ─────────────────────────────────────────
 
@@ -257,13 +230,20 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         if stream:
             body["stream_options"] = {"include_usage": True}
 
-        for k, v in self._extra_body.items():
+        # 会话级 thinking 覆盖：只改 per-request 视图，绝不写穿共享 extra_body。
+        extra_body = self._extra_body
+        if options.thinking is not None:
+            extra_body = {**self._extra_body, "enable_thinking": options.thinking}
+        for k, v in extra_body.items():
             if k not in body:
                 body[k] = v
-        body["enable_thinking"] = self._request_thinking(options.thinking)
 
-        effort = self._request_effort(options.reasoning_effort)
-        if effort is not None:
+        effort = (
+            options.reasoning_effort
+            if options.reasoning_effort is not None
+            else self._config.reasoning_effort
+        )
+        if effort:
             body["reasoning_effort"] = effort
 
         # prompt_cache_key（显式缓存模式）：key 来自调用方注入的会话 id
@@ -357,12 +337,6 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         self, body: dict, model: str, accumulator: StreamAccumulator | None = None
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
-        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
-        # 快照只反映当前尝试，与消费者看到的内容一致）
-        state = _OAIStreamState()
-        if accumulator is not None:
-            accumulator.start_attempt(state)
-
         try:
             req = self._client.build_request("POST", "/chat/completions", json=body)
             resp = await asyncio.wait_for(
@@ -387,6 +361,12 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         # 常常先把流打开（头 + 空 role 帧）再排队/预填充，头到得早不说明有生成。
         header_rt_ms = (time.monotonic() - t0) * 1000
         log.info("[DONE] openai_compat response header received")
+
+        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
+        # 快照只反映当前尝试，与消费者看到的内容一致）
+        state = _OAIStreamState()
+        if accumulator is not None:
+            accumulator.state = state
 
         def ttft_ms() -> float:
             """首 token RT：请求发出 → 首个正文/思考/tool 增量到达。
@@ -440,8 +420,6 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 # 终止原因（stop / length / tool_calls）——首个非空值生效
                 if state.stop_reason is None and choice is not None:
                     state.stop_reason = choice.get("finish_reason")
-                    if state.stop_reason is not None and accumulator is not None:
-                        accumulator.finished_at = datetime.now(UTC)
 
                 tcs, deltas = (
                     self._process_tool_deltas(choice, state.pending)
@@ -485,8 +463,6 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             # 触发过上游 metrics 发射，此处再附着会造成 token 双计；流无带内
             # usage 时 Message.usage 仍保留 first_chunk_rt_ms 等元信息。
             # stop_reason 随最终 usage 传导（截断审计：length ≠ stop）。
-            if accumulator is not None and accumulator.finished_at is None:
-                accumulator.finished_at = datetime.now(UTC)
             yield LLMResponse(
                 content_blocks=self._build_content_blocks(
                     "".join(state.reasoning_chunks) or None,

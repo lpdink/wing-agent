@@ -6,14 +6,11 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from wing.agent import SessionBusyError
-from wing.provider.base import ReasoningSupport
 from wing.session import SessionManager
 from wing.store import FileSessionStore
 from _support import materialize
@@ -245,108 +242,3 @@ class TestBestEffortStatePersistence:
 
         assert session.context_manager.append_system_prompt == "\ud800"  # live 生效
         assert any("state not persisted" in m for m in wing_warnings), wing_warnings
-
-
-@pytest.mark.asyncio
-async def test_validated_reasoning_save_failure_keeps_both_previous_values(
-    tmp_path: Path,
-):
-    store = FileSessionStore(tmp_path / "sessions")
-    manager = SessionManager({"file": store})
-    sid = "reasoning-save-failure"
-    session = materialize(manager.create_session(session_id=sid))
-    await session.update_state(thinking=True, reasoning_effort="low")
-    metadata = store.load_metadata(sid)
-    support = ReasoningSupport(thinking=True, effort=("low", "high"))
-    with patch.object(
-        type(session.agent.model_provider), "reasoning_support", return_value=support
-    ):
-        with patch.object(
-            store, "save_metadata", side_effect=OSError("write failed")
-        ) as save:
-            with pytest.raises(OSError, match="write failed"):
-                session.update_reasoning(False, "high", validate=True)
-            save.assert_called_once()
-            attempted = save.call_args.args[1]
-            assert (attempted.thinking, attempted.reasoning_effort) == (False, "high")
-        assert (session.agent.thinking, session.agent.reasoning_effort) == (True, "low")
-        assert store.load_metadata(sid) == metadata
-        assert manager.evict(sid, reason="test")
-        await manager.wait_teardowns()
-        resumed = manager.resume_session(sid)
-        assert resumed is not None
-        assert (resumed.agent.thinking, resumed.agent.reasoning_effort) == (True, "low")
-        resumed.update_reasoning(False, "high", validate=True)
-    assert manager.evict(sid, reason="test")
-    await manager.wait_teardowns()
-    resumed = manager.resume_session(sid)
-    assert resumed is not None
-    assert (resumed.agent.thinking, resumed.agent.reasoning_effort) == (False, "high")
-    await resumed.aclose()
-
-
-@pytest.mark.asyncio
-async def test_guarded_template_switch_refuses_queued_input_before_worker_runs(sm):
-    session = sm.create_session()
-    try:
-        template = sm.template_manager.get("default")
-        assert template is not None
-        await session.agent.post("queued", request_id="queued")
-        assert session.status == "idle"
-        assert session.agent.has_pending_input
-        with pytest.raises(SessionBusyError, match="idle"):
-            await session.switch_template(template, require_idle=True)
-        assert not session.agent.replacing
-        assert [
-            item.origin_request_id for item in session.agent.pending_user_messages()
-        ] == ["queued"]
-    finally:
-        await session.aclose()
-
-
-@pytest.mark.asyncio
-async def test_guarded_template_switch_closes_input_and_pins_session_during_shutdown(
-    tmp_path: Path,
-):
-    store = FileSessionStore(tmp_path / "sessions")
-    manager = SessionManager({"file": store})
-    session = materialize(manager.create_session())
-    sid = session.session_id
-    template = manager.template_manager.get("default")
-    assert template is not None
-    before = store.load_metadata(sid)
-    old_agent = session.agent
-    entered = asyncio.Event()
-    proceed = asyncio.Event()
-    stop_worker = old_agent._stop_worker
-
-    async def hold_worker_stop(worker: asyncio.Task, *, notify: bool) -> bool:
-        entered.set()
-        await proceed.wait()
-        return await stop_worker(worker, notify=notify)
-
-    with patch.object(old_agent, "_stop_worker", side_effect=hold_worker_stop):
-        replacement = asyncio.create_task(
-            session.switch_template(template, require_idle=True)
-        )
-        try:
-            await asyncio.wait_for(entered.wait(), timeout=5)
-            assert old_agent.replacing
-            assert session.agent is old_agent
-            with pytest.raises(SessionBusyError, match="replacing"):
-                await manager._post(
-                    "arrived during replacement", request_id="late", session_id=sid
-                )
-            with pytest.raises(SessionBusyError, match="replacing"):
-                await session.switch_template(template)
-            with pytest.raises(RuntimeError, match="agent is being replaced"):
-                manager.release_session(sid)
-            assert not old_agent.has_pending_input
-            assert store.load_metadata(sid) == before
-        finally:
-            proceed.set()
-            await replacement
-    assert session.agent is not old_agent
-    assert not old_agent.replacing
-    session.agent.require_input_id_available("late")
-    await session.aclose()

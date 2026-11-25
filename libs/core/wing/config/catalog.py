@@ -29,7 +29,7 @@ from pydantic_core import PydanticUndefined
 
 from .groups import SettingGroup, build_groups, group_of
 from .models import Config
-from .spec import ApplyScope, setting_meta
+from .spec import ApplyScope, SettingMeta, setting_meta
 
 
 class SettingKind(str, Enum):
@@ -353,7 +353,7 @@ def _field_node(name: str, field: FieldInfo, order: int, path: str) -> SettingNo
     if kind is SettingKind.OBJECT:
         children = _children_of(inner, path)
     elif kind is SettingKind.LIST:
-        element, variants = _list_shape(inner, path, choice_docs=meta.choices)
+        element, variants = _list_shape(inner, path)
         if element is not None and element.kind not in (
             SettingKind.OBJECT,
             SettingKind.LIST,
@@ -386,7 +386,7 @@ def _field_node(name: str, field: FieldInfo, order: int, path: str) -> SettingNo
         exclusive_max=exclusive_max,
         min_length=min_length,
         pattern=pattern,
-        choices=_choices_of(inner, meta.choices) if kind is SettingKind.ENUM else [],
+        choices=_choices_of(inner, meta),
         min_items=meta.min_items,
         max_items=meta.max_items,
         secret=meta.secret,
@@ -402,9 +402,7 @@ def _field_node(name: str, field: FieldInfo, order: int, path: str) -> SettingNo
     )
 
 
-def _type_node(
-    annotation: Any, path: str, order: int, *, choice_docs: dict[str, str] | None = None
-) -> SettingNode:
+def _type_node(annotation: Any, path: str, order: int) -> SettingNode:
     """合成节点：列表元素模板 / union 变体（没有字段声明，元信息取默认值）。"""
     inner, nullable = _strip_optional(_unwrap(annotation))
     kind = _kind_of(inner, secret=False, has_choices=False, path=path)
@@ -423,7 +421,6 @@ def _type_node(
         order=order,
         kind=kind,
         nullable=nullable,
-        choices=_choices_of(inner, choice_docs) if kind is SettingKind.ENUM else [],
         secret=kind is SettingKind.SECRET,
         children=children,
         element=element,
@@ -434,7 +431,7 @@ def _type_node(
 
 
 def _list_shape(
-    annotation: Any, path: str, *, choice_docs: dict[str, str] | None = None
+    annotation: Any, path: str
 ) -> tuple[SettingNode | None, list[SettingNode] | None]:
     """``list[X]`` → ``(element, None)``；``list[A | B]`` → ``(None, [variants])``。
 
@@ -450,7 +447,7 @@ def _list_shape(
                 _type_node(member, element_path, index)
                 for index, member in enumerate(get_args(single))
             ]
-        return _type_node(args[0], element_path, 0, choice_docs=choice_docs), None
+        return _type_node(args[0], element_path, 0), None
     if len(args) > 1:
         return None, [
             _type_node(arg, element_path, index) for index, arg in enumerate(args)
@@ -487,16 +484,14 @@ def _kind_of(
     raise ValueError(f"不支持的配置字段注解：{path} → {annotation!r}")
 
 
-def _choices_of(
-    annotation: Any, choice_docs: dict[str, str] | None
-) -> list[ChoiceSpec]:
+def _choices_of(annotation: Any, meta: SettingMeta) -> list[ChoiceSpec]:
     """枚举值域：``Literal`` 的 args（按声明序）+ 声明的 ``choices`` 含义。
 
     - ``Literal`` 值域为准；声明的 ``choices`` 里多出来的键**忽略**（面板不允许选一个
       pydantic 会拒绝的值）；
     - 无 ``Literal`` 时（裸 ``str`` + ``choices``），值域 = 声明的 dict 键序。
     """
-    declared = choice_docs or {}
+    declared = meta.choices or {}
     if get_origin(annotation) is Literal:
         return [
             ChoiceSpec(value=arg, doc=declared.get(arg))

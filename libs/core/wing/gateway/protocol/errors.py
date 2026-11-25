@@ -22,19 +22,10 @@ class ErrorResponse(BaseModel):
     session_id: str | None = Field(default=None, description="关联的 session ID")
     uuid: str | None = Field(default=None, description="关联的消息 UUID")
 
-    def to_response(
-        self, status_code: int, *, headers: Mapping[str, str] | None = None
-    ) -> JSONResponse:
-        # Omit absent envelope fields. Structured error fields can contain meaningful nulls.
-        content = {
-            key: value for key, value in self.model_dump().items() if value is not None
-        }
-        if self.detail is not None:
-            content["detail"] = _ascii_safe(self.detail)
-        return JSONResponse(status_code=status_code, content=content, headers=headers)
 
-
-# 路由、异常处理器与鉴权中间件共用 ErrorResponse 序列化，保证错误均可结构化解析。
+# ErrorResponse 是前后端错误形状的唯一约定，error_response() 是它的唯一序列化
+# 出口——gateway 的 exception handler 与鉴权中间件共用，保证路由异常、请求校验
+# 失败、鉴权拒绝都输出同一形状，wing-api-client 因此总能结构化解析。
 # 仅收录实际会被产生的状态码，避免出现误导性的死映射项。
 #
 # 503 是**通用** service_unavailable：setup mode 的语义由调用方**显式**传
@@ -79,6 +70,10 @@ def error_response(
     """构造统一形状（ErrorResponse）的错误响应。"""
     body = ErrorResponse(
         error=error or HTTP_ERROR_TYPES.get(status_code, "error"),
-        detail=detail,
+        detail=None if detail is None else _ascii_safe(detail),
     )
-    return body.to_response(status_code, headers=headers)
+    return JSONResponse(
+        status_code=status_code,
+        content=body.model_dump(exclude_none=True),
+        headers=headers,
+    )

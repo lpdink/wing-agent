@@ -1906,7 +1906,7 @@ class TestProbeIsolation:
             current_options=lambda: RequestOptions(cache_probe=probe),
             stream=True,
         )
-        await loop._call_llm_validated(_turn_ctx())
+        await loop._call_llm_validated(_turn_ctx(), model="m")
 
         assert [part.label for part in seen["cache_parts"]] == ["system:base"]
         assert seen["probe"] is probe
