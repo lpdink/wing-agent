@@ -4,8 +4,7 @@
 两条口径必须写在数据旁边，因为它们是「数字可信」的全部：
 
 1. **百分位是 nearest-rank**（p99 = 升序第 ``ceil(0.99·n)`` 个值，不做线性插值），
-   与 ``scripts/perf/suite_gateway.py`` 一致——两处不共享实现（那边住在一个套件
-   脚本里，跨工具 import 会把整条 perf 测量链拉进来），但秩定义相同。
+   与 ``scripts/perf/suite_gateway.py`` 共用 ``wing_probe.procsample`` 的秩定义。
 2. **投递延迟按通道、按下标配对**：假 Provider 的每帧带一个通道标记
    （``FrameEmit.kind``），可配对的三个通道各有自己的客户端事件（见
    :data:`CHANNEL_EVENTS`）：``content`` ↔ ``text``、``thinking`` ↔ ``reasoning``、
@@ -19,9 +18,8 @@
    与网关重试都会让一个 prompt 对应两次请求，而某个通道的帧只可能来自发过该通道帧的
    那一次请求。仍有多条候选（真重试）才整轮丢弃——不猜。
 
-发射时刻来自上游冻结接口（``FakeProvider.frame_emits``）；缺失时
-:func:`build_emit_ledger` 直接抛 :class:`DeliveryUnavailable`，由档位编排
-（``orchestrator``）转成「延迟指标不可用」并三处点名（不写 0、不静默）。
+发射时刻来自上游冻结接口（``FakeProvider.frame_emits``）。档位编排读取快照，接口缺失时
+标记「延迟指标不可用」。
 """
 
 from __future__ import annotations
@@ -78,10 +76,6 @@ SPREAD_PERCENTILES: tuple[tuple[str, float], ...] = (
 )
 
 
-class DeliveryUnavailable(RuntimeError):
-    """假 Provider 不提供逐帧发射时刻——投递延迟不可测。"""
-
-
 #: 分片样本文件（跨进程契约）的必填键。两侧都过 :func:`check_shard_payload`：
 #: 协调者按名取值，缺键在那边会静默变成 0——与「缺数据绝不写 0」正好相反。
 SHARD_PAYLOAD_KEYS: frozenset[str] = frozenset(
@@ -134,7 +128,9 @@ def spread(values: Sequence[float]) -> dict[str, float]:
     """``{"p50": …, "p99": …, "p999": …}``；空序列 → ``{}``（调用方写 null）。"""
     if not values:
         return {}
-    return {label: percentile(values, pct) for label, pct in SPREAD_PERCENTILES}
+    from wing_probe.procsample import percentiles
+
+    return percentiles(values, SPREAD_PERCENTILES)
 
 
 # ── 投递延迟配对 ───────────────────────────────────────────────
@@ -190,15 +186,8 @@ class EmitLedger:
         return self.by_request.get(request_index, {})
 
 
-def build_emit_ledger(provider: Any) -> EmitLedger:
-    """从 ``FakeProvider.frame_emits`` 建按通道分组的账本（缺接口即抛）。"""
-    emits = getattr(provider, "frame_emits", None)
-    if emits is None:
-        raise DeliveryUnavailable(
-            "frame_emits not available: the fake provider does not record per-frame "
-            "emit times, so delivery latency cannot be paired against the emitter "
-            "clock (needs FakeProvider.frame_emits)"
-        )
+def emit_ledger_from_snapshot(emits: Iterable[Any]) -> EmitLedger:
+    """将已经读取的发射快照按请求和通道分组。"""
     grouped: dict[int, dict[str, list[tuple[int, float]]]] = {}
     for entry in emits:
         kind = getattr(entry, "kind", None)
@@ -349,8 +338,3 @@ def pair_delivery(
                 result.reasons[f"unexpected_events:{kind}"] += len(arrivals) - paired
                 result.dropped += len(arrivals) - paired
     return result
-
-
-def has_frame_emits(provider: Any) -> bool:
-    """上游冻结接口是否已就位（档位开始前的一次能力探测）。"""
-    return getattr(provider, "frame_emits", None) is not None

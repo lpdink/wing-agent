@@ -501,8 +501,8 @@ notes → **判据原文 + 逐档命中** → 复现命令 → 口径脚注。
 | `stats.percentile` | 百分位秩定义的 known answer（含 n=1 / 偶数 / 极值 / 空序列报错） |
 | `pairing.last_user_text` | 两种 body 形态（str / block 列表）都能取到配对键 |
 | `pairing.channels` | **跨包词表守卫**：`metrics.CHANNEL_EVENTS` 必须覆盖 `sse.FRAME_KINDS` 除 `meta` 之外的全部种类，且正好映射到 `invariants.DELTA_EVENT_TYPES`——任一处新增 / 改名而其余没跟，配对会静默失真 |
-| `pairing.delivery` | 配对数学 + 丢弃原因 + **同一 prompt 多请求时按通道消歧** + 缺接口抛错 |
-| `pairing.assemble` | 配对结果与新增指标（`chars_per_second` / `turns_per_second` / 水合两段时间线）落到 `run.json` 的接线 |
+| `pairing.delivery` | 配对数学 + 丢弃原因 + **同一 prompt 多请求时按通道消歧** |
+| `pairing.assemble` | 一次读取发射快照，区分能力缺失与无轮次的档位说明，验证配对结果及吞吐、水合指标落到 `run.json` |
 | `shard.events` | 分片的事件处理：失败轮只驱动一轮、字符实测、水合只在 `sync_session` 之后驱动一轮 |
 | `proc.sampling` | 自身 CPU 单调、RSS > 0、fd ≥ 3、fd 软限抬升到位 |
 | `cli.contract` | 冻结 CLI 的默认值与全部校验分支（含新增旗标与形态专属旋钮的适用范围） |

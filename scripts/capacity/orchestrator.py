@@ -1086,15 +1086,18 @@ def _assemble(
         notes.append(_no_turn_note(record["shape"].get("window_mode"), cfg.scenario))
     _fill_hydration(block, samples, turns, notes)
 
-    delivery_available = provider is not None and metrics.has_frame_emits(provider)
-    samples["delivery_available"] = None if provider is None else delivery_available
-    if delivery_available and turns:
+    emits = getattr(provider, "frame_emits", None)
+    samples["delivery_available"] = None if provider is None else emits is not None
+    if emits is not None and turns:
+        ledger = metrics.emit_ledger_from_snapshot(emits)
+        del emits  # 释放本地临时 tuple 引用，FrameEmit 仍由 Provider 持有。
         pairing = metrics.pair_delivery(
-            metrics.build_emit_ledger(provider),
+            ledger,
             provider.requests.all(),
             turns,
             window=(sampling.window_start, sampling.window_end),
         )
+        del ledger
         for label, value in metrics.spread(pairing.latencies_ms).items():
             block[f"delivery.{label}_ms"] = _round(value)
         samples["count"] = pairing.paired
@@ -1117,10 +1120,11 @@ def _assemble(
                 f"delivery pairing dropped {pairing.dropped} frame(s): "
                 f"{dict(pairing.reasons)}"
             )
-    elif provider is not None and not delivery_available:
-        notes.append(DELIVERY_UNAVAILABLE)
-    elif delivery_available:
+    elif emits is not None:
+        del emits
         notes.append("delivery.* is null: no turn sample was collected in the window")
+    elif provider is not None:
+        notes.append(DELIVERY_UNAVAILABLE)
 
     shard_cpu: list[float | None] = []
     for payload in payloads:

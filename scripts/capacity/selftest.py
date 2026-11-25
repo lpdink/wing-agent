@@ -89,8 +89,8 @@ def check_stats() -> None:
         "empty samples must yield an empty spread (callers write null, never 0)",
     )
     _check(
-        set(metrics.spread(hundred)) == {"p50", "p99", "p999"},
-        "spread must expose p50 / p99 / p999",
+        metrics.spread(hundred[::-1]) == {"p50": 50.0, "p99": 99.0, "p999": 100.0},
+        "spread must use nearest ranks on unsorted samples",
     )
     try:
         metrics.percentile([], 50.0)
@@ -103,14 +103,14 @@ def check_stats() -> None:
 # ── pairing ───────────────────────────────────────────────────
 
 
-def _provider(frames: Mapping[int, Sequence[tuple[str, float]]]) -> Any:
-    """合成 Provider：``{request_index: [(kind, at), …]}``，与上游 ``FrameEmit`` 同形。"""
-    emits = [
+def _frame_emits(
+    frames: Mapping[int, Sequence[tuple[str, float]]],
+) -> tuple[SimpleNamespace, ...]:
+    return tuple(
         SimpleNamespace(request_index=index, frame_index=position, at=at, kind=kind)
         for index, values in frames.items()
         for position, (kind, at) in enumerate(values)
-    ]
-    return SimpleNamespace(frame_emits=tuple(emits))
+    )
 
 
 def _request(index: int, prompt: str) -> Any:
@@ -172,7 +172,7 @@ def check_channel_vocabulary() -> None:
 
 
 def check_pairing() -> None:
-    """按通道、按下标配对 + 各类丢弃原因 + 缺接口抛错。"""
+    """按通道、按下标配对及各类丢弃原因。"""
     # 真实形态：meta 帧夹在内容帧之间（role 帧、finish 帧、usage 帧）。
     frames = {
         0: [
@@ -184,8 +184,7 @@ def check_pairing() -> None:
         ],
         1: [("meta", 200.0), ("content", 200.02), ("content", 200.04)],
     }
-    provider = _provider(frames)
-    ledger = metrics.build_emit_ledger(provider)
+    ledger = metrics.emit_ledger_from_snapshot(_frame_emits(frames))
     _check(
         ledger.kinds(0)["content"] == (100.02, 100.04, 100.06),
         f"meta frames must be excluded from the ledger: {ledger.kinds(0)}",
@@ -227,7 +226,7 @@ def check_pairing() -> None:
     )
 
     # 通道各归各：thinking → reasoning、tool_call → tool_call_stream，互不干扰。
-    mixed = _provider(
+    mixed = _frame_emits(
         {
             0: [
                 ("meta", 100.0),
@@ -249,7 +248,7 @@ def check_pairing() -> None:
         },
     )
     mixed_pairing = metrics.pair_delivery(
-        metrics.build_emit_ledger(mixed), [_request(0, "p")], [mixed_turn]
+        metrics.emit_ledger_from_snapshot(mixed), [_request(0, "p")], [mixed_turn]
     )
     _check(
         mixed_pairing.paired == 3
@@ -259,7 +258,7 @@ def check_pairing() -> None:
     )
 
     # 工具轮的两段式：同一个 prompt 触发两次请求（调用轮 + 文本轮），按通道消歧。
-    two_requests = _provider(
+    two_requests = _frame_emits(
         {
             0: [("tool_call", 100.02)],
             1: [("meta", 100.5), ("content", 100.52)],
@@ -269,7 +268,7 @@ def check_pairing() -> None:
         "load:s0:0", 99.9, 100.6, {"tool_call": (100.021,), "content": (100.522,)}
     )
     cycle_pairing = metrics.pair_delivery(
-        metrics.build_emit_ledger(two_requests),
+        metrics.emit_ledger_from_snapshot(two_requests),
         [_request(0, "load:s0:0"), _request(1, "load:s0:0")],
         [cycle_turn],
     )
@@ -285,8 +284,8 @@ def check_pairing() -> None:
     )
     # 两个请求都发过同一通道的帧 = 真重试，无法归因 → 丢弃。
     retried = metrics.pair_delivery(
-        metrics.build_emit_ledger(
-            _provider({0: [("content", 100.02)], 1: [("content", 100.5)]})
+        metrics.emit_ledger_from_snapshot(
+            _frame_emits({0: [("content", 100.02)], 1: [("content", 100.5)]})
         ),
         [_request(0, "load:s0:0"), _request(1, "load:s0:0")],
         [metrics.TurnSample("load:s0:0", 99.9, 100.6, {"content": (100.52,)})],
@@ -358,8 +357,8 @@ def check_pairing() -> None:
 
     # 负延迟 = 错位，不写进样本。
     negative = metrics.pair_delivery(
-        metrics.build_emit_ledger(
-            _provider({0: [("content", 100.0), ("content", 100.02)]})
+        metrics.emit_ledger_from_snapshot(
+            _frame_emits({0: [("content", 100.0), ("content", 100.02)]})
         ),
         [_request(0, "p")],
         [metrics.TurnSample("p", 0.0, 1.0, {"content": (99.9, 100.03)})],
@@ -372,19 +371,6 @@ def check_pairing() -> None:
         negative.reasons.get("negative_latency") == 1,
         "negative latency must be classified",
     )
-
-    # 缺接口必须显式失败（而不是返回空表 → 静默「无延迟数据」）。
-    missing = SimpleNamespace()
-    _check(not metrics.has_frame_emits(missing), "capability probe must report absence")
-    try:
-        metrics.build_emit_ledger(missing)
-    except metrics.DeliveryUnavailable as exc:
-        _check(
-            "frame_emits not available" in str(exc),
-            f"error text must be greppable: {exc}",
-        )
-    else:  # pragma: no cover - 红线回归
-        raise SelftestFailure("missing frame_emits must raise DeliveryUnavailable")
 
 
 def _sampling(**overrides: Any) -> orchestrator._Sampling:
@@ -450,15 +436,24 @@ def _assemble_cfg(**overrides: Any) -> RunConfig:
 
 
 def check_assemble() -> None:
-    """配对结果落到 ``run.json`` 的接线（延迟可用这一支，含丢弃与窗口不一致）。"""
+    """投递能力、配对结果和档位说明落到 ``run.json`` 的接线。"""
     _check(
         set(level_skeleton(1)["metrics"]) == set(orchestrator.METRIC_KEYS),
         "the level skeleton must seed exactly the frozen metric keys",
     )
     requests = RequestLog()
     requests.record({"messages": [{"role": "user", "content": "load:s0:0"}]}, model="m")
-    provider = SimpleNamespace(
-        frame_emits=tuple(
+
+    class CountingProvider(SimpleNamespace):
+        snapshot_reads = 0
+
+        @property
+        def frame_emits(self) -> tuple[Any, ...]:
+            self.snapshot_reads += 1
+            return self.emits
+
+    provider = CountingProvider(
+        emits=tuple(
             [
                 SimpleNamespace(
                     request_index=0, frame_index=0, at=100.005, kind="meta"
@@ -490,6 +485,7 @@ def check_assemble() -> None:
         payloads=[_sample_payload()],
         notes=notes,
     )
+    _check(provider.snapshot_reads == 1, "assemble must read the emit snapshot once")
     metrics_block = record["metrics"]
     samples = record["samples"]
     _check(samples["delivery_available"] is True, "delivery must be reported available")
@@ -535,6 +531,45 @@ def check_assemble() -> None:
     _check(
         record["metrics"]["slow_client_recycles"] == 0,
         "no closed client must be reported as a recycle",
+    )
+
+    for unavailable in (SimpleNamespace(), SimpleNamespace(frame_emits=None)):
+        unavailable_notes: list[str] = []
+        record = orchestrator._assemble(
+            level_skeleton(1),
+            cfg=cfg,
+            sessions=1,
+            provider=unavailable,
+            sampling=_sampling(),
+            payloads=[_sample_payload()],
+            notes=unavailable_notes,
+        )
+        _check(
+            record["samples"]["delivery_available"] is False
+            and orchestrator.DELIVERY_UNAVAILABLE in unavailable_notes,
+            f"missing emit snapshot must be reported as unavailable: {unavailable_notes}",
+        )
+
+    empty = CountingProvider(emits=())
+    no_turn_notes: list[str] = []
+    record = orchestrator._assemble(
+        level_skeleton(1),
+        cfg=cfg,
+        sessions=1,
+        provider=empty,
+        sampling=_sampling(),
+        payloads=[_sample_payload(turns=[], delta_frames={}, chars=0)],
+        notes=no_turn_notes,
+    )
+    _check(
+        empty.snapshot_reads == 1 and record["samples"]["delivery_available"] is True,
+        "an empty emit snapshot must be read once and reported as available",
+    )
+    _check(
+        record["samples"]["count"] is None
+        and "delivery.* is null: no turn sample was collected in the window"
+        in no_turn_notes,
+        f"no turns must leave delivery unmeasured and explain why: {no_turn_notes}",
     )
 
     # 窗口末仍在飞的一轮：样本照样交出来（result_at 为 null），尾部记 in_flight_tail。
@@ -591,8 +626,10 @@ def check_assemble() -> None:
     )
 
     # 客户端多收了一个事件：能配的照配，多出的按帧记账。
-    short = _provider({0: [("content", 100.015), ("content", 100.025)]})
-    short.requests = requests
+    short = SimpleNamespace(
+        frame_emits=_frame_emits({0: [("content", 100.015), ("content", 100.025)]}),
+        requests=requests,
+    )
     extra = orchestrator._assemble(
         level_skeleton(1),
         cfg=cfg,
