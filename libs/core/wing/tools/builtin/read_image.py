@@ -23,10 +23,11 @@ from pathlib import Path
 from wing.agent import ToolContext
 from wing.config import ProviderConfig, get_config
 from wing.media import (
-    SUPPORTED_IMAGE_MIMES,
+    SUPPORTED_IMAGE_FORMATS,
     format_image_envelope,
     format_size,
     image_dimensions,
+    image_mime_label,
     is_apple_cgbi_png,
     media_id,
     sniff_image_mime,
@@ -89,9 +90,9 @@ async def read_image(path: str, ctx: ToolContext) -> ToolOutput:
 
     mime = sniff_image_mime(data)
     if mime is None:
-        supported = "/".join(sorted(_short_mime(m) for m in SUPPORTED_IMAGE_MIMES))
         raise ToolError(
-            f"ReadImage: {resolved}: not a supported image ({supported} expected; "
+            f"ReadImage: {resolved}: not a supported image "
+            f"({SUPPORTED_IMAGE_FORMATS} expected; "
             f"detected from file content, not from the extension). "
             f"Convert it first, e.g.: "
             f"sips -s format png {shlex.quote(resolved)} "
@@ -113,7 +114,7 @@ async def read_image(path: str, ctx: ToolContext) -> ToolOutput:
             )
         raise ToolError(
             f"ReadImage: {resolved}: image header is truncated or corrupt "
-            f"(cannot parse {_short_mime(mime)} dimensions)"
+            f"(cannot parse {image_mime_label(mime)} dimensions)"
         )
     width, height = dims
 
@@ -143,11 +144,6 @@ async def read_image(path: str, ctx: ToolContext) -> ToolOutput:
 
     content = format_image_envelope(resolved, ref, int(st.st_mtime))
     return ToolOutput(content=content, media=[ref])
-
-
-def _short_mime(mime: str) -> str:
-    """image/png → png（文案用短名）。"""
-    return mime.removeprefix("image/")
 
 
 def _too_large_error(resolved: str, nbytes: int, max_bytes: int) -> ToolError:

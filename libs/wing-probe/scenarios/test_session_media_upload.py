@@ -242,16 +242,23 @@ async def test_rejected_uploads_leave_no_trace(probe: Probe) -> None:
     http = probe.driver_required.http
     good = png(2, 2, tint=0x66)
 
-    for bad, marker in (
-        (b"", "empty request body"),
-        (b"definitely not an image", "not a supported image"),
-        (good[:20], "cannot read png image dimensions"),
+    for bad, detail in (
+        (
+            b"",
+            "empty request body: expected image bytes (gif/jpeg/png/webp, detected by content)",
+        ),
+        (
+            b"definitely not an image",
+            "not a supported image (gif/jpeg/png/webp expected; "
+            "detected from content, not from the file extension)",
+        ),
+        (good[:20], "cannot read png image dimensions (header truncated or corrupt)"),
     ):
         with pytest.raises(DriverHttpError) as failure:
             await http.upload_media(session.session_id, bad)
         call = failure.value.call
         assert call.status == 400, call.render()
-        assert marker in str((call.response or {}).get("detail", "")), call.render()
+        assert (call.response or {}).get("detail") == detail, call.render()
         assert not media_dir(probe, session.session_id).exists(), (
             "400 路径在存储上留下了痕迹"
         )

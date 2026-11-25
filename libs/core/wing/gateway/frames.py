@@ -15,7 +15,7 @@
 
 不变量（由本模块保证）：
 
-1. 每帧 ≤ `SOFT_LIMIT_BYTES`（含信封与 JSON 转义开销）；
+1. 每帧 ≤ `SOFT_LIMIT_BYTES`（含信封与 JSON 转义开销，极小测试预算走末轮兜底）；
 2. 所有帧 `data` 顺序拼接后与原始载荷逐字节相等；
 3. 切点落在 UTF-8 字符边界；
 4. 每帧尽量接近软上限（帧数最小化）；
@@ -100,13 +100,13 @@ def _fast_measure(raw: bytes) -> Callable[[int, int], int]:
 
 def _split_raw(
     raw: bytes, budget: int, measure: Callable[[int, int], int]
-) -> list[bytes]:
-    """按「转义后 ≤ budget」切分 `raw`（每片都是合法 UTF-8 片段）。
+) -> list[tuple[bytes, int]]:
+    """按转义后预算切分，返回 UTF-8 片段与各自的转义后长度。
 
     每片都尽量吃满预算：先按字节预算取候选，转义膨胀时按「当前片的转义密度」
     等比收缩（`span * budget / used`——对 `"` / `\\` 这类等密度膨胀一步收敛）。
     """
-    pieces: list[bytes] = []
+    pieces: list[tuple[bytes, int]] = []
     start = 0
     total = len(raw)
     while start < total:
@@ -117,12 +117,10 @@ def _split_raw(
                 break
             span = end - start
             end = _align_back(raw, start + max(1, span * budget // used), start)
-            if end <= start:
-                end = _next_boundary(raw, start)
-                break
-        if end <= start:  # 预算小到装不下一个字符——前进一个完整字符（不产空片）
+        else:  # 预算小到装不下一个字符，仍前进一个完整字符。
             end = _next_boundary(raw, start)
-        pieces.append(raw[start:end])
+            used = measure(start, end)
+        pieces.append((raw[start:end], used))
         start = end
     return pieces
 
@@ -161,7 +159,7 @@ def _frame(
 
 
 def build_frames(payload: str, of_type: str) -> list[Frame]:
-    """把事件载荷切成「每帧 ≤ 软上限」的帧列表。
+    """按软上限切分事件，极小测试预算可能返回超过软上限的末轮分片。
 
     小载荷（绝大多数事件）原样返回单帧——快路径不 encode、不切分，零额外开销。
     """
@@ -174,36 +172,27 @@ def build_frames(payload: str, of_type: str) -> list[Frame]:
 
     chunk_id = str(next(_chunk_ids))
     measure = _fast_measure(raw)
-    # 帧数的保守估计：只用于信封数字位数的预留（真实帧数只会更少）。
     count_hint = len(raw) // SOFT_LIMIT_BYTES + 2
 
     def overhead(count: int) -> int:
-        """最坏情况下（`index` 位数最多）一帧除 `data` 转义内容外的字节数。"""
-        return (
-            max(len(_head(chunk_id, of_type, count, index)) for index in range(count))
-            + _FRAME_TAIL
-        )
+        return len(_head(chunk_id, of_type, count, count - 1)) + _FRAME_TAIL
 
     reserve = overhead(count_hint)
-    frames: list[Frame] = []
     for _ in range(4):
         pieces = _split_raw(raw, max(SOFT_LIMIT_BYTES - reserve, 2), measure)
         count = len(pieces)
-        # 每轮重新装帧：重试意味着信封预留变了，上一轮的帧全部作废。
-        frames = []
-        # 各片首尾相接铺满 `raw`：偏移由累积长度还原（`_split_raw` 只回片不回头）。
-        start = 0
-        for index, piece in enumerate(pieces):
-            end = start + len(piece)
-            frames.append(
-                _frame(chunk_id, of_type, count, index, piece, measure(start, end))
-            )
-            start = end
-        # 用真实帧数重算信封预留：预算成立即返回。**重试是真实路径**——`count_hint`
-        # 按原始字节估、真实 `count` 按**转义后**长度切，转义密集时 count 的位数可能
-        # 超过 hint 的（引号/反斜杠各膨胀 1 字节），信封因此变宽、必须重切一轮。
+        # 转义膨胀可能让真实 count 的位宽超过估值，必须缩小预算重切。
         worst = overhead(count)
-        if worst <= reserve and all(f.size <= SOFT_LIMIT_BYTES for f in frames):
-            return frames
+        fixed = worst - len(str(count - 1))
+        if worst <= reserve and all(
+            fixed + len(str(index)) + escaped_len <= SOFT_LIMIT_BYTES
+            for index, (_, escaped_len) in enumerate(pieces)
+        ):
+            break
         reserve = worst
-    return frames  # pragma: no cover — 收敛在 1~2 轮内，兜底分支不可达
+
+    # 极小预算可能装不下一个字符。保留末轮切点，硬上限由发送侧兜底。
+    return [
+        _frame(chunk_id, of_type, count, index, piece, escaped_len)
+        for index, (piece, escaped_len) in enumerate(pieces)
+    ]

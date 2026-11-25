@@ -18,6 +18,7 @@
 from wing.schema import MediaRef, Message
 
 from .facts import (
+    SUPPORTED_IMAGE_FORMATS,
     SUPPORTED_IMAGE_MIMES,
     encoded_len,
     estimate_image_tokens,
@@ -25,6 +26,7 @@ from .facts import (
     format_image_envelope,
     format_size,
     image_dimensions,
+    image_mime_label,
     is_apple_cgbi_png,
     media_id,
     sniff_image_mime,
@@ -60,6 +62,7 @@ __all__ = [
     "NO_VISION_USER_PLACEHOLDER",
     "NO_VISION_USER_PLACEHOLDER_NO_PATH",
     "PLACEHOLDER_BY_REASON",
+    "SUPPORTED_IMAGE_FORMATS",
     "SUPPORTED_IMAGE_MIMES",
     "TOO_LARGE_PLACEHOLDER",
     "drop_placeholder",
@@ -69,6 +72,7 @@ __all__ = [
     "format_image_envelope",
     "format_size",
     "image_dimensions",
+    "image_mime_label",
     "is_apple_cgbi_png",
     "media_id",
     "plan_request_media",

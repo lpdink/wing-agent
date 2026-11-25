@@ -56,14 +56,13 @@ SSE_CHUNK_CHARS = 64 * 1024
 FRAME_LOG_BYTES = 32 * 1024 * 1024
 
 
-def _assistant_turn_frames(probe: Probe) -> list[tuple[Frame, ChunkEnvelope]]:
-    """原始帧日志里属于 `assistant_turn` 的信封帧（帧对象 + 解析出的信封）。"""
+def _event_frames(probe: Probe, of_type: str) -> list[tuple[Frame, ChunkEnvelope]]:
     found: list[tuple[Frame, ChunkEnvelope]] = []
     for frame in probe.frames:
         if not frame.chunk:
             continue
         envelope = parse_envelope(frame.text)
-        if envelope is not None and envelope.of_type == "assistant_turn":
+        if envelope is not None and envelope.of_type == of_type:
             found.append((frame, envelope))
     return found
 
@@ -102,7 +101,7 @@ async def test_oversized_event_is_chunked_and_reassembled(probe: Probe) -> None:
     assert texts[0].endswith(TAIL_MARKER), texts[0][-80:]
 
     # ── 原始帧层：`_chunk` 信封自洽 + 逐字节拼接 ─────────────
-    frames = _assistant_turn_frames(probe)
+    frames = _event_frames(probe, "assistant_turn")
     assert len(frames) >= 2, (
         f"原始帧日志里 assistant_turn 的信封帧只有 {len(frames)} 条"
     )
@@ -126,6 +125,13 @@ async def test_oversized_event_is_chunked_and_reassembled(probe: Probe) -> None:
         if len(frame.text.encode("utf-8")) > SOFT_LIMIT_BYTES
     ]
     assert oversized == [], oversized
+
+    result_frames = _event_frames(probe, "turn_result")
+    assert len(result_frames) == result.frames > 1
+    result_envelopes = [envelope for _, envelope in result_frames]
+    assert {envelope.id for envelope in result_envelopes}.isdisjoint({envelopes[0].id})
+    assert "".join(envelope.data for envelope in result_envelopes) == result.raw
+    assert frames[-1][0].at <= result_frames[0][0].at
 
     # ── 落盘：全文进入 assistant 消息（重组的另一份独立证据） ──
     assistant = [

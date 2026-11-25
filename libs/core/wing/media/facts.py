@@ -202,12 +202,12 @@ def _webp_dimensions(data: bytes) -> tuple[int, int] | None:
 ########## 信封 / 尺寸估算
 
 
-_MIME_SHORT = {
-    "image/png": "png",
-    "image/jpeg": "jpeg",
-    "image/gif": "gif",
-    "image/webp": "webp",
-}
+_MIME_SHORT = {mime: mime.removeprefix("image/") for mime in SUPPORTED_IMAGE_MIMES}
+SUPPORTED_IMAGE_FORMATS = "/".join(sorted(_MIME_SHORT.values()))
+
+
+def image_mime_label(mime: str) -> str:
+    return _MIME_SHORT.get(mime, mime)
 
 
 def format_size(nbytes: int) -> str:
@@ -233,7 +233,7 @@ def format_image_envelope(path: str, ref: MediaRef, mtime: int) -> str:
     形如：``[image: /tmp/a.png | png 800x600 | 2.4 MB | id ab12cd34 | mtime 1759271234]``
     ——不含 base64；字节只存在 SessionStore，模型按 id 重读。
     """
-    mime_short = _MIME_SHORT.get(ref.mime, ref.mime)
+    mime_short = image_mime_label(ref.mime)
     return (
         f"[image: {path} | {mime_short} {ref.width}x{ref.height} | "
         f"{format_size(ref.bytes)} | id {ref.id[:8]} | mtime {mtime}]"
@@ -300,7 +300,7 @@ def upload_image_ref(
     """
     if not data:
         raise InvalidInputError(
-            f"empty request body: expected image bytes ({_supported_label()}, "
+            f"empty request body: expected image bytes ({SUPPORTED_IMAGE_FORMATS}, "
             f"detected by content)"
         )
     if len(data) > max_bytes:
@@ -313,7 +313,7 @@ def upload_image_ref(
     mime = sniff_image_mime(data)
     if mime is None:
         raise InvalidInputError(
-            f"not a supported image ({_supported_label()} expected; detected from "
+            f"not a supported image ({SUPPORTED_IMAGE_FORMATS} expected; detected from "
             f"content, not from the file extension)"
         )
     dims = image_dimensions(data, mime)
@@ -329,7 +329,7 @@ def upload_image_ref(
                 "sips -s format png <file> --out <file>.png"
             )
         raise InvalidInputError(
-            f"cannot read {_MIME_SHORT.get(mime, mime)} image dimensions "
+            f"cannot read {image_mime_label(mime)} image dimensions "
             f"(header truncated or corrupt)"
         )
     width, height = dims
@@ -341,8 +341,3 @@ def upload_image_ref(
         height=height,
         name=name or None,
     )
-
-
-def _supported_label() -> str:
-    """支持格式的短名清单（``"gif/jpeg/png/webp"``，报错文案用）。"""
-    return "/".join(sorted(m.removeprefix("image/") for m in SUPPORTED_IMAGE_MIMES))

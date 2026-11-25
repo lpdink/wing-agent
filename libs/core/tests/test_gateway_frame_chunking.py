@@ -476,9 +476,9 @@ class TestTinyBudgetBoundaryFallback:
         # budget=1：任何字符都放不下 → 走 _next_boundary 兜底，不能死循环/空片
         pieces = _split_raw(raw, 1, lambda start, end: end - start)
 
-        assert b"".join(pieces) == raw
-        assert all(pieces)  # 无空片
-        assert [len(p) for p in pieces] == [3, 3]
+        assert b"".join(piece for piece, _ in pieces) == raw
+        assert all(piece for piece, _ in pieces)
+        assert [size for _, size in pieces] == [3, 3]
 
     def test_budget_that_fits_exactly_one_character(self):
         from wing.gateway.frames import _split_raw
@@ -486,8 +486,8 @@ class TestTinyBudgetBoundaryFallback:
         raw = ("ab" * 8).encode()
         pieces = _split_raw(raw, 1, lambda start, end: end - start)
 
-        assert b"".join(pieces) == raw
-        assert [len(p) for p in pieces] == [1] * 16
+        assert b"".join(piece for piece, _ in pieces) == raw
+        assert [size for _, size in pieces] == [1] * 16
 
     def test_escaping_expansion_shrinks_within_the_budget(self):
         """转义膨胀（引号/反斜杠各 +1）时要按当前片密度收缩，而不是爆预算。"""
@@ -495,7 +495,9 @@ class TestTinyBudgetBoundaryFallback:
 
         raw = b'"' * 40
         budget = 30
-        pieces = _split_raw(raw, budget, lambda start, end: 2 * (end - start))
+        fragments = _split_raw(raw, budget, lambda start, end: 2 * (end - start))
+        assert all(size == 2 * len(piece) for piece, size in fragments)
+        pieces = [piece for piece, _ in fragments]
 
         assert b"".join(pieces) == raw
         assert all(2 * len(p) <= budget for p in pieces)

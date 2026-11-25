@@ -39,6 +39,7 @@ from wing.provider.base import (
 from wing.provider.transport import (
     STREAM_IDLE_TIMEOUT,
     ProviderStreamError,
+    await_post,
     lines_with_idle_timeout,
     make_http_limits,
     make_http_timeout,
@@ -318,17 +319,12 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         self, body: dict, model: str, options: RequestOptions | None = None
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
-        try:
-            resp = await asyncio.wait_for(
-                self._client.post(
-                    "/v1/messages", json=body, headers=self._request_headers(options)
-                ),
-                timeout=self.timeout_total,
-            )
-            await raise_with_body(resp)
-        except asyncio.TimeoutError:
-            log.error(f"LLM request timeout after {self.timeout_total}s")
-            raise TimeoutError(f"LLM request timeout after {self.timeout_total}s")
+        resp = await await_post(
+            lambda: self._client.post(
+                "/v1/messages", json=body, headers=self._request_headers(options)
+            ),
+            self.timeout_total,
+        )
 
         request_id = resp.headers.get("request-id", "")
         data = resp.json()

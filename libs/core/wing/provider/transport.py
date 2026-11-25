@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 
 import httpx
@@ -167,7 +167,7 @@ def parse_json_event(event: SSEEvent) -> dict | None:
     """将 SSE 事件的 data 解析为 JSON dict。解析失败返回 None。"""
     try:
         return json.loads(event.data)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return None
 
 
@@ -207,3 +207,15 @@ async def raise_with_body(resp: httpx.Response) -> None:
     await resp.aread()
     log.error(f"LLM API error {resp.status_code} url={resp.url} body={resp.text}")
     raise ProviderHTTPError(resp.status_code, str(resp.url), resp.text)
+
+
+async def await_post(
+    post: Callable[[], Awaitable[httpx.Response]], timeout: float
+) -> httpx.Response:
+    try:
+        response = await asyncio.wait_for(post(), timeout=timeout)
+        await raise_with_body(response)
+    except TimeoutError:
+        log.error(f"LLM request timeout after {timeout}s")
+        raise TimeoutError(f"LLM request timeout after {timeout}s")
+    return response

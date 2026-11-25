@@ -142,6 +142,11 @@ async def test_manual_compact_chain_shape(probe: Probe) -> None:
     assert copied.read_text(encoding="utf-8") == after.path.read_text(encoding="utf-8")
     requests = json.loads((artifacts / "requests.json").read_text(encoding="utf-8"))
     assert [entry["stream"] for entry in requests] == [True, True, False], requests
+    provider_requests = probe.requests_for(SHAPE_MODEL)
+    assert [r.path for r in provider_requests] == ["/v1/chat/completions"] * 3
+    assert all(
+        r.headers["content-type"] == "application/json" for r in provider_requests
+    )
     assert requests[-1]["body"]["messages"][-1]["role"] == "user", requests[-1]["body"]
     timeline = (artifacts / "timeline.jsonl").read_text(encoding="utf-8")
     assert '"type": "compact_done"' in timeline, timeline[-400:]
