@@ -930,7 +930,14 @@ class ContextManager:
 
         被压缩/回退区间的事件不在活跃链上，自然不发射（无需孤儿处理）。
         """
-        from wing.event import FACT_EVENTS, AskEvent, WingEvent
+        from wing.event import (
+            FACT_EVENTS,
+            AskEvent,
+            CompactDoneEvent,
+            HistoryNoticeEvent,
+            TurnResultEvent,
+            WingEvent,
+        )
 
         result: list[WingEvent] = []
         after_message_id = None
@@ -939,17 +946,30 @@ class ContextManager:
                 after_message_id = e.history_id
             if not isinstance(e, WingEvent):
                 continue
-            notice = isinstance(e, HistoryNotice) and e.has_history_position
-            if e.type not in FACT_EVENTS and not notice:
+            if isinstance(e, TurnResultEvent) and e.has_history_position:
+                result.append(
+                    HistoryNoticeEvent(
+                        uuid=e.uuid,
+                        created_at=e.created_at,
+                        session_id=e.session_id,
+                        request_id=e.request_id,
+                        subtype="error_max_turns",
+                        errors=e.errors,
+                        after_message_id=after_message_id,
+                    )
+                )
+                continue
+            if e.type not in FACT_EVENTS:
                 continue
             if isinstance(e, AskEvent):
                 if pending_ask_ids is None or e.tool_call_id not in pending_ask_ids:
                     continue
-            result.append(
-                e.model_copy(update={"after_message_id": after_message_id})
-                if notice
-                else e
-            )
+            if isinstance(e, HistoryNotice):
+                update: dict = {"after_message_id": after_message_id}
+                if isinstance(e, CompactDoneEvent):
+                    update["summary"] = None
+                e = e.model_copy(update=update)
+            result.append(e)
         return result
 
     def get_context_stats(self) -> tuple[int, int]:

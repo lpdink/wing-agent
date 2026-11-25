@@ -17,6 +17,7 @@ import copy
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
@@ -412,6 +413,13 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         options: RequestOptions | None = None,
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
+        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
+        # 快照只反映当前尝试，与消费者看到的内容一致）
+        state = _StreamState()
+        state.sent_ts = t0  # 首 token RT 的计时起点
+        if accumulator is not None:
+            accumulator.start_attempt(state)
+
         try:
             req = self._client.build_request(
                 "POST",
@@ -435,13 +443,6 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 f"LLM response header timeout after {self.timeout_first_chunk}s "
                 f"(no response to the streaming request)"
             )
-
-        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
-        # 快照只反映当前尝试，与消费者看到的内容一致）
-        state = _StreamState()
-        state.sent_ts = t0  # 首 token RT 的计时起点
-        if accumulator is not None:
-            accumulator.state = state
 
         request_id = resp.headers.get("request-id", "")
         # 响应头到达时刻（首包 RT）——只是首 token RT 的兜底：服务端常常先把流
@@ -481,6 +482,8 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 elif event_type == "message_start":
                     self._on_message_start(state, data)
                 elif event_type == "message_stop":
+                    if accumulator is not None:
+                        accumulator.finished_at = datetime.now(UTC)
                     yield self._build_final_response(
                         state, model, request_id, header_rt_ms
                     )

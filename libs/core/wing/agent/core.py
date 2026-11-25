@@ -324,7 +324,7 @@ class WingAgent:
         参数文本（后端不解析，前端经既有局部解析路径渲染）。
         """
         acc = self._loop.current_acc
-        if acc is None:
+        if acc is None or self._loop.generation_finished():
             return []
         return [
             {

@@ -76,6 +76,7 @@ TRANSIENT_EVENT_TYPES: frozenset[str] = DELTA_EVENT_TYPES | frozenset(
         "llm_call_metrics",
         "assistant_turn",
         "assistant_message_committed",
+        "history_notice",
         "tool_result_turn",
         "user_message_queued",
         "user_message_committed",

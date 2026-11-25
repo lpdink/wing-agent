@@ -1819,6 +1819,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn session_history_snapshot_decodes_old_and_new_responses() {
+        let legacy: SessionGetResponse = serde_json::from_value(serde_json::json!({
+            "session_id": "s1", "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+        assert!(legacy.events.is_empty());
+        assert!(legacy.uncommitted_tool_results.is_empty());
+        assert!(legacy.tool_execution_timings.is_empty());
+        assert!(legacy.turn_started_at.is_none());
+
+        let current: SessionGetResponse = serde_json::from_value(serde_json::json!({
+            "session_id": "s1", "messages": [],
+            "events": [{"type": "history_notice", "subtype": "error_max_turns"}],
+            "uncommitted_tool_results": [{"tool_call_id": "c1", "tool_status": "error"}],
+            "tool_execution_timings": {"c2": {"elapsed_ms": 12, "running": true}},
+            "turn_started_at": "2026-11-25T15:20:00+00:00"
+        }))
+        .unwrap();
+        assert_eq!(current.events[0]["subtype"], "error_max_turns");
+        assert_eq!(current.uncommitted_tool_results[0]["tool_status"], "error");
+        assert_eq!(current.tool_execution_timings["c2"]["elapsed_ms"], 12);
+        assert_eq!(
+            current.turn_started_at.unwrap().to_rfc3339(),
+            "2026-11-25T15:20:00+00:00"
+        );
+    }
+
+    #[test]
     fn compact_request_omits_none_instruction() {
         let req = CompactRequest {
             session_id: "s1".into(),

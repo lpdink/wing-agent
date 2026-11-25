@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import datetime, timedelta
+from collections.abc import Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
+from aiohttp import web
 from _session_helpers import evict_and_wait_inactive
 
 from wing_probe import Driver, Probe, Session, ToolCall, Turn, assert_fork_of
+from wing_probe.provider.sse import SSEFrame
 
 FIRST = {"id": "history-a", "name": "probe/history-a", "display_name": "History A"}
 SECOND = {"id": "history-b", "name": "probe/history-b", "display_name": "History B"}
@@ -356,3 +361,197 @@ async def test_terminal_generation_error_replays_at_the_failed_turn(
         "next turn",
         "recovered",
     ]
+
+
+async def test_generation_timestamp_precedes_openai_transport_tail(
+    probe: Probe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reached_tail, release_tail = asyncio.Event(), asyncio.Event()
+    write_frames = probe.provider._write_frames
+
+    async def hold_done(
+        response: web.StreamResponse, frames: Sequence[SSEFrame], **kwargs: Any
+    ) -> None:
+        await write_frames(response, frames[:-1], **kwargs)
+        assert frames[-1].data is None
+        reached_tail.set()
+        await release_tail.wait()
+        await response.write(frames[-1].encode())
+
+    monkeypatch.setattr(probe.provider, "_write_frames", hold_done)
+    probe.register(FIRST["name"], Turn.of(text="complete before transport tail"))
+    session = await probe.session(model=FIRST["id"])
+    await session.watch.expect("sync_session")
+    await session.send("produce an answer")
+    try:
+        async with asyncio.timeout(8):
+            await reached_tail.wait()
+            while True:
+                mid = (await _history(session))["uncommitted"]
+                if mid and "message_at" in mid:
+                    break
+                await asyncio.sleep(0.02)
+        assert mid["content"] == "complete before transport tail"
+        session.watch.assert_never("assistant_turn")
+        assert _utc(mid["message_at"]) <= datetime.now(UTC)
+    finally:
+        release_tail.set()
+    final = (await session.watch.expect("assistant_turn")).data
+    await session.watch.expect("done")
+    committed = (await _history(session))["messages"][-1]
+    _assert_fields(final, mid, MESSAGE_FIELDS)
+    _assert_fields(committed, mid, MESSAGE_FIELDS)
+
+
+@pytest.mark.probe_env(
+    models=[FIRST, SECOND],
+    provider_extra={"protocol": "anthropic", "max_retries": 1, "max_retry_delay": 0.05},
+)
+async def test_interrupted_transport_retry_uses_the_current_attempt_time(
+    probe: Probe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = asyncio.Event()
+    write_frames = probe.provider._write_frames
+
+    async def retry_after_stop(
+        response: web.StreamResponse,
+        frames: Sequence[SSEFrame],
+        *,
+        request_index: int,
+        **kwargs: Any,
+    ) -> None:
+        if request_index == 0:
+            assert frames[-1].event == "message_stop"
+            await write_frames(response, frames, request_index=request_index, **kwargs)
+            await response.write(
+                SSEFrame(
+                    {
+                        "type": "error",
+                        "error": {
+                            "type": "overloaded_error",
+                            "message": "retry fixture",
+                        },
+                    },
+                    event="error",
+                ).encode()
+            )
+            return
+        assert request_index == 1
+        first_text = next(
+            i for i, frame in enumerate(frames) if frame.kind == "content"
+        )
+        await write_frames(
+            response, frames[: first_text + 1], request_index=request_index, **kwargs
+        )
+        await release.wait()
+
+    monkeypatch.setattr(probe.provider, "_write_frames", retry_after_stop)
+    probe.register(
+        FIRST["name"], Turn.of(text="first attempt"), Turn.of(text="second attempt")
+    )
+    session = await probe.session(model=FIRST["id"])
+    await session.watch.expect("sync_session")
+    await session.send("retry test")
+    try:
+        await session.watch.expect(
+            "text", where={"content": "second attempt"}, within=10
+        )
+        retry_started = datetime.now(UTC)
+        mid = (await _history(session))["uncommitted"]
+        assert mid["content"] == "second attempt"
+        assert "message_at" not in mid
+        assert (await session.interrupt())["ok"]
+        partial = (await session.watch.expect("assistant_message_committed")).data
+        assert _utc(partial["message_at"]) >= retry_started
+        assert partial["content_blocks"] == [{"type": "text", "text": "second attempt"}]
+        saved = (await _history(session))["messages"][-1]
+        _assert_fields(partial, mid, ("message_id",))
+        _assert_fields(saved, partial, MESSAGE_FIELDS)
+    finally:
+        release.set()
+
+
+@pytest.mark.probe_env(
+    models=[FIRST, SECOND],
+    provider_extra={"protocol": "anthropic"},
+    hooks=["hooks/*.py"],
+)
+async def test_sealed_stream_and_interrupted_tool_replay_the_executed_target(
+    probe: Probe, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hooks = probe.env.root / "hooks"
+    hooks.mkdir()
+    (hooks / "rewrite.py").write_text(
+        """
+from wing.hooks import hooks
+
+@hooks.on("before_tool_call")
+def rewrite(call):
+    if call.id == "call_wait":
+        call.arguments["questions"][0]["question"] = "Rewritten question?"
+""",
+        encoding="utf-8",
+    )
+    assert (await probe.driver_required.http.reload())["ok"]
+    write_frames = probe.provider._write_frames
+
+    async def leave_tool_unfinished(
+        response: web.StreamResponse, frames: Sequence[SSEFrame], **kwargs: Any
+    ) -> None:
+        await write_frames(
+            response,
+            [
+                frame
+                for frame in frames
+                if not (
+                    frame.event == "content_block_stop"
+                    and (frame.data or {}).get("index") == 1
+                )
+            ],
+            **kwargs,
+        )
+
+    monkeypatch.setattr(probe.provider, "_write_frames", leave_tool_unfinished)
+    probe.register(
+        FIRST["name"],
+        Turn.of(
+            tool_calls=[
+                ToolCall("AskUserQuestion", ASK_ARGS, id="call_wait"),
+                ToolCall(
+                    "Read", {"path": "unfinished.txt"}, id="call_unfinished", cut=3
+                ),
+            ],
+            finish="max_tokens",
+        ),
+        Turn.of(text="resumed"),
+    )
+    session = await probe.session(model=FIRST["id"], tools=["AskUserQuestion", "Read"])
+    await session.watch.expect("sync_session")
+    await session.send("start")
+    live = (await session.watch.expect("assistant_turn")).data
+    ask = await session.watch.expect("ask")
+    assert ask.data["questions"][0]["question"] == "Rewritten question?"
+    assert [block["id"] for block in live["content_blocks"]] == ["call_wait"]
+    observer = await Driver.connect(probe.env)
+    try:
+        joined = await observer.attach(session.session_id)
+        snapshot = (await joined.watch.expect("sync_session")).data
+        assert snapshot["uncommitted_tools"] == []
+        assert (await _history(session))["uncommitted_tools"] == []
+        pending = snapshot["uncommitted"]
+        assert [call["id"] for call in pending["tool_calls"]] == ["call_wait"]
+        _assert_fields(pending, live, MESSAGE_FIELDS)
+        assert (await session.interrupt())["ok"]
+        tool = (await joined.watch.expect("tool_call_result")).data
+        assert tool["tool_status"] == "interrupted"
+        assert tool["tool_args"]["questions"][0]["question"] == "Rewritten question?"
+        saved_assistant, saved_tool = (await _history(session))["messages"][1:]
+        assert saved_assistant["tool_calls"][0]["arguments"] == ASK_ARGS
+        assert saved_tool["tool_args"] == tool["tool_args"]
+        _assert_fields(
+            saved_tool, tool, (*MESSAGE_FIELDS, "tool_call_id", "tool_status")
+        )
+        assert (await session.chat("continue")).data["result"] == "resumed"
+        probe.context(FIRST["name"], index=1).assert_tool_pairing()
+    finally:
+        await observer.close()

@@ -11,6 +11,7 @@ import copy
 
 import asyncio
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 import httpx
@@ -337,6 +338,12 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         self, body: dict, model: str, accumulator: StreamAccumulator | None = None
     ) -> AsyncIterator[LLMResponse]:
         t0 = time.monotonic()
+        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
+        # 快照只反映当前尝试，与消费者看到的内容一致）
+        state = _OAIStreamState()
+        if accumulator is not None:
+            accumulator.start_attempt(state)
+
         try:
             req = self._client.build_request("POST", "/chat/completions", json=body)
             resp = await asyncio.wait_for(
@@ -361,12 +368,6 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         # 常常先把流打开（头 + 空 role 帧）再排队/预填充，头到得早不说明有生成。
         header_rt_ms = (time.monotonic() - t0) * 1000
         log.info("[DONE] openai_compat response header received")
-
-        # 累积状态装入 caller 持有的容器（每次尝试重置——重试重传时
-        # 快照只反映当前尝试，与消费者看到的内容一致）
-        state = _OAIStreamState()
-        if accumulator is not None:
-            accumulator.state = state
 
         def ttft_ms() -> float:
             """首 token RT：请求发出 → 首个正文/思考/tool 增量到达。
@@ -420,6 +421,8 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
                 # 终止原因（stop / length / tool_calls）——首个非空值生效
                 if state.stop_reason is None and choice is not None:
                     state.stop_reason = choice.get("finish_reason")
+                    if state.stop_reason is not None and accumulator is not None:
+                        accumulator.finished_at = datetime.now(UTC)
 
                 tcs, deltas = (
                     self._process_tool_deltas(choice, state.pending)
@@ -463,6 +466,8 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             # 触发过上游 metrics 发射，此处再附着会造成 token 双计；流无带内
             # usage 时 Message.usage 仍保留 first_chunk_rt_ms 等元信息。
             # stop_reason 随最终 usage 传导（截断审计：length ≠ stop）。
+            if accumulator is not None and accumulator.finished_at is None:
+                accumulator.finished_at = datetime.now(UTC)
             yield LLMResponse(
                 content_blocks=self._build_content_blocks(
                     "".join(state.reasoning_chunks) or None,

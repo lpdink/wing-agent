@@ -123,7 +123,11 @@ class ToolCallResultEvent(WingEvent):
         return cls(
             session_id=session_id,
             tool_name=tc.name,
-            tool_args=tc.arguments,
+            tool_args=(
+                message.tool_args
+                if message is not None and message.tool_args is not None
+                else tc.arguments
+            ),
             tool_call_id=tc.id,
             tool_result=result,
             tool_success=success,
@@ -440,3 +444,12 @@ class TurnResultEvent(HistoryNotice):
     @property
     def has_history_position(self) -> bool:
         return self.subtype == "error_max_turns"
+
+
+class HistoryNoticeEvent(HistoryNotice):
+    """Replay projection of a terminal fact whose live event drives client state."""
+
+    type: Literal["history_notice"] = "history_notice"
+    persist: ClassVar[bool] = False
+    subtype: Literal["error_max_turns"]
+    errors: list[str]

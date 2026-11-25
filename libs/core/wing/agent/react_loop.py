@@ -164,7 +164,20 @@ class ReActLoop:
         if not blocks:
             return None
         message = self._generation_message or Message(role="assistant")
-        return message.model_copy(update={"content_blocks": blocks})
+        return message.model_copy(
+            update={
+                "content_blocks": blocks,
+                "message_at": self._current_acc.finished_at or message.message_at,
+            }
+        )
+
+    def generation_finished(self) -> bool:
+        return (
+            self._current_acc is not None and self._current_acc.finished_at is not None
+        ) or (
+            self._generation_message is not None
+            and self._generation_message.content_blocks is not None
+        )
 
     def _clear_generation(self) -> None:
         self._current_acc = None
@@ -526,6 +539,7 @@ class ReActLoop:
         content_blocks: list[ContentBlock] | None = None
         last_usage: LLMUsage | None = None
         stop_reason: str | None = None
+        completed_at: datetime | None = None
         # 缓存账本本次调用只记一次账（上游多帧报 usage 时按第一帧）。
         observed = False
         # 本次调用从发起到 usage 帧的时长（会话用量账本的 llm_time_ms 来源）。
@@ -534,6 +548,7 @@ class ReActLoop:
         # （resume）与中断补提交按需快照同一个对象。
         accumulator = provider.create_accumulator()
         self._current_acc = accumulator
+        attempt = accumulator.attempt if accumulator is not None else None
         self._generation_provider = provider
         provider_config = getattr(provider, "config", None)
         spec = (
@@ -562,6 +577,13 @@ class ReActLoop:
                 accumulator=accumulator,
                 options=options,
             ):
+                if accumulator is not None and accumulator.attempt != attempt:
+                    attempt = accumulator.attempt
+                    content_blocks = None
+                    completed_at = None
+                    last_usage = None
+                    stop_reason = None
+
                 if chunk.reasoning_content:
                     self._sink.llm_reasoning(chunk.reasoning_content)
 
@@ -571,7 +593,9 @@ class ReActLoop:
                 if chunk.content_blocks is not None:
                     # provider 产出的权威块数组（最终 chunk 携带）
                     content_blocks = chunk.content_blocks
-                    message.message_at = datetime.now(UTC)
+                    completed_at = (
+                        accumulator.finished_at if accumulator is not None else None
+                    ) or datetime.now(UTC)
 
                 if chunk.tool_call_deltas:
                     for delta in chunk.tool_call_deltas:
@@ -632,6 +656,10 @@ class ReActLoop:
             partial_blocks = provider.snapshot_blocks(self._current_acc)
             if partial_blocks:
                 message.content_blocks = partial_blocks
+                if accumulator is not None:
+                    message.message_at = accumulator.finished_at
+                    if accumulator.attempt != attempt:
+                        last_usage = None
                 message.message_at = message.message_at or datetime.now(UTC)
                 message.usage = last_usage
                 message.stop_reason = "interrupted"
@@ -652,7 +680,9 @@ class ReActLoop:
                     )
             raise
 
-        if content_blocks is None:
+        if content_blocks is None or (
+            accumulator is not None and accumulator.attempt != attempt
+        ):
             # 流未正常结束（无权威块数组）：无效轮次——由 _call_llm_validated
             # 的有界重试收口（Anthropic 在 message_stop 前被切断即此形态）。
             self._clear_generation()
@@ -661,6 +691,7 @@ class ReActLoop:
                 "(stream ended without a complete block array)"
             )
         message.content_blocks = content_blocks
+        message.message_at = completed_at
         message.usage = last_usage
         message.stop_reason = stop_reason
         return message

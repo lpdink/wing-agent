@@ -91,12 +91,13 @@ class InterruptedToolResults(Exception):
         super().__init__("tool execution interrupted")
 
 
-def interrupted_tool_result(call: ToolCall) -> Message:
+def interrupted_tool_result(call: ToolCall, tool_args: dict | None = None) -> Message:
     message = Message(
         role="tool",
         tool_call_id=call.id,
         content=INTERRUPTED_RESULT,
         tool_status="interrupted",
+        tool_args=tool_args,
         message_at=datetime.now(UTC),
     )
     message.assign_identity()
@@ -165,6 +166,7 @@ class ToolExecutor:
         # Batch-local ownership keeps late cancellation cleanup off the next batch's map.
         clocks: dict[str, _ToolExecutionClock] = {}
         self._tool_clocks = clocks
+        rewritten: dict[str, dict] = {}
         completed: dict[str, Message] = {}
         self._tool_results = completed
 
@@ -173,7 +175,7 @@ class ToolExecutor:
             log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={call_id}")
             token = _current_tool_call_id.set(call_id)
             try:
-                result = await self._execute_one(tc, model, clocks)
+                result = await self._execute_one(tc, model, clocks, rewritten)
             except Exception as e:
                 log.error(f"exec_tool_calls: unexpected error in tool '{tc.name}': {e}")
                 content = f"Error executing tool '{tc.name}': {e}"
@@ -182,6 +184,7 @@ class ToolExecutor:
                     tool_call_id=call_id,
                     content=content,
                     tool_status="error",
+                    tool_args=rewritten.get(call_id),
                     message_at=datetime.now(UTC),
                 )
                 result.assign_identity()
@@ -227,7 +230,7 @@ class ToolExecutor:
                 if isinstance(item, Message):
                     results.append(item)
                     continue
-                result = interrupted_tool_result(tc)
+                result = interrupted_tool_result(tc, rewritten.get(tc.id))
                 results.append(result)
                 self._sink.tool_finished(
                     tc, INTERRUPTED_RESULT, success=False, model=model, message=result
@@ -243,7 +246,11 @@ class ToolExecutor:
                 self._tool_results = {}
 
     async def _execute_one(
-        self, tc: ToolCall, model: str, clocks: dict[str, _ToolExecutionClock]
+        self,
+        tc: ToolCall,
+        model: str,
+        clocks: dict[str, _ToolExecutionClock],
+        rewritten: dict[str, dict],
     ) -> Message:
         """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。
 
@@ -276,11 +283,11 @@ class ToolExecutor:
                 tool_status=status,
                 duration_ms=duration_ms,
                 message_at=measured_at,
-                tool_args=arguments if arguments != tc.arguments else None,
+                tool_args=rewritten.get(call_id),
             )
             message.assign_identity()
             self._sink.tool_finished(
-                tc.model_copy(update={"arguments": arguments}),
+                tc,
                 content,
                 success=status == "success",
                 model=model,
@@ -316,6 +323,8 @@ class ToolExecutor:
             )
             if modified_tc is not None:
                 arguments = modified_tc.arguments
+                if arguments != tc.arguments:
+                    rewritten[call_id] = arguments
 
             # 参数过滤：远程工具（VAR_KEYWORD）全量透传
             sig = inspect.signature(tool.function)

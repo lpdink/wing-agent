@@ -708,6 +708,7 @@ class WingRuntime:
                 original_tokens=original,
                 compressed_tokens=compressed,
                 model=session.agent.model,
+                summary=next(iter(session.serialize_messages()), None),
             ),
             session=session,
         )

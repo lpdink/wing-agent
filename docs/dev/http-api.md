@@ -298,10 +298,12 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 | --- | --- |
 | Message | `message_id` 是会话内的稳定消息身份，`uuid` 是 fork/rewind 的链坐标。保留区重链会换坐标，保留原消息身份。旧记录回落 `uuid`。`message_at` 是带偏移的 UTC ISO 8601 时间，无可靠值时省略。 |
 | `user_message_committed` | `message_id` 与 `message_at` 对应提交后的 Message。时间在输入 hook 结束、送入链时采样。同批输入仍合成一条消息。 |
-| `assistant_turn`、助手 Message | 直播在生成结束后、工具执行前发出，提供 `message_id`、`message_at`、调用时的 `model`（调用名）、`model_id`（配置引用词）、`provider_name`、`model_display_name`。这些值与已提交及生成结束后的 `uncommitted` 对应。生成中的 `uncommitted` 可以带身份和模型，尚无结束时间。 |
+| `assistant_turn`、助手 Message | 直播在生成结束后、工具执行前发出，提供 `message_id`、`message_at`、调用时的 `model`（调用名）、`model_id`（配置引用词）、`provider_name`、`model_display_name`。这些值与已提交及生成结束后的 `uncommitted` 对应。生成中的 `uncommitted` 可以带身份和模型，收到上游生成终止信号后即可带结束时间。生成定型后不再下发半截工具调用。 |
 | `assistant_message_committed` | 流式中断或截断重试前保留助手内容的边界。与常规助手边界同形，`stop_reason` 是已提交 Message 的值（流式中断为 `interrupted`）。该事件用于定型本条消息，轮次终态看后续对应事件。 |
 | 工具结果 | 工具 Message、`uncommitted_tool_results` 和 `tool_call_result` 共用 `message_id`、`message_at`、`tool_call_id`、`tool_status`（`success` / `error` / `interrupted`）和可选 `duration_ms`。`tool_call_id` 关联助手 `tool_calls[].id`，调用参数从对应 `arguments` 获取。如果 hook 改写了参数，工具 Message 的 `tool_args` 给出直播结果使用的参数。直播保留 `tool_success` 和全文，历史正文仍遵循工具结果截断。 |
-| `events` | 活跃链序。`error`、`interrupted`、`compact_done`、`turn_result` 的 `error_max_turns` 可用 `after_message_id` 锚定前一条用户或助手消息。没有前置消息时省略。`diff_content`、仍挂起的 `ask` 沿用 `tool_call_id`。 |
+| `events` | 活跃链序。`error`、`interrupted`、`compact_done` 和 `history_notice` 可用 `after_message_id` 锚定前一条用户或助手消息。没有前置消息时省略。`diff_content`、仍挂起的 `ask` 沿用 `tool_call_id`。 |
+
+直播的 `turn_result`（`subtype: "error_max_turns"`）收口轮次。历史用 `history_notice` 展示同一事实，复用 `uuid`、`subtype`、`errors`、`after_message_id`。手动压缩的直播 `compact_done.summary` 是新的摘要 Message。支持该字段的客户端将活跃消息替换成摘要并应用本条通知。历史快照的 `messages` 已含摘要，快照内 `compact_done` 只提供通知。
 
 客户端从 `message_at` 格式化本地日期和时间。旧消息与链上合成记录可能没有可靠时间、历史模型或工具终态，缺值按未知处理。日志 `ts`、其他事件时间及当前会话模型保持各自口径。
 

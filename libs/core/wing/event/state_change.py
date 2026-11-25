@@ -102,6 +102,8 @@ class InterruptedEvent(HistoryNotice):
 
 class CompactDoneEvent(HistoryNotice):
     type: Literal["compact_done"] = "compact_done"
+    disk_exclude: ClassVar[frozenset[str]] = HistoryNotice.disk_exclude | {"summary"}
+    summary: dict[str, Any] | None = None
     original_tokens: int
     compressed_tokens: int
     model: str = ""
