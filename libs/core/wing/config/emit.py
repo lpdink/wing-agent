@@ -76,30 +76,18 @@ def emit_config_yaml(
         data: 稀疏文档（只有用户显式写下的键；``{}`` = 空文件）。
         catalog: ``build_catalog()`` 的产物（根节点）。
         extra: schema 之外的未知键（``document.ExtraKey``：父前缀 + 原始键名 + 值）；
-            由**父前缀**定位。找不到容器的条目追加在文件末尾，重名条目保留在独立的未知键下。
+            由**父前缀**定位，写在该容器已知键之后（找不到容器的条目兜底追加在文件末尾
+            ——绝不丢用户的键）。
     """
     out: list[str] = [_HEADER]
     out.append("")
     extras = _Extras(extra)
     body = data if isinstance(data, dict) else {}
     _emit_children(out, extras, catalog, body, 0, "", top_level=True)
-    root_keys = {child.key for child in catalog.children} | extras.root_keys()
-    collisions = []
-    for parent, name, value in extras.leftovers():
-        if name in root_keys:
-            collisions.append({"parent": parent, "key": name, "value": value})
-            continue
-        root_keys.add(name)
+    for name, value in extras.leftovers():
         out.append("")
         _comment(out, 0, _UNKNOWN_KEY_NOTE)
         _emit_keyed_raw(out, name, value, 0, commented=False)
-    if collisions:
-        name = "_wing_orphaned_settings"
-        while name in root_keys:
-            name += "_"
-        out.append("")
-        _comment(out, 0, _UNKNOWN_KEY_NOTE)
-        _emit_keyed_raw(out, name, collisions, 0, commented=False)
     return "\n".join(out).rstrip("\n") + "\n"
 
 
@@ -546,15 +534,13 @@ class _Extras:
         self._consumed.add(parent)
         return self._by_parent.get(parent, [])
 
-    def root_keys(self) -> set[str]:
-        return {key for key, _ in self._by_parent.get("", [])}
-
-    def leftovers(self) -> list[tuple[str, str, Any]]:
+    def leftovers(self) -> list[tuple[str, Any]]:
+        """父容器没走到（父对象本身缺席）的条目：兜底写回文件末尾，绝不丢。"""
         return [
-            (parent, key, value)
+            entry
             for parent, entries in self._by_parent.items()
             if parent not in self._consumed
-            for key, value in entries
+            for entry in entries
         ]
 
 

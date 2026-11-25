@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import json
-from uuid import uuid4
 from typing import Annotated, Any, Callable, Literal, Union
 
 from pydantic import (
-    AwareDatetime,
     BaseModel,
     ConfigDict,
     Field,
@@ -135,22 +133,8 @@ class MediaRef(BaseModel):
     ——客户端可控字符串，进响应、进 history、进界面，不能无界。"""
 
 
-ToolResultStatus = Literal["success", "error", "interrupted"]
-AskOutcome = Literal["answered", "cancelled"]
-
-
 class Message(ChainNode):
     role: Literal["system", "user", "assistant", "tool"]
-    message_id: str | None = None
-    message_at: AwareDatetime | None = None
-    model: str | None = None
-    model_id: str | None = None
-    provider_name: str | None = None
-    model_display_name: str | None = None
-    tool_status: ToolResultStatus | None = None
-    ask_outcome: AskOutcome | None = None
-    duration_ms: int | None = None
-    tool_args: dict[str, Any] | None = None
     content_blocks: list[ContentBlock] | None = None
     """assistant 消息的有序 content block 数组——assistant 的唯一存储。
     顺序即数组下标。非 assistant 消息不携带。"""
@@ -189,15 +173,6 @@ class Message(ChainNode):
     _tool_calls: list[ToolCall] | None = PrivateAttr(default=None)
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-    @property
-    def history_id(self) -> str | None:
-        return self.message_id or self.uuid
-
-    def assign_identity(self) -> str:
-        if self.message_id is None:
-            self.message_id = uuid4().hex
-        return self.message_id
 
     @field_validator("media", mode="before")
     @classmethod

@@ -16,9 +16,8 @@ from __future__ import annotations
 
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence, cast
 
 from wing.common.logger import log
@@ -61,14 +60,6 @@ class RequestOptions:
     reasoning_effort: str | None = None
     cache_parts: tuple[CachePart, ...] = ()
     cache_probe: CacheProbe | None = None
-
-
-@dataclass(frozen=True)
-class ReasoningSupport:
-    """Per-model session controls implemented by the active request protocol."""
-
-    thinking: bool | None = False
-    effort: tuple[str, ...] | None = ()
 
 
 class ProviderClosedError(RuntimeError):
@@ -177,34 +168,15 @@ class StreamAccumulator:
     """caller 持有的流累积状态容器（provider 协议中立的不透明壳）。
 
     provider.generate(..., accumulator=...) 在每次尝试开始时把内部流
-    状态装入 holder.start_attempt（重试重置——累积只反映当前尝试，与消费者看到
+    状态装入 holder.state（重试重置——累积只反映当前尝试，与消费者看到
     的重传内容一致）。caller 不解读 state，只原样传回
     provider.snapshot_blocks(accumulator)。
     """
 
-    __slots__ = ("state", "attempt", "finished_at", "discarded", "on_discard")
+    __slots__ = ("state",)
 
     def __init__(self) -> None:
         self.state: object | None = None
-        self.attempt = 0
-        self.finished_at: datetime | None = None
-        self.discarded = False
-        self.on_discard: Callable[[int], None] | None = None
-
-    def start_attempt(self, state: object) -> None:
-        self.state = state
-        self.attempt += 1
-        self.finished_at = None
-        self.discarded = False
-
-    def discard_attempt(self) -> None:
-        if self.discarded:
-            return
-        self.state = None
-        self.finished_at = None
-        self.discarded = True
-        if self.on_discard is not None:
-            self.on_discard(max(1, self.attempt))
 
 
 class ModelProvider(ABC):
@@ -277,19 +249,6 @@ class ModelProvider(ABC):
             if self._retired and self._inflight == 0:
                 await self.aclose()
 
-    @staticmethod
-    async def _stream_attempt(
-        chunks: AsyncIterator[LLMResponse], accumulator: StreamAccumulator | None
-    ) -> AsyncIterator[LLMResponse]:
-        try:
-            async for chunk in chunks:
-                yield chunk
-        except Exception:
-            # Discard before the outer retry decorator announces or awaits backoff.
-            if accumulator is not None:
-                accumulator.discard_attempt()
-            raise
-
     @abstractmethod
     def _generate(
         self,
@@ -315,15 +274,6 @@ class ModelProvider(ABC):
         （见 `WingAgent.thinking`）。基类默认 False。
         """
         return False
-
-    def reasoning_support(self, model: str) -> ReasoningSupport:
-        return ReasoningSupport()
-
-    def request_thinking(self, override: bool | None) -> bool | None:
-        return self.thinking if override is None else override
-
-    def request_reasoning_effort(self, override: str | None) -> str | None:
-        return None
 
     # ── 生命周期（池所有权）───────────────
 

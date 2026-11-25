@@ -23,15 +23,6 @@ skills_info
 service
 default_agent
 
-# 会话详情的控件能力（GET /api/session/info）
-thinking_supported
-effort_options
-can_switch_template_safely
-
-# Setting API 回执供 App 读取，通过 Pydantic 序列化出网。
-current_fingerprint
-pending_restart
-
 # 链上事件与工具 schema 字段
 created_at
 error_code

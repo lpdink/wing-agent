@@ -4,7 +4,7 @@ from typing import Any, Callable, Dict, List, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .message import AskOutcome, MediaRef
+from .message import MediaRef
 
 
 ########## EXCEPTIONS
@@ -35,17 +35,15 @@ class AgentSkill(BaseModel):
 
 @dataclass
 class ToolOutput:
-    """工具结构化结果：文本、媒体引用及可选 Ask 结算。
+    """工具结构化结果：文本信封 + 媒体引用列表。
 
     工具返回值 `str` 仍完全兼容（存量工具零改动）。返回 `ToolOutput` 时
-    ToolExecutor 把媒体引用与 Ask 结算写入 Message。截断与 `after_tool_call`
-    hook 只处理 content 文本。
+    ToolExecutor 把 media 原样带进 Message.media——截断与 `after_tool_call`
+    hook 只作用于 content 文本（hook 拿不到 media，也无法改动它）。
     """
 
     content: str
     media: list[MediaRef] = field(default_factory=list)
-    ask_outcome: AskOutcome | None = None
-    """内置 Ask 已接受的反馈结算，独立于可被 hook 改写的正文。"""
 
 
 class ToolParam(BaseModel):

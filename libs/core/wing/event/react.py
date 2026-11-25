@@ -9,42 +9,23 @@ from __future__ import annotations
 import uuid as _uuid
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
-from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
+from pydantic import BaseModel, Field
 
 from wing.schema import MediaRef, usage_wire
-from wing.schema.message import AskOutcome, ToolResultStatus
 
-from .base import HistoryNotice, WingEvent
+from .base import WingEvent
 
 if TYPE_CHECKING:
     from wing.schema import Message, ToolCall
 
 
-class _GenerationEvent(WingEvent):
-    message_id: str | None = None
-    generation_attempt: int | None = None
-
-
-class AssistantGeneration(BaseModel):
-    message_id: str
-    generation_attempt: int
-    phase: Literal["provisional", "discarded", "finalized"]
-
-
-class AssistantGenerationResetEvent(WingEvent):
-    type: Literal["assistant_generation_reset"] = "assistant_generation_reset"
-    persist: ClassVar[bool] = False
-    message_id: str
-    generation_attempt: int
-
-
-class TextEvent(_GenerationEvent):
+class TextEvent(WingEvent):
     type: Literal["text"] = "text"
     persist: ClassVar[bool] = False
     content: str
 
 
-class ReasoningEvent(_GenerationEvent):
+class ReasoningEvent(WingEvent):
     type: Literal["reasoning"] = "reasoning"
     persist: ClassVar[bool] = False
     content: str
@@ -67,25 +48,6 @@ class ToolCallEvent(WingEvent):
         )
 
 
-class ToolExecution(BaseModel):
-    tool_name: str
-    tool_args: dict[str, Any] | None = None
-
-    @model_serializer(mode="wrap")
-    def _serialize_override(self, handler: SerializerFunctionWrapHandler):  # noqa: ANN202
-        """Preserve the model's OpenAPI schema while omitting absent overrides."""
-        data = handler(self)
-        if self.tool_args is None:
-            data.pop("tool_args", None)
-        return data
-
-
-class ToolExecutionStartedEvent(WingEvent, ToolExecution):
-    type: Literal["tool_execution_started"] = "tool_execution_started"
-    persist: ClassVar[bool] = False
-    tool_call_id: str
-
-
 class ToolExecutionTiming(BaseModel):
     elapsed_ms: int
     running: bool
@@ -99,7 +61,7 @@ class ToolExecutionTimingEvent(WingEvent):
     timing: ToolExecutionTiming
 
 
-class ToolCallStreamEvent(_GenerationEvent):
+class ToolCallStreamEvent(WingEvent):
     """Streaming tool call args fragment — emitted during LLM generation.
 
     Carries the incremental raw args text accumulated since the last event
@@ -107,8 +69,7 @@ class ToolCallStreamEvent(_GenerationEvent):
     accumulate fragments and partial-parse locally for real-time rendering;
     the runtime forwards provider text as-is and never parses partial args.
     Coexists with ToolCallEvent: this fires during arg generation,
-    ToolCallEvent carries model arguments. ToolExecutionStartedEvent carries an
-    override when the arguments passed to the tool differ.
+    ToolCallEvent fires when execution begins (authoritative parsed args).
     """
 
     type: Literal["tool_call_stream"] = "tool_call_stream"
@@ -131,10 +92,6 @@ class ToolCallResultEvent(WingEvent):
     tool_call_id: str
     tool_result: str
     tool_success: bool
-    tool_status: ToolResultStatus | None = None
-    ask_outcome: AskOutcome | None = None
-    message_id: str | None = None
-    message_at: str | None = None
     model: str = ""
     tool_media: list[dict] = Field(default_factory=list)
     """工具结果携带的图片引用（MediaRef.model_dump() 列表）。
@@ -157,27 +114,14 @@ class ToolCallResultEvent(WingEvent):
         session_id: str,
         media: list[MediaRef] | None = None,
         duration_ms: int | None = None,
-        message: Message | None = None,
     ) -> Self:
         return cls(
             session_id=session_id,
             tool_name=tc.name,
-            tool_args=(
-                message.tool_args
-                if message is not None and message.tool_args is not None
-                else tc.arguments
-            ),
+            tool_args=tc.arguments,
             tool_call_id=tc.id,
             tool_result=result,
             tool_success=success,
-            tool_status=message.tool_status if message else None,
-            ask_outcome=message.ask_outcome if message else None,
-            message_id=message.message_id if message else None,
-            message_at=(
-                message.message_at.isoformat()
-                if message and message.message_at
-                else None
-            ),
             model=model,
             tool_media=[m.model_dump() for m in (media or [])],
             duration_ms=duration_ms,
@@ -248,7 +192,6 @@ class TurnStartedEvent(WingEvent):
     """
 
     type: Literal["turn_started"] = "turn_started"
-    turn_started_at: str | None = None
 
 
 class PendingUserMessage(BaseModel):
@@ -268,8 +211,6 @@ class UserMessageCommittedEvent(WingEvent):
     type: Literal["user_message_committed"] = "user_message_committed"
     persist: ClassVar[bool] = False
     message_uuid: str
-    message_id: str | None = None
-    message_at: str | None = None
     origin_request_ids: list[str]
     content: str
     media: list[MediaRef]
@@ -358,7 +299,7 @@ def _claude_stop_reason(msg: Message) -> str:
     return mapped if mapped is not None else "end_turn"
 
 
-class _AssistantMessageEvent(_GenerationEvent):
+class AssistantTurnEvent(WingEvent):
     """Turn 级别的 assistant 完整消息（对应 Claude SDKAssistantMessage）。
 
     在 _call_llm() 返回完整 assistant 消息后、ToolExecutor.execute() 之前 emit。
@@ -368,14 +309,11 @@ class _AssistantMessageEvent(_GenerationEvent):
        {"type": "thinking", "thinking": "..."}]
     """
 
+    type: Literal["assistant_turn"] = "assistant_turn"
     persist: ClassVar[bool] = False
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     content_blocks: list[dict]
-    message_at: str | None = None
     model: str = ""
-    model_id: str | None = None
-    provider_name: str | None = None
-    model_display_name: str | None = None
     stop_reason: str | None = None
     usage: dict | None = None
 
@@ -399,31 +337,13 @@ class _AssistantMessageEvent(_GenerationEvent):
                 }
             )
 
-        return cls.model_validate(
-            {
-                "session_id": session_id,
-                "content_blocks": content_blocks,
-                "uuid": msg.message_id or _uuid.uuid4().hex,
-                "message_id": msg.message_id,
-                "message_at": msg.message_at.isoformat() if msg.message_at else None,
-                "model": model,
-                "model_id": msg.model_id,
-                "provider_name": msg.provider_name,
-                "model_display_name": msg.model_display_name,
-                "stop_reason": _claude_stop_reason(msg),
-                "usage": usage_wire(msg.usage),
-            }
+        return cls(
+            session_id=session_id,
+            content_blocks=content_blocks,
+            model=model,
+            stop_reason=_claude_stop_reason(msg),
+            usage=usage_wire(msg.usage),
         )
-
-
-class AssistantTurnEvent(_AssistantMessageEvent):
-    type: Literal["assistant_turn"] = "assistant_turn"
-
-
-class AssistantMessageCommittedEvent(_AssistantMessageEvent):
-    """An assistant fragment retained after cancellation or an invalid generation."""
-
-    type: Literal["assistant_message_committed"] = "assistant_message_committed"
 
 
 class ToolResultTurnEvent(WingEvent):
@@ -457,7 +377,7 @@ class ToolResultTurnEvent(WingEvent):
         )
 
 
-class TurnResultEvent(HistoryNotice):
+class TurnResultEvent(WingEvent):
     """整个 agent loop 的最终结果（对应 Claude SDKResultMessage）。
 
     在整个 agent loop 结束时 emit，位于 DoneEvent 之前。
@@ -470,7 +390,7 @@ class TurnResultEvent(HistoryNotice):
     """
 
     type: Literal["turn_result"] = "turn_result"
-    disk_exclude: ClassVar[frozenset[str]] = HistoryNotice.disk_exclude | {"result"}
+    disk_exclude: ClassVar[frozenset[str]] = frozenset({"result"})
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     subtype: str = "success"
     is_error: bool = False
@@ -479,16 +399,3 @@ class TurnResultEvent(HistoryNotice):
     duration_ms: int = 0
     usage: dict | None = None
     errors: list[str] = Field(default_factory=list)
-
-    @property
-    def has_history_position(self) -> bool:
-        return self.subtype == "error_max_turns"
-
-
-class HistoryNoticeEvent(HistoryNotice):
-    """Replay projection of a terminal fact whose live event drives client state."""
-
-    type: Literal["history_notice"] = "history_notice"
-    persist: ClassVar[bool] = False
-    subtype: Literal["error_max_turns"]
-    errors: list[str]

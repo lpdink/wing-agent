@@ -37,10 +37,8 @@ from wing.event import (
     UserMessageAcceptedEvent,
     wire_dump,
 )
-from wing.event.state_change import SessionHistory
 from wing.event_bus import event_bus
 from wing.media import SUPPORTED_IMAGE_MIMES, MediaAccess
-from wing.provider.pool import get_provider
 from wing.schema import ChainNode, MediaRef, Message, Tool
 from wing.store import (
     SessionMetadata,
@@ -81,24 +79,6 @@ def serialize_message(msg: Message) -> dict:
         "content": msg.content or "",
         "uuid": msg.uuid,
     }
-    if msg.history_id is not None:
-        d["message_id"] = msg.history_id
-    if msg.message_at is not None:
-        d["message_at"] = msg.message_at.isoformat()
-    for field in (
-        "model",
-        "model_id",
-        "provider_name",
-        "model_display_name",
-        "stop_reason",
-        "tool_status",
-        "ask_outcome",
-        "duration_ms",
-        "tool_args",
-    ):
-        value = getattr(msg, field)
-        if value is not None:
-            d[field] = value
     if msg.reasoning_content:
         d["reasoning_content"] = msg.reasoning_content
     if msg.tool_calls:
@@ -382,35 +362,53 @@ class Session:
         session._metadata.template_name = template.name
         return session
 
-    async def switch_template(
-        self, template: "AgentTemplate", *, require_idle: bool = False
-    ) -> None:
-        """原地替换 Agent，复用会话的消息链和请求 ID 窗口。"""
+    async def switch_template(self, template: "AgentTemplate") -> None:
+        """原地替换 agent，保留消息历史。
+
+        在同一个 session 内：
+        1. await 旧 agent.shutdown() 清空 inbox 并 cancel worker
+        2. 用同一个 TrackedList 构建新 ContextManager
+        3. 用新模板创建新 WingAgent
+
+        不产生 session 切换事件，SM 和 TUI 不感知 session 变化。
+        """
+        # 干净关闭旧 agent 的 worker；provider 实例归共享池，不随 agent 关闭
+        # （其他会话可能正在用，且新 agent 多半解析到同一实例）。
         old_agent = self._agent
-        async with old_agent.template_replacement(require_idle=require_idle):
-            model_id = template.model_id or get_config().identify(
-                template.provider_name, template.model
+        await old_agent.shutdown(
+            notify=old_agent.status != "idle" or old_agent.has_pending_input
+        )
+
+        self._context_manager, self._agent = _build_runtime(
+            template,
+            self._session_id,
+            self._messages,
+            self._store,
+            self._metadata.workspace,
+            input_request_ids=old_agent.input_request_ids,
+        )
+        self._context_manager.on_history_refresh = self._publish_history_refresh
+        # 追加系统提示词是会话级内容（hook 注入的环境信息 + 追加指令），
+        # 与模板无关：新 CM 上重新挂载持久化值（否则重启/切换后丢失）。
+        if self._metadata.append_system_prompt:
+            self._context_manager.append_system_prompt = (
+                self._metadata.append_system_prompt
             )
-            # 候选发布后的状态读回和首轮投递都依赖共享 provider 已可用。
-            get_provider(template.provider_name)
-            context_manager, agent = _build_runtime(
-                template,
-                self._session_id,
-                self._messages,
-                self._store,
-                self._metadata.workspace,
-                input_request_ids=old_agent.input_request_ids,
-            )
-            context_manager.on_history_refresh = self._publish_history_refresh
-            context_manager.append_system_prompt = (
-                self._metadata.append_system_prompt or ""
-            )
-            agent.set_cwd(context_manager.workspace)
-            self._context_manager, self._agent = context_manager, agent
+
+        cwd = (
+            str(Path(self._metadata.workspace).resolve())
+            if self._metadata.workspace
+            else None
+        )
+        self._agent.set_cwd(Path(cwd) if cwd else None)
 
         self._template_name = template.name
         self._metadata.template_name = template.name
-        self._model_id = model_id
+        # 模型引用词：模板自带 id（fork 的 from_agent 传入源会话 id）；缺省按
+        # 新模板的 (provider, name) 反查补全（模板来自配置，正常必命中）。
+        self._model_id = template.model_id or get_config().identify(
+            template.provider_name, template.model
+        )
         # 模板切换以新模板为准——此前记录的显式覆盖（基础提示词 / 工具 /
         # 动态开关 / 限额）随切换作废：清记录即「跟随新模板与配置」的持久化
         # 表达（新 agent 已按新模板构造），避免重启后把旧覆盖又贴回新 agent。
@@ -713,29 +711,6 @@ class Session:
         cm = self._context_manager
         return [serialize_message(msg) for msg in cm.get_context_window()]
 
-    def history_snapshot(self) -> SessionHistory:
-        agent = self.agent
-        turn_started_at = agent.turn_started_at
-        return SessionHistory(
-            messages=self.serialize_messages(),
-            uncommitted=agent.uncommitted_message(),
-            assistant_generation=agent.assistant_generation(),
-            uncommitted_tools=agent.uncommitted_tools(),
-            uncommitted_tool_results=[
-                serialize_message(result) for result in agent.uncommitted_tool_results()
-            ],
-            tool_execution_timings=agent.tool_execution_timings(),
-            tool_executions=agent.tool_executions(),
-            pending_user_messages=agent.pending_user_messages(),
-            events=[
-                wire_dump(event)
-                for event in self.context_manager.get_active_events(
-                    pending_ask_ids=agent.pending_ask_ids()
-                )
-            ],
-            turn_started_at=turn_started_at.isoformat() if turn_started_at else None,
-        )
-
     def sync_event(
         self,
         *,
@@ -745,11 +720,24 @@ class Session:
         refresh: bool = False,
     ) -> SyncSessionEvent | SessionHistoryRefreshedEvent:
         """Project the active history and all live state at the same point in time."""
+        cm = self.context_manager
+        agent = self.agent
         event_type = SessionHistoryRefreshedEvent if refresh else SyncSessionEvent
         return event_type(
-            **dict(self.history_snapshot()),
             session_id=self.session_id,
+            messages=self.serialize_messages(),
+            uncommitted=agent.uncommitted_message(),
+            uncommitted_tools=agent.uncommitted_tools(),
+            tool_execution_timings=agent.tool_execution_timings(),
+            pending_user_messages=agent.pending_user_messages(),
+            events=[
+                wire_dump(e)
+                for e in cm.get_active_events(pending_ask_ids=agent.pending_ask_ids())
+            ],
             status=self.status,
+            turn_started_at=(
+                agent.turn_started_at.isoformat() if agent.turn_started_at else None
+            ),
             agent=self.to_agent_info() if include_agent else None,
             name=self.session_name if include_agent else None,
             draft=draft,
@@ -936,8 +924,8 @@ class Session:
         """会话是否已物化（第一条用户消息之后为真；既有会话构造时即为真）。"""
         return self._materialized
 
-    def _save_metadata(self, metadata: SessionMetadata | None = None) -> None:
-        """保存 metadata 快照（摘除 / 未物化时是 no-op）。"""
+    def _save_metadata(self) -> None:
+        """将当前 metadata 模型保存到 store（摘除 / 未物化时是 no-op）。"""
         if self._detached:
             log.warning(
                 f"Session {self._session_id}: metadata write skipped (detached)"
@@ -945,9 +933,7 @@ class Session:
             return
         if not self._materialized:
             return
-        self._store.save_metadata(
-            self._session_id, self._metadata if metadata is None else metadata
-        )
+        self._store.save_metadata(self._session_id, self._metadata)
 
     def set_title(self, title: str) -> None:
         """设置 session 标题（草稿上只改内存，随首条消息落盘）。
@@ -981,53 +967,6 @@ class Session:
             self._metadata.tag_meta = mutation.tag_meta or None
             self._save_metadata()
         return mutation
-
-    def _validate_reasoning_update(
-        self, thinking: bool | None, reasoning_effort: str | None
-    ) -> None:
-        support = self.agent.model_provider.reasoning_support(self.agent.model)
-        if thinking is not None and support.thinking is not True:
-            raise ValueError("thinking control is unavailable for the current model")
-        if reasoning_effort is not None and reasoning_effort not in (
-            support.effort or ()
-        ):
-            raise ValueError(
-                "reasoning_effort is unavailable for the current model"
-                if not support.effort
-                else "reasoning_effort must be one of: " + ", ".join(support.effort)
-            )
-
-    def update_reasoning(
-        self,
-        thinking: bool | None,
-        reasoning_effort: str | None,
-        *,
-        validate: bool = False,
-    ) -> None:
-        """严格编辑先持久化整批设置，再更新 live 状态。"""
-        overrides = {
-            key: value
-            for key, value in (
-                ("thinking", thinking),
-                ("reasoning_effort", reasoning_effort),
-            )
-            if value is not None
-        }
-        if not overrides:
-            return
-        if validate:
-            self._validate_reasoning_update(thinking, reasoning_effort)
-            metadata = self._metadata.model_copy(update=overrides)
-            self._save_metadata(metadata)
-            self._metadata = metadata
-
-        if thinking is not None:
-            self.agent.set_thinking(thinking)
-        if reasoning_effort is not None:
-            self.agent.set_reasoning_effort(reasoning_effort)
-
-        if not validate:
-            self._record_state(**overrides)
 
     async def update_state(
         self,
@@ -1086,7 +1025,13 @@ class Session:
         if title is not None:
             self.set_title(title)
 
-        self.update_reasoning(thinking, reasoning_effort)
+        if thinking is not None:
+            self.agent.set_thinking(thinking)
+            self._record_state(thinking=thinking)
+
+        if reasoning_effort is not None:
+            self.agent.set_reasoning_effort(reasoning_effort)
+            self._record_state(reasoning_effort=reasoning_effort)
 
         if yolo is not None:
             self.agent.set_yolo(yolo)

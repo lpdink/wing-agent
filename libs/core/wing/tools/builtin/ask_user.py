@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from wing.agent import ToolContext
 from wing.event import AskEvent
-from wing.schema import ToolError, ToolOutput, ToolParam
+from wing.schema import ToolError, ToolParam
 from wing.tool_registry import tool_registry
 from wing.tools.internal.feedback import FEEDBACK_TIMEOUT
 
@@ -152,7 +152,7 @@ def _normalize_question(raw: Any, index: int) -> AskQuestion:
 async def ask_user(
     questions: list[dict],
     ctx: ToolContext,
-) -> ToolOutput:
+) -> str:
     """Ask the user one or more multiple-choice questions and wait for answers.
 
     Use this tool when you need user input during execution:
@@ -179,7 +179,7 @@ async def ask_user(
             text, optional 2-4 options, and an optional multiSelect flag.
 
     Returns:
-        The feedback text and its outcome for this call.
+        The user's answers as `header: answer` text lines.
     """
     if not questions:
         raise ToolError("At least one question is required.")
@@ -219,7 +219,5 @@ async def ask_user(
         )
 
     if (feedback or "").strip() == ASK_CANCEL_TOKEN:
-        return ToolOutput(content=CANCEL_RESULT, ask_outcome="cancelled")
-    return ToolOutput(
-        content=feedback or "(user gave no answer)", ask_outcome="answered"
-    )
+        return CANCEL_RESULT
+    return feedback or "(user gave no answer)"

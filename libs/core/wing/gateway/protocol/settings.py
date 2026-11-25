@@ -21,9 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from wing.config import ApplyScope, SettingKind
-from wing.runtime import SettingEffectStatus
 
-from .errors import ErrorResponse
 from .system import ReloadResponse
 
 
@@ -190,13 +188,6 @@ class SecretState(BaseModel):
     )
 
 
-class EffectiveSettings(BaseModel):
-    values: dict[str, Any] = Field(description="默认值展开后的配置，密文仍为 null")
-    sources: dict[str, Literal["default", "override"]] = Field(
-        description="已声明路径的值来源，列表使用具体下标"
-    )
-
-
 class SettingsGetResponse(BaseModel):
     """GET /api/settings/get 响应——稀疏文档 + 指纹 + 密文状态 + 问题。
 
@@ -219,11 +210,6 @@ class SettingsGetResponse(BaseModel):
     )
     setup_mode: bool = Field(default=False, description="网关此刻是否处于 setup mode")
     config_path: str = Field(description="config.yaml 的绝对路径")
-    effective: EffectiveSettings = Field(description="磁盘配置的生效值与来源")
-    pending_restart: list[str] | None = Field(
-        default=None,
-        description="相对本进程已装配配置仍待重启的路径；无法判定时为 null",
-    )
 
 
 class SettingsStatusResponse(BaseModel):
@@ -256,24 +242,6 @@ class SettingsSetRequest(BaseModel):
     document: dict[str, Any] = Field(description="稀疏文档（密文 null = 保留）")
 
 
-class SettingsConflict(BaseModel):
-    current_fingerprint: str
-    changed_paths: list[str] | None = Field(description="基线未知时为 null")
-
-
-class SettingsConflictResponse(ErrorResponse):
-    conflict: SettingsConflict
-
-
-class SettingEffect(BaseModel):
-    path: str
-    scope: ApplyScope | None
-    status: SettingEffectStatus
-    steps: list[str] = Field(
-        default_factory=list, description="关联的 reload.results[].name"
-    )
-
-
 class SettingsSetResponse(BaseModel):
     """POST /api/settings/set 响应——保存回执。
 
@@ -283,14 +251,6 @@ class SettingsSetResponse(BaseModel):
     """
 
     ok: bool = Field(description="事务是否成功（false 时文件一个字节都没写）")
-    written: bool = Field(description="此次事务已完成配置文件写盘")
-    effects: list[SettingEffect] = Field(
-        default_factory=list, description="此次变更的逐路径生效回执"
-    )
-    pending_restart: list[str] | None = Field(
-        default=None,
-        description="相对本进程已装配配置仍待重启的路径；无法判定时为 null",
-    )
     fingerprint: str = Field(description="落盘后的新指纹（ok=false 时是磁盘当前指纹）")
     problems: list[SettingProblem] = Field(
         default_factory=list, description="校验问题（ok=false 时非空）"
@@ -320,15 +280,11 @@ class SettingsSetResponse(BaseModel):
 
 
 __all__ = [
-    "EffectiveSettings",
     "SecretState",
-    "SettingEffect",
     "SettingChoice",
     "SettingGroupProto",
     "SettingNodeProto",
     "SettingProblem",
-    "SettingsConflict",
-    "SettingsConflictResponse",
     "SettingsGetResponse",
     "SettingsSchemaResponse",
     "SettingsSetRequest",

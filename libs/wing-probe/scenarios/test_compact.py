@@ -35,7 +35,6 @@ from collections.abc import Callable
 import pytest
 
 from wing_probe import (
-    Driver,
     PENDING_KEY,
     HistoryView,
     message_semantics,
@@ -96,7 +95,7 @@ async def test_manual_compact_chain_shape(probe: Probe) -> None:
     last_message_uuid = before.messages()[-1]["uuid"]
 
     response = await session.compact()
-    notice = await session.watch.expect("compact_done", within=15)
+    await session.watch.expect("compact_done", within=15)
     after = probe.history(session)
 
     assert response == {"ok": True, "original_tokens": 0, "compressed_tokens": 0}, (
@@ -123,17 +122,6 @@ async def test_manual_compact_chain_shape(probe: Probe) -> None:
     assert [event["type"] for event in after.events()] == ["compact_done"], (
         after.describe()
     )
-
-    history = await session.driver.http.request(
-        "GET", "/api/session/get", params={"session_id": session.session_id}
-    )
-    assert notice.data["summary"] == history["messages"][0]
-    assert history["events"] == [
-        {k: v for k, v in notice.data.items() if k != "summary"}
-    ]
-    assert notice.data["after_message_id"] == history["messages"][0]["message_id"]
-    assert "after_message_id" not in after.events()[0]
-    assert "summary" not in after.events()[0]
 
     # 旧节点不删（compact 是 append-only）。
     assert set(before.by_uuid) <= set(after.by_uuid), sorted(
@@ -480,34 +468,17 @@ async def test_message_during_manual_compact_waits(probe: Probe) -> None:
     session = await probe.session(model=QUEUES_INPUT_MODEL)
     await session.chat("alpha")
 
-    other = await Driver.connect(probe.env)
-    try:
-        observer = await other.attach(session.session_id)
-        before = (await observer.watch.expect("sync_session")).data
-        cursor = session.watch.cursor
-        compacting = asyncio.create_task(session.compact())
-        await _poll(lambda: bool(_compact_calls(probe, QUEUES_INPUT_MODEL)))
+    cursor = session.watch.cursor
+    compacting = asyncio.create_task(session.compact())
+    await _poll(lambda: bool(_compact_calls(probe, QUEUES_INPUT_MODEL)))
 
-        await session.send("queued during compaction")
-        await session.watch.expect_none("turn_started", within=0.4)
+    await session.send("queued during compaction")
+    # 压缩在飞：这一轮不得开始。
+    await session.watch.expect_none("turn_started", within=0.4)
 
-        await compacting
-        live = (await observer.watch.expect("compact_done")).data
-        commit = (await observer.watch.expect("user_message_committed")).data
-        assert live["summary"]["content"] == f"[Compact] {MANUAL_SUMMARY}"
-        assert live["summary"]["message_id"] == live["after_message_id"]
-        assert live["after_message_id"] not in {
-            row["message_id"] for row in before["messages"]
-        }
-        assert commit["content"] == "queued during compaction"
-        await session.watch.expect("turn_result", within=20)
-        session.watch.assert_ordered(["compact_done", "turn_started"], since=cursor)
-        history = await session.get()
-        assert history["messages"][0] == live["summary"]
-        assert history["messages"][1]["message_id"] == commit["message_id"]
-        assert history["events"][0]["after_message_id"] == live["after_message_id"]
-    finally:
-        await other.close()
+    await compacting
+    await session.watch.expect("turn_result", within=20)
+    session.watch.assert_ordered(["compact_done", "turn_started"], since=cursor)
 
     context = probe.context(QUEUES_INPUT_MODEL, 2)
     assert context.messages[0].content == f"[Compact] {MANUAL_SUMMARY}", (

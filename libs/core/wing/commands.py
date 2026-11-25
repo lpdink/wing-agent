@@ -171,13 +171,11 @@ def load_prompt_command_from_file(md_path: Path) -> MagicCommand | None:
         return None
 
 
-def load_prompt_commands_from_paths(
-    paths: list[str], *, failed: set[int] | None = None
-) -> list[MagicCommand]:
+def load_prompt_commands_from_paths(paths: list[str]) -> list[MagicCommand]:
     """从多个 glob 路径加载 prompt 类型命令。"""
     commands: list[MagicCommand] = []
 
-    for index, path_pattern in enumerate(paths):
+    for path_pattern in paths:
         expanded_pattern = str(Path(path_pattern).expanduser())
         matched_files = glob.glob(expanded_pattern, recursive=True)
 
@@ -190,22 +188,18 @@ def load_prompt_commands_from_paths(
             if cmd:
                 commands.append(cmd)
                 log.info(f"Loaded prompt command: /{cmd.name} from {md_path}")
-            elif failed is not None:
-                failed.add(index)
 
     return commands
 
 
-def register_prompt_commands(paths: list[str]) -> set[int]:
-    """注册 prompt 命令，并返回存在加载失败的 glob 下标。"""
-    failed: set[int] = set()
-    commands = load_prompt_commands_from_paths(paths, failed=failed)
+def register_prompt_commands(paths: list[str]) -> None:
+    """加载并注册 prompt 类型命令到全局 registry。"""
+    commands = load_prompt_commands_from_paths(paths)
 
     for cmd in commands:
         magic_registry.register_command(cmd)
         alias_str = f" (aliases: {', '.join(cmd.aliases)})" if cmd.aliases else ""
         log.debug(f"Registered prompt command: /{cmd.name}{alias_str}")
-    return failed
 
 
 __all__ = [

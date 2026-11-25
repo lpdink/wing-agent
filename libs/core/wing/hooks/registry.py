@@ -7,7 +7,7 @@
      - value 是被修改的主值，管道串联传递
      - context 是常量上下文（如 tool_name），整个管道中不变
   4. handler 返回非 None → 替换 value
-  5. handler 返回 None → 保留当前 value，包括 handler 对它的原地修改
+  5. handler 返回 None → 保留当前 value
   6. handler 异常 → 跳过，保留当前 value，log warning
   7. 同一函数注册到同一 point 只生效一次
   8. invoke_async 支持 sync + async handler 混合执行
