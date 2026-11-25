@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import httpx
 import pytest
 from aiohttp import web
 from _session_helpers import evict_and_wait_inactive
@@ -810,13 +811,16 @@ async def test_anthropic_samples_stop_reason_before_message_stop(
 
 
 @pytest.mark.probe_env(models=[FIRST, SECOND], hooks=["hooks/*.py"])
+@pytest.mark.parametrize("rewrite_target", [False, True])
 async def test_executing_read_exposes_the_actual_target_before_settlement(
     probe: Probe,
+    rewrite_target: bool,
 ) -> None:
     hooks = probe.env.root / "hooks"
     hooks.mkdir()
-    (hooks / "read_target.py").write_text(
-        """
+    if rewrite_target:
+        (hooks / "rewrite.py").write_text(
+            """
 import asyncio
 from pathlib import Path
 from wing.hooks import hooks
@@ -828,6 +832,15 @@ async def rewrite(call):
         while not Path("read-enter").exists():
             await asyncio.sleep(0.02)
         call.arguments["path"] = "executed.txt"
+    return None
+""",
+            encoding="utf-8",
+        )
+    (hooks / "hold_read.py").write_text(
+        """
+import asyncio
+from pathlib import Path
+from wing.hooks import hooks
 
 @hooks.on("after_tool_call")
 async def hold(result, **kwargs):
@@ -842,6 +855,7 @@ async def hold(result, **kwargs):
     (probe.workspace / "original.txt").write_text("original data\n", encoding="utf-8")
     (probe.workspace / "executed.txt").write_text("executed data\n", encoding="utf-8")
     original_args = {"path": "original.txt", "ignored_by_read": "value"}
+    target = "executed" if rewrite_target else "original"
     call_id = "call_target"
     probe.register(
         FIRST["name"],
@@ -857,22 +871,22 @@ async def hold(result, **kwargs):
     try:
         legacy_start = await session.watch.expect("tool_call")
         assert legacy_start.data["tool_args"] == original_args
-        async with asyncio.timeout(5):
-            while not (probe.env.root / "read-rewriting").exists():
-                await asyncio.sleep(0.02)
-        assert (await session.get())["tool_executions"] == {}
-        session.watch.assert_never("tool_execution_started")
-
-        enter.touch()
+        if rewrite_target:
+            async with asyncio.timeout(5):
+                while not (probe.env.root / "read-rewriting").exists():
+                    await asyncio.sleep(0.02)
+            assert (await session.get())["tool_executions"] == {}
+            session.watch.assert_never("tool_execution_started")
+            enter.touch()
         execution = (await session.watch.expect("tool_execution_started")).data
         assert execution["tool_call_id"] == legacy_start.data["tool_call_id"] == call_id
-        actual = {"tool_name": "Read", "tool_args": {"path": "executed.txt"}}
+        actual = {"tool_name": "Read", "tool_args": {"path": f"{target}.txt"}}
         _assert_fields(execution, actual, ("tool_name", "tool_args"))
         executed = probe.env.root / "read-executed"
         async with asyncio.timeout(5):
             while not executed.exists():
                 await asyncio.sleep(0.02)
-        assert "executed data" in executed.read_text(encoding="utf-8")
+        assert f"{target} data" in executed.read_text(encoding="utf-8")
         other = await observer.attach(session.session_id)
         snapshot = (await other.watch.expect("sync_session")).data
         http = await session.get()
@@ -903,8 +917,130 @@ async def hold(result, **kwargs):
         assert tool["tool_status"] == "success"
         assert tool["tool_call_id"] == call_id
         _assert_fields(tool, live_result, (*MESSAGE_FIELDS, "tool_args"))
-        assert "executed data" in tool["content"]
+        assert f"{target} data" in tool["content"]
     finally:
         enter.touch()
         release.touch()
         await observer.close()
+
+
+@pytest.mark.probe_env(models=[FIRST, SECOND], hooks=["hooks/*.py"])
+async def test_unchanged_write_execution_omits_large_args(probe: Probe) -> None:
+    hooks = probe.env.root / "hooks"
+    hooks.mkdir()
+    (hooks / "hold_write.py").write_text(
+        """
+import asyncio
+from pathlib import Path
+from wing.hooks import hooks
+
+@hooks.on("after_tool_call")
+async def hold(result, **kwargs):
+    if kwargs["tool_name"] == "Write":
+        while not Path("write-release").exists():
+            await asyncio.sleep(0.02)
+""",
+        encoding="utf-8",
+    )
+    assert (await probe.driver_required.http.reload())["ok"]
+    payload = "a" * (1024 * 1024 - 1) + "\n"
+    params = {"path": "large.txt", "content": payload}
+    probe.register(
+        FIRST["name"],
+        Turn.of(tool_calls=[ToolCall("Write", params, id="call_large")]),
+        Turn.of(text="written"),
+    )
+    session = await probe.session(model=FIRST["id"], tools=["Write"])
+    await session.watch.expect("sync_session")
+    await session.send("write the sample")
+    observer = await Driver.connect(probe.env)
+    release = probe.env.root / "write-release"
+    try:
+        started = (await session.watch.expect("tool_execution_started")).data
+        await session.watch.expect("diff_content")
+        session.watch.assert_never("tool_call_result")
+        assert (probe.workspace / "large.txt").read_text(encoding="utf-8") == payload
+        joined = await observer.attach(session.session_id)
+        snapshot = (await joined.watch.expect("sync_session")).data
+        async with httpx.AsyncClient(base_url=probe.env.gateway_url) as client:
+            response = await client.get(
+                "/api/session/get", params={"session_id": session.session_id}
+            )
+        response.raise_for_status()
+        history = response.json()
+        start_frame = next(
+            frame
+            for frame in session.frames.frames
+            if json.loads(frame.text).get("type") == "tool_execution_started"
+        )
+        snapshot_frame = next(
+            frame
+            for frame in observer.frames.frames
+            if json.loads(frame.text).get("type") == "sync_session"
+        )
+        print(
+            json.dumps(
+                {
+                    "write_content_bytes": len(payload.encode()),
+                    "ws_tool_execution_started_bytes": len(start_frame.text.encode()),
+                    "ws_sync_session_bytes": len(snapshot_frame.text.encode()),
+                    "http_session_get_bytes": len(response.content),
+                },
+                sort_keys=True,
+            )
+        )
+        assert (
+            started["tool_call_id"] == "call_large" and started["tool_name"] == "Write"
+        )
+        assert "tool_args" not in started
+        assert (
+            snapshot["tool_executions"]
+            == history["tool_executions"]
+            == {
+                "call_large": {"tool_name": "Write"},
+            }
+        )
+        assert snapshot["uncommitted"]["tool_calls"][0]["arguments"] == params
+        assert history["uncommitted"]["tool_calls"][0]["arguments"] == params
+        release.touch()
+        live_result = (await session.watch.expect("tool_call_result")).data
+        assert live_result["tool_success"] and live_result["tool_args"] == params
+        await session.watch.expect("done")
+        final = await session.get()
+        (saved_tool,) = [row for row in final["messages"] if row["role"] == "tool"]
+        assert "tool_args" not in saved_tool
+        (disk_tool,) = [
+            row for row in session.history.messages() if row["role"] == "tool"
+        ]
+        assert "tool_args" not in disk_tool
+        assert final["tool_executions"] == {}
+    finally:
+        release.touch()
+        await observer.close()
+
+
+async def test_signature_filter_exposes_explicit_empty_arguments(probe: Probe) -> None:
+    params = {"unknown": "dropped"}
+    probe.register(
+        FIRST["name"],
+        Turn.of(tool_calls=[ToolCall("Read", params, id="call_empty")]),
+        Turn.of(text="no file path"),
+    )
+    session = await probe.session(model=FIRST["id"], tools=["Read"])
+    await session.watch.expect("sync_session")
+    await session.send("read sample")
+    original = (await session.watch.expect("tool_call")).data
+    execution = (await session.watch.expect("tool_execution_started")).data
+    result = (await session.watch.expect("tool_call_result")).data
+    assert original["tool_args"] == params
+    assert (
+        original["tool_call_id"] == execution["tool_call_id"] == result["tool_call_id"]
+    )
+    assert execution["tool_args"] == result["tool_args"] == {}
+    assert result["tool_success"] is False and result["tool_status"] == "error"
+    await session.watch.expect("done")
+    assistant, tool = (await session.get())["messages"][1:3]
+    assert assistant["tool_calls"][0]["arguments"] == params
+    assert tool["tool_args"] == {}
+    (disk_tool,) = [row for row in session.history.messages() if row["role"] == "tool"]
+    assert disk_tool["tool_args"] == {}

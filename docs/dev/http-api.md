@@ -300,14 +300,16 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 | `user_message_committed` | `message_id` 与 `message_at` 对应提交后的 Message。时间在输入 hook 结束、送入链时采样。同批输入仍合成一条消息。 |
 | `assistant_turn`、助手 Message | 直播在生成结束后、工具执行前发出，提供 `message_id`、`message_at`、调用时的 `model`（调用名）、`model_id`（配置引用词）、`provider_name`、`model_display_name`。这些值与已提交及生成结束后的 `uncommitted` 对应。生成中的 `uncommitted` 可以带身份和模型，收到上游生成终止信号后即可带结束时间。生成定型后不再下发半截工具调用。 |
 | `assistant_message_committed` | 流式中断或截断重试前保留助手内容的边界。与常规助手边界同形，`stop_reason` 是已提交 Message 的值（流式中断为 `interrupted`）。该事件用于定型本条消息，轮次终态看后续对应事件。 |
-| 工具结果 | 工具 Message、`uncommitted_tool_results` 和 `tool_call_result` 共用 `message_id`、`message_at`、`tool_call_id`、`tool_status`（`success` / `error` / `interrupted`）和可选 `duration_ms`。`tool_call_id` 关联助手 `tool_calls[].id`，调用参数从对应 `arguments` 获取。如果 hook 改写了参数，工具 Message 的 `tool_args` 给出直播结果使用的参数。直播保留 `tool_success` 和全文，历史正文仍遵循工具结果截断。 |
+| 工具结果 | 工具 Message、`uncommitted_tool_results` 和 `tool_call_result` 共用 `message_id`、`message_at`、`tool_call_id`、`tool_status`（`success` / `error` / `interrupted`）和可选 `duration_ms`。`tool_call_id` 关联助手 `tool_calls[].id`，调用参数从对应 `arguments` 获取。hook 改写或签名过滤使实参与原参数不同时，工具 Message 记录 `tool_args` 覆盖值。直播 `tool_call_result.tool_args` 始终是参数对象，沿用原参数或提供该覆盖值。直播保留 `tool_success` 和全文，历史正文仍遵循工具结果截断。 |
 | `events` | 活跃链序。`error`、`interrupted`、`compact_done` 和 `history_notice` 可用 `after_message_id` 锚定前一条用户或助手消息。没有前置消息时省略。`diff_content`、仍挂起的 `ask` 沿用 `tool_call_id`。 |
 
 `assistant_generation` 用 `message_id`、`generation_attempt`（从 1 开始）及 `phase` 表达在途状态。`provisional` 可以带早采样的 `uncommitted.message_at`，该尝试仍可能撤销。OpenAI 优先取 `finish_reason`，Anthropic 优先取 `stop_reason`，再使用各自的终止标记回退。`finalized` 表示助手内容已通过生成校验，`discarded` 表示本次尝试已撤销，快照不包含其正文、思考或工具片段。
 
 直播 `text`、`reasoning`、`tool_call_stream` 和助手定型边界携带消息身份及尝试序号。`assistant_generation_reset` 在退避 notice 与后续增量之前发出，用该身份与序号移除相应的临时投影。传输重试沿用逻辑消息身份，下一次尝试递增序号。退避中断不会提交已撤销的内容。消息时间描述生成结束，定型由 `assistant_turn`、`assistant_message_committed` 或快照 `phase: "finalized"` 表达。
 
-`tool_call` 保留模型调用参数。`tool_execution_started` 在工具函数调用前携带 `tool_call_id`、`tool_name`、本次将传给工具的 `tool_args`。`tool_executions` 按调用 ID 提供同形的在途参数；收到 `tool_call_result` 后由结果接管。未结算但已执行的工具继续使用其实际参数，取消也保留该目标。新增字段和非持久事件允许旧客户端忽略。
+`tool_call` 保留模型调用参数。`tool_execution_started` 在实参确定后、工具函数调用前发送 `tool_call_id` 和 `tool_name`。`tool_executions` 按调用 ID 提供在途执行，每项含 `tool_name`。签名过滤或 hook 改写导致实参有变化时，两个投影均附完整的 `tool_args` 覆盖值。字段缺失时继续使用该调用的模型参数。显式 `{}` 表示过滤后无实参。
+
+收到 `tool_call_result` 后由结果接管实际参数，取消也保留已经开始执行的目标。工具 Message 和 `uncommitted_tool_results` 延续相同的可选覆盖值。`tool_call_result.tool_args` 保持对既有客户端的完整参数对象契约。
 
 直播的 `turn_result`（`subtype: "error_max_turns"`）收口轮次。历史用 `history_notice` 展示同一事实，复用 `uuid`、`subtype`、`errors`、`after_message_id`。手动压缩的直播 `compact_done.summary` 是新的摘要 Message。支持该字段的客户端将活跃消息替换成摘要并应用本条通知。历史快照的 `messages` 已含摘要，快照内 `compact_done` 只提供通知。
 

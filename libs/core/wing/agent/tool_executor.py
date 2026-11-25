@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from copy import deepcopy
 from functools import partial
 from pathlib import Path
+from typing import cast
 
 from wing.common.logger import log
 from wing.common.truncate import head_tail_marker
@@ -105,11 +106,27 @@ def interrupted_tool_result(call: ToolCall, tool_args: dict | None = None) -> Me
     return message
 
 
+def _same_argument_value(left: object, right: object) -> bool:
+    if left is right:
+        return True
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict) and isinstance(right, dict):
+        right_values = cast("dict[object, object]", right)
+        return left.keys() == right_values.keys() and all(
+            _same_argument_value(value, right_values[key])
+            for key, value in left.items()
+        )
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(
+            _same_argument_value(a, b) for a, b in zip(left, right, strict=True)
+        )
+    return left == right
+
+
 def _executed_args(call: ToolCall, executions: dict[str, ToolExecution]) -> dict | None:
     execution = executions.get(call.id)
-    if execution is not None and execution.tool_args != call.arguments:
-        return execution.tool_args
-    return None
+    return execution.tool_args if execution is not None else None
 
 
 class ToolExecutor:
@@ -333,11 +350,13 @@ class ToolExecutor:
             return finish(result, status="error", executed=False)
 
         try:
-            modified_tc = await hooks.invoke_async(
-                "before_tool_call", tc.model_copy(deep=True)
-            )
-            if modified_tc is not None:
-                arguments = modified_tc.arguments
+            if hooks.handlers("before_tool_call"):
+                # Hooks can mutate nested values. The model arguments are a history fact.
+                hook_call = tc.model_copy(deep=True)
+                modified_tc = await hooks.invoke_async("before_tool_call", hook_call)
+                arguments = (
+                    hook_call if modified_tc is None else modified_tc
+                ).arguments
 
             # 参数过滤：远程工具（VAR_KEYWORD）全量透传
             sig = inspect.signature(tool.function)
@@ -350,7 +369,12 @@ class ToolExecutor:
                 actual_params = set(sig.parameters.keys())
                 call_args = {k: v for k, v in arguments.items() if k in actual_params}
 
-            execution = ToolExecution(tool_name=tc.name, tool_args=deepcopy(call_args))
+            execution = ToolExecution(
+                tool_name=tc.name,
+                tool_args=None
+                if _same_argument_value(call_args, tc.arguments)
+                else deepcopy(call_args),
+            )
             executions[call_id] = execution
             if executions is self._tool_executions:
                 self._sink.tool_execution_started(call_id, execution)

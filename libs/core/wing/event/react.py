@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid as _uuid
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from wing.schema import MediaRef, usage_wire
 from wing.schema.message import ToolResultStatus
@@ -69,7 +69,15 @@ class ToolCallEvent(WingEvent):
 
 class ToolExecution(BaseModel):
     tool_name: str
-    tool_args: dict[str, Any]
+    tool_args: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_override(self, handler: SerializerFunctionWrapHandler):  # noqa: ANN202
+        """Preserve the model's OpenAPI schema while omitting absent overrides."""
+        data = handler(self)
+        if self.tool_args is None:
+            data.pop("tool_args", None)
+        return data
 
 
 class ToolExecutionStartedEvent(WingEvent, ToolExecution):
@@ -99,8 +107,8 @@ class ToolCallStreamEvent(_GenerationEvent):
     accumulate fragments and partial-parse locally for real-time rendering;
     the runtime forwards provider text as-is and never parses partial args.
     Coexists with ToolCallEvent: this fires during arg generation,
-    ToolCallEvent carries the model arguments. ToolExecutionStartedEvent carries
-    the arguments passed to the tool.
+    ToolCallEvent carries model arguments. ToolExecutionStartedEvent carries an
+    override when the arguments passed to the tool differ.
     """
 
     type: Literal["tool_call_stream"] = "tool_call_stream"
