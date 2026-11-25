@@ -603,6 +603,55 @@ fn test_an_image_chip_never_breaks_in_half() {
     );
 }
 
+#[test]
+fn test_same_width_composer_frames_use_the_current_draft_and_chip() {
+    use crate::config::{AppConfig, ColorPreset};
+    use crate::tui::ClipboardEvent;
+
+    let mut config = AppConfig::default();
+    config.colors.preset = ColorPreset::Dark;
+    let mut app = App::new("test-session".into(), config, None);
+    app.clear_welcome();
+    let mut terminal = test_terminal(30, 14);
+
+    app.input.set_text("old");
+    draw(&mut app, &mut terminal);
+    let area = app.input.rendered_area();
+    assert_eq!(app.input.chrome().text_width, 22);
+    assert!(card_row(terminal.backend().buffer(), area, area.y + 1).starts_with("│ ❯ old"));
+
+    app.input.set_text("fresh ");
+    app.handle_clipboard(ClipboardEvent::ImageReadStarted {
+        mime: "image/png".into(),
+    });
+    app.input.insert_str(" z");
+    draw(&mut app, &mut terminal);
+    assert_eq!(app.input.rendered_area(), area);
+    assert!(
+        card_row(terminal.backend().buffer(), area, area.y + 1)
+            .starts_with("│ ❯ fresh [Image #1 ⠋] z")
+    );
+
+    let target = *app.image_reads.front().expect("pending image chip");
+    app.on_clipboard_compressed(target, Ok(picture(2048)));
+    draw(&mut app, &mut terminal);
+    let settled = app.input.rendered_area();
+    assert_eq!(app.input.chrome().text_width, 22);
+    assert_eq!(settled.height, area.height + 1);
+    let buf = terminal.backend().buffer();
+    assert_eq!(
+        card_row(buf, settled, settled.y + 1).trim_end_matches(['│', ' ']),
+        "│ ❯ fresh"
+    );
+    let tail = "[Image #1 4×2 2KB] z";
+    assert!(card_row(buf, settled, settled.y + 2).starts_with(&format!("│   {tail}")));
+    let (tx, ty, _) = composer_text(&app);
+    assert_eq!(
+        terminal.get_cursor_position().unwrap(),
+        ratatui::layout::Position::new(tx + tail.chars().count() as u16, ty + 1)
+    );
+}
+
 /// A squeezed composer (the terminal is too short for the whole layout) gets
 /// fewer rows than the height request asked for, so the card degrades to a
 /// bare text area — and the editor must wrap at *those* columns. The chrome

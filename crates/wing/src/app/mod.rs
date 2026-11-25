@@ -58,7 +58,8 @@ use crate::ui::input_area::ActivityRail;
 use crate::ui::input_area::ComposerWidget;
 use crate::ui::input_area::InputArea;
 use crate::ui::input_area::MetaRail;
-use crate::ui::input_area::cursor_screen_pos;
+use crate::ui::input_area::VisualRows;
+use crate::ui::input_area::chrome::Chrome;
 use crate::ui::input_area::pointer;
 use crate::ui::popup::selection::SelectionPopup;
 use crate::ui::scrollbar;
@@ -415,6 +416,7 @@ impl App {
         area: Rect,
         full_card_w: u16,
         now: std::time::Instant,
+        composer_rows: &mut VisualRows,
     ) -> Option<(u16, u16)> {
         if !self.chat.is_empty() || self.welcome.is_none() {
             return None;
@@ -442,7 +444,8 @@ impl App {
         let composer_w = hero_block_width(self)
             .max(SPLASH_INPUT_MIN)
             .min(full_card_w);
-        let fits = 1 + rows + 1 + self.input.height(composer_w) <= area.height;
+        let fits =
+            1 + rows + 1 + self.input.height_with_rows(composer_w, composer_rows) <= area.height;
         fits.then_some((rows, composer_w))
     }
 
@@ -796,13 +799,15 @@ impl App {
             // 排版才知道它多高 —— 整块与输入卡要一起算光学中心。
             let now = std::time::Instant::now();
             let full_card_w = crate::ui::input_area::chrome::card_area(area).width;
-            let splash_plan = self.splash_plan(&palette, area, full_card_w, now);
+            let mut composer_rows = VisualRows::default();
+            let splash_plan =
+                self.splash_plan(&palette, area, full_card_w, now, &mut composer_rows);
             let (splash, hero_rows) = match splash_plan {
                 Some((hero_rows, _)) => (true, hero_rows),
                 None => (false, 0),
             };
             let composer_w = splash_plan.map_or(full_card_w, |(_, width)| width);
-            let composer_h = self.input.height(composer_w);
+            let composer_h = self.input.height_with_rows(composer_w, &mut composer_rows);
             let bands = frame_layout(area, splash, hero_rows, composer_h, self.popup.height());
 
             // Status bar (model top-left, cumulative usage, connection) — plus
@@ -915,11 +920,11 @@ impl App {
             };
             let keyboard_held = self.composer_typing_blocked();
             self.geometry.record_composer(input_rect);
-            frame.render_widget(
-                ComposerWidget::new(&mut self.input, &palette, activity, meta)
-                    .keyboard_held(keyboard_held),
-                input_rect,
-            );
+            let rows = composer_rows.at(&self.input, Chrome::of(input_rect));
+            let cursor = self.input.visual_cursor(rows);
+            ComposerWidget::new(&mut self.input, &palette, activity, meta)
+                .keyboard_held(keyboard_held)
+                .render_with_rows(input_rect, frame.buffer_mut(), rows, cursor.0);
 
             // Pop-down command popup — below the composer and floated with it,
             // so the list hangs off the card instead of the screen edge.
@@ -950,7 +955,9 @@ impl App {
             // 设置面板开着时不定位：面板自己画反显光标，终端光标留在 overlay 上
             // 就是一个游离的方块（不调用它 = 这一帧隐藏光标）。
             if self.settings_panel.is_none() {
-                let (cursor_x, cursor_y) = cursor_screen_pos(&self.input, &input_rect);
+                let (cursor_x, cursor_y) = self
+                    .input
+                    .cursor_screen_pos_with_rows(input_rect, rows, cursor);
                 let cursor_x = cursor_x.min(area.width.saturating_sub(1));
                 let cursor_y = cursor_y.min(area.height.saturating_sub(1));
                 frame.set_cursor_position((cursor_x, cursor_y));
@@ -1053,11 +1060,12 @@ impl App {
                         self.chat.capture_visible_rows(frame.buffer_mut());
                     }
                     Some(SelectionRegion::Composer) => {
-                        pointer::paint_selection(
+                        pointer::paint_selection_with_rows(
                             frame.buffer_mut(),
                             &self.input,
                             input_rect,
                             self.selection.state(),
+                            &mut composer_rows,
                         );
                     }
                     None => {}

@@ -31,6 +31,25 @@ pub use image::ImageStage;
 pub use widget::ComposerWidget;
 pub use widget::cursor_screen_pos;
 
+/// The draft's wrapped rows for one draw. The draft and chip labels stay fixed
+/// while the same rows are reused at a matching text width.
+#[derive(Default)]
+pub(crate) struct VisualRows {
+    width: u16,
+    rows: Vec<wrap::VisualRow>,
+}
+
+impl VisualRows {
+    pub(crate) fn at(&mut self, input: &InputArea, chrome: Chrome) -> &[wrap::VisualRow] {
+        let width = chrome.text_width.max(1);
+        if self.width != width {
+            self.rows = wrap::build_visual_rows(&input.lines, &input.chips, width as usize);
+            self.width = width;
+        }
+        &self.rows
+    }
+}
+
 /// What pressing Enter produces: the message text, and the pictures the draft
 /// carried.
 ///
@@ -197,14 +216,15 @@ impl InputArea {
     /// card will really be laid out into, or the frame it asks for does not
     /// match the wrapping it will get.
     pub fn height(&self, available_width: u16) -> u16 {
+        self.height_with_rows(available_width, &mut VisualRows::default())
+    }
+
+    pub(crate) fn height_with_rows(&self, available_width: u16, rows: &mut VisualRows) -> u16 {
         let chrome = Chrome::for_width(available_width);
-        let text_width = chrome.text_width as usize;
-        let rows = if text_width == 0 {
+        let rows = if chrome.text_width == 0 {
             1
         } else {
-            wrap::build_visual_rows(&self.lines, &self.chips, text_width)
-                .len()
-                .clamp(1, self.max_lines) as u16
+            rows.at(self, chrome).len().clamp(1, self.max_lines) as u16
         };
         chrome.height_for(rows)
     }
@@ -418,18 +438,11 @@ impl InputArea {
     // ── Scroll management ───────────────────────────────────────
 
     /// Update vertical scroll to keep cursor's visual row visible.
-    pub(crate) fn update_vertical_scroll(&mut self, chrome: Chrome) {
+    fn update_vertical_scroll(&mut self, chrome: Chrome, vis_row: usize) {
         let h = chrome.text_rows as usize;
         if h == 0 {
             return;
         }
-        // The rendered chrome's own width: the window this computes describes
-        // the rows that were really drawn (a collapsed text area still wraps at
-        // one column).
-        let text_width = (chrome.text_width as usize).max(1);
-        let vis_rows = wrap::build_visual_rows(&self.lines, &self.chips, text_width);
-        let (vis_row, _) = wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
-
         if vis_row < self.vertical_scroll {
             self.vertical_scroll = vis_row;
         } else if vis_row >= self.vertical_scroll + h {
@@ -476,12 +489,22 @@ impl InputArea {
     ///
     /// Returns absolute coordinates suitable for `MoveTo(x, y)`.
     pub fn cursor_screen_pos(&self, area: &Rect) -> (u16, u16) {
-        let chrome = Chrome::of(*area);
-        let text_width = chrome.text_width as usize;
-        let vis_rows = wrap::build_visual_rows(&self.lines, &self.chips, text_width.max(1));
-        let (vis_row, vis_col) =
-            wrap::logical_to_visual(&vis_rows, self.cursor_row, self.cursor_col);
+        let mut rows = VisualRows::default();
+        let rows = rows.at(self, Chrome::of(*area));
+        self.cursor_screen_pos_with_rows(*area, rows, self.visual_cursor(rows))
+    }
 
+    pub(crate) fn visual_cursor(&self, rows: &[wrap::VisualRow]) -> (usize, usize) {
+        wrap::logical_to_visual(rows, self.cursor_row, self.cursor_col)
+    }
+
+    pub(crate) fn cursor_screen_pos_with_rows(
+        &self,
+        area: Rect,
+        vis_rows: &[wrap::VisualRow],
+        (vis_row, vis_col): (usize, usize),
+    ) -> (u16, u16) {
+        let chrome = Chrome::of(area);
         // Compute display width of the visual column portion.
         let line = model::flat(&self.lines[self.cursor_row], &self.chips);
         let vr = &vis_rows[vis_row.min(vis_rows.len() - 1)];
@@ -1618,7 +1641,10 @@ mod tests {
         // cursor, which sits on the last logical line.
         let mut input = InputArea::with_max_lines(String::new(), 2);
         input.set_text("one\ntwo\nthree");
-        input.update_vertical_scroll(Chrome::of(Rect::new(0, 0, 16, 2 + chrome::BORDER_ROWS)));
+        let drawn_chrome = Chrome::of(Rect::new(0, 0, 16, 2 + chrome::BORDER_ROWS));
+        let mut rows = VisualRows::default();
+        let (row, _) = input.visual_cursor(rows.at(&input, drawn_chrome));
+        input.update_vertical_scroll(drawn_chrome, row);
         assert_eq!(input.vertical_scroll, 1, "window shows logical lines 1..2");
         // The caller (the pointer hit test) adds the window offset, so the
         // row handed in is absolute: window row 1 = visual row 2.

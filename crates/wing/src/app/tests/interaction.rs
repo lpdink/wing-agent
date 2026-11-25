@@ -6,6 +6,7 @@
 use super::support::*;
 use crate::app::*;
 use crate::ui::chat_view::ChatCell;
+use crate::ui::input_area::cursor_screen_pos;
 use crate::ui::toast::ToastKind;
 
 #[test]

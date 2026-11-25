@@ -108,19 +108,6 @@ impl ChatView {
     }
 }
 
-/// The link table to place for one cell.
-///
-/// Cloned only when the cell actually has something to place (and its rows are
-/// exact), so a frame full of cells without links allocates nothing — the
-/// returned vector is `Vec::new()` (capacity 0) in that case.
-pub(super) fn links_for_frame(rows_exact: bool, links: &[Vec<LinkSpan>]) -> Vec<Vec<LinkSpan>> {
-    if rows_exact && links.iter().any(|line| !line.is_empty()) {
-        links.to_vec()
-    } else {
-        Vec::new()
-    }
-}
-
 /// Record and inject the links of one cell's visible rows.
 ///
 /// `first_line` is the cell's line index at the top of `first_row` (the blit
@@ -232,9 +219,7 @@ mod tests {
 
     use ratatui::style::Modifier;
     use ratatui::style::Style;
-    use ratatui::text::Line;
 
-    use crate::render::markdown::ComposedLines;
     use crate::render::markdown::strip_osc8;
     use crate::ui::selection::Selection;
     use crate::ui::selection::SelectionPoint;
@@ -715,28 +700,6 @@ mod tests {
         assert!(
             !prose.frame_links().is_empty(),
             "the IR wrapper hard-breaks long prose, so its rows stay exact"
-        );
-    }
-
-    #[test]
-    fn links_for_frame_allocates_nothing_without_links() {
-        let links: Vec<Vec<LinkSpan>> = Vec::new();
-        let table = links_for_frame(true, &links);
-        assert!(table.is_empty() && table.capacity() == 0, "no allocation");
-
-        // A row whose lines are not exact is skipped even when it has links.
-        let with_link = ComposedLines::new(
-            vec![Line::from("docs")],
-            vec![vec![LinkSpan {
-                start: 0,
-                end: 4,
-                target: "https://example.com".into(),
-            }]],
-        );
-        assert!(!links_for_frame(true, with_link.links()).is_empty());
-        assert!(
-            links_for_frame(false, with_link.links()).is_empty(),
-            "inexact rows"
         );
     }
 

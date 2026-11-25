@@ -28,7 +28,6 @@ use super::ChatView;
 use super::FrameImage;
 use super::image::frame_image_for;
 use super::link::LinkTable;
-use super::link::links_for_frame;
 use super::link::place_links;
 
 /// Screen geometry of the last chat render.
@@ -427,8 +426,6 @@ impl Widget for ChatViewWidget<'_> {
             // Paragraph wrap Composer, no to_vec clone.
             if cached.is_prewrapped(content_area.width, &self.ctx) {
                 let cell = cached.compute_cell_frame(content_area.width, &self.ctx);
-                let rows_exact = cell.rows_exact;
-                let cell_links = links_for_frame(cell.rows_exact, cell.links);
                 record_frame_images(
                     &mut frame_images,
                     &cell,
@@ -449,11 +446,11 @@ impl Widget for ChatViewWidget<'_> {
                     );
                     line.render(row, buf);
                 }
-                if rows_exact {
+                if cell.rows_exact {
                     place_links(
                         &mut frame_links,
                         buf,
-                        &cell_links,
+                        cell.links,
                         content_area,
                         skip_lines,
                         render_y,
@@ -468,8 +465,6 @@ impl Widget for ChatViewWidget<'_> {
             }
 
             let cell = cached.compute_cell_frame(content_area.width, &self.ctx);
-            let rows_exact = cell.rows_exact;
-            let cell_links = links_for_frame(cell.rows_exact, cell.links);
             let cell_lines = cell.lines.to_vec();
             record_frame_images(
                 &mut frame_images,
@@ -521,11 +516,11 @@ impl Widget for ChatViewWidget<'_> {
             // The user-message branch above owns its own padding rows, so link
             // placement is confined to the plain cells (which is where markdown
             // links can appear anyway).
-            if rows_exact {
+            if cell.rows_exact {
                 place_links(
                     &mut frame_links,
                     buf,
-                    &cell_links,
+                    cell.links,
                     content_area,
                     skip,
                     render_y,
