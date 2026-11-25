@@ -39,6 +39,7 @@ from wing.event import (
 )
 from wing.event_bus import event_bus
 from wing.media import SUPPORTED_IMAGE_MIMES, MediaAccess
+from wing.provider.pool import get_provider
 from wing.schema import ChainNode, MediaRef, Message, Tool
 from wing.store import (
     SessionMetadata,
@@ -365,50 +366,32 @@ class Session:
     async def switch_template(
         self, template: "AgentTemplate", *, require_idle: bool = False
     ) -> None:
-        """原地替换 agent，保留消息历史。
-
-        在同一个 session 内：
-        1. await 旧 agent.shutdown() 清空 inbox 并 cancel worker
-        2. 用同一个 TrackedList 构建新 ContextManager
-        3. 用新模板创建新 WingAgent
-
-        不产生 session 切换事件，SM 和 TUI 不感知 session 变化。
-        """
-        # 干净关闭旧 agent 的 worker；provider 实例归共享池，不随 agent 关闭
-        # （其他会话可能正在用，且新 agent 多半解析到同一实例）。
+        """原地替换 Agent，复用会话的消息链和请求 ID 窗口。"""
         old_agent = self._agent
-        await old_agent.shutdown_for_template_switch(require_idle=require_idle)
-
-        self._context_manager, self._agent = _build_runtime(
-            template,
-            self._session_id,
-            self._messages,
-            self._store,
-            self._metadata.workspace,
-            input_request_ids=old_agent.input_request_ids,
-        )
-        self._context_manager.on_history_refresh = self._publish_history_refresh
-        # 追加系统提示词是会话级内容（hook 注入的环境信息 + 追加指令），
-        # 与模板无关：新 CM 上重新挂载持久化值（否则重启/切换后丢失）。
-        if self._metadata.append_system_prompt:
-            self._context_manager.append_system_prompt = (
-                self._metadata.append_system_prompt
+        async with old_agent.template_replacement(require_idle=require_idle):
+            model_id = template.model_id or get_config().identify(
+                template.provider_name, template.model
             )
-
-        cwd = (
-            str(Path(self._metadata.workspace).resolve())
-            if self._metadata.workspace
-            else None
-        )
-        self._agent.set_cwd(Path(cwd) if cwd else None)
+            # 候选发布后的状态读回和首轮投递都依赖共享 provider 已可用。
+            get_provider(template.provider_name)
+            context_manager, agent = _build_runtime(
+                template,
+                self._session_id,
+                self._messages,
+                self._store,
+                self._metadata.workspace,
+                input_request_ids=old_agent.input_request_ids,
+            )
+            context_manager.on_history_refresh = self._publish_history_refresh
+            context_manager.append_system_prompt = (
+                self._metadata.append_system_prompt or ""
+            )
+            agent.set_cwd(context_manager.workspace)
+            self._context_manager, self._agent = context_manager, agent
 
         self._template_name = template.name
         self._metadata.template_name = template.name
-        # 模型引用词：模板自带 id（fork 的 from_agent 传入源会话 id）；缺省按
-        # 新模板的 (provider, name) 反查补全（模板来自配置，正常必命中）。
-        self._model_id = template.model_id or get_config().identify(
-            template.provider_name, template.model
-        )
+        self._model_id = model_id
         # 模板切换以新模板为准——此前记录的显式覆盖（基础提示词 / 工具 /
         # 动态开关 / 限额）随切换作废：清记录即「跟随新模板与配置」的持久化
         # 表达（新 agent 已按新模板构造），避免重启后把旧覆盖又贴回新 agent。
