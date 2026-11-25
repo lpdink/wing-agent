@@ -245,7 +245,9 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 
 `effects` 描述本次变更的应用结果。相关重载项失败时报告 `failed`，缺少足够信息时报告 `unknown`。
 重复保存仍可通过完整的 `reload.results` 查看各阶段重试结果。Hook 与 prompt 命令的 glob 命中文件加载失败时，
-逐路径回执报告 `failed`，步骤 `detail` 同时点名失败的配置路径。原有步骤的 `ok` 仍表示整步是否中止。
+逐路径回执报告 `failed`。保存的 `reload.failed_settings` 和手动重载的 `failed_settings` 均返回本次
+可以定位的资源失败路径。重复保存也会重新检查文件，即使 `changed` 为空。步骤 `detail` 继续点名配置路径，
+原有步骤的 `ok` 仍表示整步是否中止。阶段级异常继续看 `results[].ok`。
 setup 中 Provider 保持惰性构造，相关热字段在首启回执中报告 `unknown`。`pending_restart` 比较配置启动基线，
 `gateway.host` 与 `gateway.port` 的命令行覆盖属于进程部署参数。setup 原地注册的后台任务采用修复时的配置，
 应用结果会反映该状态。旧 `restart_required` 继续报告本次变更的重启域路径。
@@ -342,7 +344,7 @@ git-tracked 的 `config.yaml` + `.bak`。
 | `hooks[]` | `hot` | 热重载第 2 项 `hooks.clear() + load_hooks()` |
 | `commands.paths[]` | `hot` | 热重载第 3 项 `remove_by_source("prompt") + register_prompt_commands()` |
 | `log.level` | `hot` | 热重载**末项**：`setup_logger` 幂等重挂 handler（每日文件日志恒 DEBUG，不受此项影响） |
-| `user_agent.preset` | `hot` | `get_headers()` 每次调用读 |
+| `user_agent.preset` | `hot` | Provider 构造 HTTP 客户端时读取，随共享池重建应用 |
 
 **热重载的逐项名字序是对外契约**（probe `test_system_reload` 钉住，只许在**末尾**追加）：
 

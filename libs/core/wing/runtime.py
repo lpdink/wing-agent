@@ -235,7 +235,7 @@ class SettingsApplyResult:
                     setup
                     and (
                         not self.setup_mode_exited
-                        or (path.startswith("providers[") and scope is ApplyScope.HOT)
+                        or (_uses_provider_client(path) and scope is ApplyScope.HOT)
                     )
                 ):
                     status = "unknown"
@@ -249,11 +249,15 @@ class SettingsApplyResult:
         return effects
 
 
+def _uses_provider_client(path: str) -> bool:
+    return path.startswith("providers[") or path == "user_agent.preset"
+
+
 def _settings_steps(path: str, scope: ApplyScope, *, setup: bool) -> list[str]:
     root = path.split(".", 1)[0].split("[", 1)[0]
     if scope is ApplyScope.NEXT_SESSION:
         return ["config.yaml", "runtime"] if setup else ["config.yaml"]
-    if root == "providers":
+    if _uses_provider_client(path):
         step = "runtime" if setup else "provider"
     elif root == "hooks":
         step = "runtime" if setup else "hooks"

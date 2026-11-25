@@ -202,6 +202,7 @@ def build_reload_response(result: ReloadResult) -> ReloadResponse:
     """
     return ReloadResponse(
         ok=result.ok,
+        failed_settings=sorted(result.failed_settings),
         results=[
             ReloadResultItem(name=item.name, ok=item.ok, detail=item.detail)
             for item in result.items

@@ -48,6 +48,9 @@ class ReloadResponse(BaseModel):
     results: list[ReloadResultItem] = Field(
         default_factory=list, description="每项重载的结果"
     )
+    failed_settings: list[str] = Field(
+        default_factory=list, description="本次加载失败且能定位的设置路径"
+    )
 
 
 class ToolInfo(BaseModel):
