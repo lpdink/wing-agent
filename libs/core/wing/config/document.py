@@ -20,9 +20,8 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections import OrderedDict
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from secrets import token_bytes
 from typing import Any, Literal, NamedTuple, get_args
@@ -682,21 +681,25 @@ def _secret_leaves(
                 yield from _secret_leaves(template, item, f"{path}[{index}]")
 
 
-def _mask(node: SettingNode, value: Any) -> Any:
+def _mask(
+    node: SettingNode, value: Any, redact: Callable[[Any], Any] = lambda _: None
+) -> Any:
     if node.secret and node.kind is SettingKind.SECRET:
-        return None if value is not _MISSING else _MISSING
+        return redact(value)
     if node.kind is SettingKind.OBJECT and isinstance(value, dict):
         known = {child.key: child for child in node.children}
         out: dict[Any, Any] = {}
         for key, item in value.items():
             child = known.get(key)
-            out[key] = _mask(child, item) if child is not None else item
+            out[key] = _mask(child, item, redact) if child is not None else item
         return out
     if node.kind is SettingKind.LIST and isinstance(value, list):
         out_list: list[Any] = []
         for item in value:
             template = item_template(node, item)
-            out_list.append(_mask(template, item) if template is not None else item)
+            out_list.append(
+                _mask(template, item, redact) if template is not None else item
+            )
         return out_list
     return value
 
@@ -993,7 +996,7 @@ def _same(left: Any, right: Any) -> bool:
 
 
 class SettingsHistory:
-    """Recently observed revisions, with keyed digests in place of values."""
+    """Recently observed revisions, with keyed digests at declared secret leaves."""
 
     def __init__(self) -> None:
         self._key = token_bytes(32)
@@ -1004,7 +1007,7 @@ class SettingsHistory:
     ) -> None:
         if fingerprint not in self._documents:
             self._documents[fingerprint] = SparseDocument(
-                data=self._digest_tree(catalog, doc.data)
+                data=_mask(catalog, doc.data, self._digest_secret)
             )
             if len(self._documents) > 16:
                 self._documents.popitem(last=False)
@@ -1022,25 +1025,9 @@ class SettingsHistory:
             return None
         return changed_paths(previous, self._documents[current], catalog)
 
-    def _digest_tree(self, node: SettingNode | None, value: Any) -> Any:
-        if node is not None:
-            if node.kind is SettingKind.OBJECT and isinstance(value, dict):
-                return {
-                    child.key: self._digest_tree(child, value[child.key])
-                    for child in node.children
-                    if child.key in value
-                }
-            if node.kind is SettingKind.LIST and isinstance(value, list):
-                return [
-                    self._digest_tree(item_template(node, item), item) for item in value
-                ]
-        try:
-            encoded = json.dumps(value, sort_keys=True)
-        except (ValueError, TypeError):
-            encoded = yaml.safe_dump(value)
-        digest = hashlib.blake2b(encoded.encode(), key=self._key, digest_size=32)
-        # The union of a bare model name and a model object is selected by shape.
-        return digest.hexdigest() if isinstance(value, str) else digest.digest()
+    def _digest_secret(self, value: Any) -> bytes:
+        encoded = yaml.safe_dump(value).encode()
+        return hashlib.blake2b(encoded, key=self._key, digest_size=32).digest()
 
 
 def node_at_path(catalog: SettingNode, path: str) -> SettingNode | None:

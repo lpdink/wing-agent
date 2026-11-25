@@ -153,7 +153,7 @@ emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘�
 （**结构性三元组** `ExtraKey(父容器前缀, 原始键名, 值)`，如 `("gateway", "weird", …)` /
 `("providers[0]", "foo", …)`；freeform map 的内部键不算），
 保存时从**磁盘文档**取回、写在父容器已知键之后，上面一行
-`# unknown key (not recognized by this wing version)`；父容器自己缺席时兜底写在文件末尾。
+`# unknown key (not recognized by this wing version)`；父容器缺席时兜底写在文件末尾。与根部已有键或声明键重名的条目在独立未知键中保留原父路径、键名和值。
 ——新版本写的键，旧版本编辑时**不能吃掉**（这是"安全"与"毁掉用户配置"的分界线）。
 **键名不参与任何字符串切分**：`gateway.foo.bar` 这种「键名本身含点」的未知键必须原地写回
 （曾经用 `rpartition(".")` 反推父容器，会把键挪到错误的名字 / 位置）。
@@ -238,13 +238,15 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 | `effects` | 此次变更的逐路径应用结果。`scope` 来自目录。`steps` 引用实际尝试过的重载阶段。状态为 `applied`、`next_session`、`restart_required`、`failed`、`unknown` 或 `readonly` |
 | `pending_restart` | 相对进程启动配置仍待重启的已知路径，`get` 同样返回。重复保存仍报告，复位到启动值或重启后消失。配置无效或处于 setup mode 时为 `null` |
 
-同一网关进程的 HTTP 保存串行经过指纹比较、写盘和重载。冲突回执保留 `error` 与字符串 `detail`，
+同一网关进程的 HTTP 保存和手动重载沿用同一把应用锁。锁覆盖配置读取、写盘和运行期应用。冲突回执保留 `error` 与字符串 `detail`，
 增 `conflict.current_fingerprint` 和 `conflict.changed_paths`。`changed_paths` 比较服务器近期观察过的
 稀疏基线与当前文件，两份文档可比较时返回目录路径，密文变更只暴露路径。`[]` 表示无已声明设置差异，
 `null` 表示最近的进程内历史无法提供基线或现文件无法解析。客户端处理前重新取得文档并保留本地草稿。
 
 `effects` 描述本次变更的应用结果。相关重载项失败时报告 `failed`，缺少足够信息时报告 `unknown`。
-重复保存仍可通过完整的 `reload.results` 查看各阶段重试结果。`pending_restart` 比较配置启动基线，
+重复保存仍可通过完整的 `reload.results` 查看各阶段重试结果。Hook 与 prompt 命令的 glob 命中文件加载失败时，
+逐路径回执报告 `failed`，步骤 `detail` 同时点名失败的配置路径。原有步骤的 `ok` 仍表示整步是否中止。
+setup 中 Provider 保持惰性构造，相关热字段在首启回执中报告 `unknown`。`pending_restart` 比较配置启动基线，
 `gateway.host` 与 `gateway.port` 的命令行覆盖属于进程部署参数。setup 原地注册的后台任务采用修复时的配置，
 应用结果会反映该状态。旧 `restart_required` 继续报告本次变更的重启域路径。
 

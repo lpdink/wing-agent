@@ -808,3 +808,71 @@ async def test_settings_save_waits_for_the_preceding_application(
         assert application_order == [False, True]
     finally:
         reset_config()
+
+
+@pytest.mark.asyncio
+async def test_manual_reload_cannot_restore_settings_after_a_save(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from starlette.requests import Request
+
+    from wing.common import logger
+    from wing.config import get_config_path
+    from wing.gateway.protocol import SettingsSetRequest, SettingsSetResponse
+    from wing.gateway.routes.settings import settings_set
+    from wing.gateway.routes.system import reload_system
+    from wing.gateway.server import GatewayServer
+    from wing.provider import pool
+
+    monkeypatch.setenv("WING_HOME", str(tmp_path))
+    monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
+    config_path = get_config_path()
+    config_path.parent.mkdir()
+    document = yaml.safe_load(VALID_YAML)
+    document["log"] = {"level": "WARNING"}
+    config_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+    reset_config()
+    server = GatewayServer()
+    request = Request({"type": "http", "app": server._app})
+    manual_at_provider = asyncio.Event()
+    release_manual = asyncio.Event()
+    save_at_route = asyncio.Event()
+    installed_levels = []
+
+    async def hold_manual_provider_reset() -> int:
+        if not manual_at_provider.is_set():
+            manual_at_provider.set()
+            await release_manual.wait()
+        return 0
+
+    monkeypatch.setattr(pool, "reset_providers", hold_manual_provider_reset)
+    monkeypatch.setattr(
+        logger, "setup_logger", lambda *, level, context: installed_levels.append(level)
+    )
+    body = SettingsSetRequest(document={**document, "log": {"level": "DEBUG"}})
+
+    async def save() -> SettingsSetResponse:
+        save_at_route.set()
+        receipt = await settings_set(body, request)
+        assert isinstance(receipt, SettingsSetResponse)
+        return receipt
+
+    try:
+        async with asyncio.timeout(5), asyncio.TaskGroup() as group:
+            manual_task = group.create_task(reload_system(request))
+            await manual_at_provider.wait()
+            save_task = group.create_task(save())
+            await save_at_route.wait()
+            assert yaml.safe_load(config_path.read_bytes())["log"]["level"] == "WARNING"
+            assert not save_task.done()
+            release_manual.set()
+        assert manual_task.result().ok is True
+        receipt = save_task.result()
+        assert receipt.written is True
+        assert [(effect.path, effect.status) for effect in receipt.effects] == [
+            ("log.level", "applied")
+        ]
+        assert installed_levels == ["WARNING", "DEBUG"]
+        assert yaml.safe_load(config_path.read_bytes())["log"]["level"] == "DEBUG"
+    finally:
+        reset_config()

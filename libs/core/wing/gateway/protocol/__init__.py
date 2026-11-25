@@ -62,7 +62,6 @@ from .session import (
 )
 from .settings import (
     EffectiveSettings,
-    EffectStatus,
     SettingEffect,
     SettingsConflict,
     SettingsConflictResponse,
@@ -164,7 +163,6 @@ __all__ = [
     "SettingNodeProto",
     "SettingProblem",
     "EffectiveSettings",
-    "EffectStatus",
     "SettingEffect",
     "SettingsConflict",
     "SettingsConflictResponse",

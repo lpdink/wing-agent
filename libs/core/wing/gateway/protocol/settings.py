@@ -21,6 +21,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from wing.config import ApplyScope, SettingKind
+from wing.runtime import SettingEffectStatus
 
 from .errors import ErrorResponse
 from .system import ReloadResponse
@@ -263,15 +264,10 @@ class SettingsConflictResponse(ErrorResponse):
     conflict: SettingsConflict
 
 
-EffectStatus = Literal[
-    "applied", "next_session", "restart_required", "failed", "unknown", "readonly"
-]
-
-
 class SettingEffect(BaseModel):
     path: str
     scope: ApplyScope | None
-    status: EffectStatus
+    status: SettingEffectStatus
     steps: list[str] = Field(
         default_factory=list, description="关联的 reload.results[].name"
     )
@@ -323,7 +319,6 @@ class SettingsSetResponse(BaseModel):
 
 __all__ = [
     "EffectiveSettings",
-    "EffectStatus",
     "SecretState",
     "SettingEffect",
     "SettingChoice",

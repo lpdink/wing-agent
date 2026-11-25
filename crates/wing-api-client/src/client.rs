@@ -1122,6 +1122,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn settings_clients_accept_extended_responses() {
+        let gateway = MockGateway::start(vec![
+            (
+                "/api/settings/get",
+                200,
+                r#"{"values":{},"secrets":{},"fingerprint":"base","problems":[],
+                    "config_path":"/tmp/config.yaml","pending_restart":[],
+                    "effective":{"values":{"steer":true},"sources":{"steer":"default"}}}"#,
+            ),
+            (
+                "/api/settings/set",
+                200,
+                r#"{"ok":true,"fingerprint":"saved","written":true,
+                    "changed":["steer"],"restart_required":[],"pending_restart":[],
+                    "effects":[{"path":"steer","scope":"next_session","status":"next_session",
+                    "steps":["config.yaml"]}]}"#,
+            ),
+        ])
+        .await;
+        let client = GatewayClient::new(gateway.url.clone(), None).unwrap();
+        let initial = client.settings_get().await.unwrap();
+        assert_eq!(initial.values, serde_json::json!({}));
+        let request = SettingsSetRequest {
+            base: Some(initial.fingerprint),
+            document: serde_json::json!({"steer":false}),
+        };
+        let saved = client.settings_set(&request).await.unwrap();
+        assert!(saved.ok);
+        assert_eq!(saved.fingerprint, "saved");
+        assert_eq!(saved.changed, ["steer"]);
+        let conflict = MockGateway::start(vec![(
+            "/api/settings/set",
+            409,
+            r#"{"error":"conflict","detail":"current fingerprint: saved",
+                "conflict":{"current_fingerprint":"saved","changed_paths":["steer"]}}"#,
+        )])
+        .await;
+        let client = GatewayClient::new(conflict.url.clone(), None).unwrap();
+        let error = client.settings_set(&request).await.unwrap_err();
+        assert!(error.is_conflict());
+        assert!(error.to_string().contains("current fingerprint: saved"));
+    }
+
+    #[tokio::test]
     async fn setup_mode_and_conflict_are_recognized_off_the_wire() {
         // setup mode 下非 settings 端点被守门中间件挡成 503 + error=setup_mode
         // （断在 create_session 上是真实路径：TUI/stdio 的预检之外，run/wait 也会撞到）。

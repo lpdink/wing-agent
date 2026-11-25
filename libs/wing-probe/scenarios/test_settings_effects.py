@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import subprocess
+from pathlib import Path
 
 import pytest
 import yaml
 
-from wing_probe import DriverHttp, DriverHttpError, Probe, Turn
+from wing_probe import (
+    DriverHttp,
+    DriverHttpError,
+    Probe,
+    Turn,
+    reserve_port,
+    resolve_gateway_bin,
+    wait_for_health,
+)
 
 
 async def _get(http: DriverHttp) -> dict:
@@ -60,7 +72,15 @@ EFFECT_MODEL = "probe/settings-effects"
 UNDISPATCHABLE_URL = "http://127.0.0.1:invalid/v1"
 
 
-@pytest.mark.probe_env(models=[EFFECT_MODEL])
+@pytest.mark.probe_env(
+    models=[
+        {
+            "name": EFFECT_MODEL,
+            "context_window_tokens": 64_000,
+            "keep_recent_tokens": 10_000,
+        }
+    ]
+)
 @pytest.mark.asyncio
 async def test_partial_reload_report_and_retry_preserve_the_committed_document(
     probe: Probe,
@@ -71,6 +91,7 @@ async def test_partial_reload_report_and_retry_preserve_the_committed_document(
     assert (await existing.chat("prime the provider pool")).data["subtype"] == "success"
     current = await _get(http)
     current["values"]["providers"][0]["base_url"] = UNDISPATCHABLE_URL
+    current["values"]["providers"][0]["models"][0]["context_window_tokens"] = 96_000
     current["values"]["agents"][0]["system_prompt"] = "Only new sessions see this."
     current["values"]["log"] = {"level": "DEBUG"}
     receipt = await _save(http, current)
@@ -86,6 +107,12 @@ async def test_partial_reload_report_and_retry_preserve_the_committed_document(
             "scope": "hot",
             "status": "failed",
             "steps": ["config.yaml", "provider"],
+        },
+        "providers[0].models[0].context_window_tokens": {
+            "path": "providers[0].models[0].context_window_tokens",
+            "scope": "next_session",
+            "status": "next_session",
+            "steps": ["config.yaml"],
         },
         "agents[0].system_prompt": {
             "path": "agents[0].system_prompt",
@@ -119,12 +146,18 @@ async def test_partial_reload_report_and_retry_preserve_the_committed_document(
         == probe.context(EFFECT_MODEL, index=0).system
     )
 
+    new = await probe.session(model=EFFECT_MODEL)
+    for session, window in ((existing, 64_000), (new, 96_000)):
+        info = await http.request(
+            "GET", "/api/session/info", params={"session_id": session.session_id}
+        )
+        assert info["context_window_tokens"] == window
+
     saved["values"]["providers"][0]["base_url"] = probe.env.provider.base_url
     repaired = await _save(http, saved)
     assert repaired["reload"]["ok"] is True
     assert repaired["effects"][0]["status"] == "applied"
     assert (await existing.chat("old template remains")).data["subtype"] == "success"
-    new = await probe.session(model=EFFECT_MODEL)
     assert (await new.chat("new template")).data["subtype"] == "success"
     assert (
         probe.context(EFFECT_MODEL, index=2).system
@@ -190,3 +223,132 @@ async def test_pending_restart_survives_another_save_and_clears_on_restart(
         "OPTIONS", "/api/settings/get", headers=preflight_headers
     )
     assert call.response_headers["access-control-allow-origin"] == RESTART_ORIGIN
+
+
+@pytest.mark.asyncio
+async def test_unknown_removed_provider_key_cannot_become_a_gateway_setting(
+    probe: Probe,
+) -> None:
+    http = probe.driver_required.http
+    path = probe.env.config_path
+    raw = yaml.safe_load(path.read_bytes())
+    old_port = raw["gateway"]["port"]
+    unknown = {"port": old_port + 1, "future_setting": True}
+    raw["providers"].append(
+        {
+            **raw["providers"][0],
+            "name": "extra",
+            "models": ["probe/extra"],
+            "gateway": unknown,
+        }
+    )
+    raw["_wing_orphaned_settings"] = "existing unknown root key"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    current = await _get(http)
+    current["values"]["providers"].pop()
+    saved = await _save(http, current)
+    assert saved["written"] is True
+    assert saved["reload"]["ok"] is True
+    assert saved["pending_restart"] == saved["restart_required"] == []
+    assert "gateway.port" not in saved["changed"]
+    current = await _get(http)
+    assert current["fingerprint"] == saved["fingerprint"]
+    assert current["pending_restart"] == saved["pending_restart"]
+    assert current["effective"]["values"]["gateway"]["port"] == old_port
+    disk = yaml.safe_load(path.read_bytes())
+    assert disk["_wing_orphaned_settings"] == "existing unknown root key"
+    assert disk["_wing_orphaned_settings_"] == [
+        {"parent": "providers[1]", "key": "gateway", "value": unknown}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_file_loading_reports_failed_patterns_and_keeps_successful_commands(
+    probe: Probe,
+) -> None:
+    http = probe.driver_required.http
+    current = await _get(http)
+    root = probe.env.root
+    (root / "good.md").write_text(
+        "---\nname: probe-good\n---\nRun a probe command.\n", encoding="utf-8"
+    )
+    (root / "incomplete.md").write_text(
+        "---\ndescription: missing name\n---\nDemo text.\n", encoding="utf-8"
+    )
+    (root / "bad_hook.py").write_text("def\n", encoding="utf-8")
+    current["values"]["commands"] = {
+        "paths": ["good.md", "incomplete.md", "missing-*.md"]
+    }
+    current["values"]["hooks"] = ["bad_hook.py"]
+    saved = await _save(http, current)
+    assert saved["written"] is True
+    assert {effect["path"]: effect["status"] for effect in saved["effects"]} == {
+        "hooks[0]": "failed",
+        "commands.paths[0]": "applied",
+        "commands.paths[1]": "failed",
+        "commands.paths[2]": "applied",
+    }
+    commands = await http.request("GET", "/api/commands")
+    assert [
+        command["name"]
+        for command in commands["commands"]
+        if command["name"].startswith("probe-")
+    ] == ["probe-good"]
+    retry = await _save(http, await _get(http))
+    assert retry["effects"] == []
+    details = {step["name"]: step["detail"] for step in retry["reload"]["results"]}
+    assert "hooks[0]" in details["hooks"]
+    assert "commands.paths[1]" in details["prompt commands"]
+
+
+@pytest.mark.asyncio
+async def test_quoted_port_uses_the_validated_boot_value(
+    probe: Probe, tmp_path: Path
+) -> None:
+    home = tmp_path / "quoted-port"
+    (home / "core").mkdir(parents=True)
+    port = reserve_port()
+    raw = yaml.safe_load(probe.env.config_path.read_bytes())
+    raw["gateway"]["port"] = str(port)
+    config = home / "core" / "config.yaml"
+    config.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    home_env = {
+        **os.environ,
+        "WING_HOME": str(home),
+        "WING_SESSIONS_PATH": str(home / "sessions"),
+    }
+    url = f"http://127.0.0.1:{port}"
+    http = DriverHttp(url)
+    log = home / "gateway.log"
+    with log.open("wb") as output:
+        process = subprocess.Popen(
+            [str(resolve_gateway_bin())],
+            cwd=home,
+            env=home_env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+        )
+        try:
+            await wait_for_health(
+                f"{url}/api/health", timeout=10.0, process=process, log_path=log
+            )
+            current = await _get(http)
+            assert current["config_path"] == str(config)
+            assert current["values"]["gateway"]["port"] == str(port)
+            assert current["effective"]["values"]["gateway"]["port"] == port
+            assert current["pending_restart"] == []
+            current["values"]["gateway"]["port"] = reserve_port()
+            assert current["values"]["gateway"]["port"] != port
+            assert (await _save(http, current))["pending_restart"] == ["gateway.port"]
+            current = await _get(http)
+            current["values"]["gateway"]["port"] = port
+            assert (await _save(http, current))["pending_restart"] == []
+        finally:
+            await http.close()
+            if process.poll() is None:
+                process.terminate()
+            try:
+                await asyncio.to_thread(process.wait, 5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                await asyncio.to_thread(process.wait, 5)

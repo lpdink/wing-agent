@@ -11,11 +11,11 @@
 from pathlib import Path
 
 
-def load_hooks(hooks_patterns: list[str]) -> None:
+def load_hooks(hooks_patterns: list[str]) -> set[int]:
     """Load hook files from glob patterns.
 
     Each matched .py file is imported; hook registration happens
-    via the ``hooks.on()`` decorator during import.
+    via the ``hooks.on()`` decorator during import. Return failed glob indices.
     """
     import glob
     import importlib
@@ -23,7 +23,8 @@ def load_hooks(hooks_patterns: list[str]) -> None:
 
     from wing.common.logger import log
 
-    for pattern in hooks_patterns:
+    failed: set[int] = set()
+    for index, pattern in enumerate(hooks_patterns):
         expanded = Path(pattern).expanduser()
         matched_files = sorted(glob.glob(str(expanded)))
         if not matched_files:
@@ -42,10 +43,13 @@ def load_hooks(hooks_patterns: list[str]) -> None:
                     module_name, str(file_path)
                 )
                 if spec is None or spec.loader is None:
+                    failed.add(index)
                     log.warning(f"Cannot create import spec for hook file: {file_path}")
                     continue
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
                 log.info(f"Loaded hook file: {file_path}")
             except Exception as e:
+                failed.add(index)
                 log.warning(f"Failed to load hook file {file_path}: {e}")
+    return failed

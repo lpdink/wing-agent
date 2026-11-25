@@ -442,3 +442,40 @@ async def test_empty_config_exposes_defaults_and_accepts_initial_setup(
         assert (await http.request("GET", "/api/settings/status"))["valid"] is True
     finally:
         await http.close()
+
+
+@pytest.mark.probe_env(connect=False, config_text="")
+@pytest.mark.asyncio
+async def test_setup_does_not_claim_a_lazy_provider_was_applied(probe: Probe) -> None:
+    http = DriverHttp(probe.env.gateway_url, started_at=probe.env.started_at)
+    try:
+        document = _fixed_document(probe)
+        document["providers"][0]["base_url"] = "http://127.0.0.1:invalid/v1"
+        saved = await http.request(
+            "POST", "/api/settings/set", body={"document": document}
+        )
+        assert saved["written"] is saved["setup_mode_exited"] is True
+        assert next(
+            effect
+            for effect in saved["effects"]
+            if effect["path"] == "providers[0].base_url"
+        ) == {
+            "path": "providers[0].base_url",
+            "scope": "hot",
+            "status": "unknown",
+            "steps": ["config.yaml", "runtime"],
+        }
+        current = await http.request("GET", "/api/settings/get")
+        retry = await http.request(
+            "POST",
+            "/api/settings/set",
+            body={"base": current["fingerprint"], "document": current["values"]},
+        )
+        assert retry["fingerprint"] == saved["fingerprint"]
+        assert retry["written"] is True
+        assert retry["effects"] == []
+        assert [
+            step["name"] for step in retry["reload"]["results"] if not step["ok"]
+        ] == ["provider"]
+    finally:
+        await http.close()

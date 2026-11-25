@@ -83,3 +83,29 @@ async def test_concurrent_writes_and_external_edits_report_paths(probe: Probe) -
         yaml.safe_load(path.read_bytes())["providers"][0]["api_key"]
         == "private-external-probe-8cfe"
     )
+
+
+@pytest.mark.probe_env(provider_extra={"extra_body": {1: "integer key", "value": 0.0}})
+@pytest.mark.asyncio
+async def test_conflict_respects_mapping_keys_and_leaf_equality(probe: Probe) -> None:
+    http = probe.driver_required.http
+    path = probe.env.config_path
+    current = await http.request("GET", "/api/settings/get")
+    disk = yaml.safe_load(path.read_bytes())
+    body = disk["providers"][0]["extra_body"]
+    assert body == {1: "integer key", "value": 0.0}
+
+    disk["providers"][0]["extra_body"] = {"value": -0.0, 1: "integer key"}
+    path.write_text(yaml.safe_dump(disk, sort_keys=False), encoding="utf-8")
+    with pytest.raises(DriverHttpError) as reordered:
+        await _save(http, current["fingerprint"], current["values"])
+    assert reordered.value.call.response["conflict"]["changed_paths"] == []
+
+    current = await http.request("GET", "/api/settings/get")
+    disk["providers"][0]["extra_body"] = {"value": -0.0, "1": "integer key"}
+    path.write_text(yaml.safe_dump(disk, sort_keys=False), encoding="utf-8")
+    with pytest.raises(DriverHttpError) as key_type_changed:
+        await _save(http, current["fingerprint"], current["values"])
+    assert key_type_changed.value.call.response["conflict"]["changed_paths"] == [
+        "providers[0].extra_body"
+    ]

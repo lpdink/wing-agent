@@ -121,7 +121,8 @@ async def list_agents(request: Request) -> AgentsResponse:
 async def reload_system(request: Request) -> ReloadResponse:
     """热重载 config.yaml、hooks、prompt commands、OpenAI provider、skills & rules、log level。"""
     server = get_server(request)
-    return build_reload_response(await server.runtime.reload_system())
+    async with server.settings_lock:
+        return build_reload_response(await server.runtime.reload_system())
 
 
 @router.post(

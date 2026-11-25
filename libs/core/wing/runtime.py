@@ -70,7 +70,7 @@ from wing.request_context import (
     set_request_context,
 )
 from collections.abc import Collection, Iterable, Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 from wing.schema import MediaRef
 from wing.session import (
     Session,
@@ -166,6 +166,19 @@ class SettingsConflictError(RuntimeError):
         self.document = document
 
 
+SettingEffectStatus = Literal[
+    "applied", "next_session", "restart_required", "failed", "unknown", "readonly"
+]
+
+
+@dataclass(frozen=True)
+class SettingsFieldEffect:
+    path: str
+    scope: ApplyScope | None
+    status: SettingEffectStatus
+    steps: list[str]
+
+
 @dataclass
 class SettingsApplyResult:
     """``apply_settings`` 的回执（领域形状；wire 投影见 ``gateway/projection.py``）。
@@ -190,6 +203,69 @@ class SettingsApplyResult:
     """非致命的告知：如「原配置文件无法解析，其中的密钥无法保留」、
     「密钥被丢弃」/「密钥按位置保留」。
     与 ``problems`` 的区别：problems 让保存失败（``ok=False``），warnings 只是提醒。"""
+
+    def field_effects(
+        self, pending: list[str] | None, *, setup: bool
+    ) -> list[SettingsFieldEffect]:
+        reload = self.reload
+        if reload is None:
+            return []
+        by_step = {item.name: item.ok for item in reload.items}
+        effects = []
+        for path, scope in self.change_scopes.items():
+            steps: list[str] = []
+            status: SettingEffectStatus
+            if scope is None:
+                status = "unknown"
+            elif scope is ApplyScope.READONLY:
+                status = "readonly"
+            elif scope is ApplyScope.RESTART:
+                if pending is None:
+                    status = "unknown"
+                else:
+                    status = "restart_required" if path in pending else "applied"
+            else:
+                required = _settings_steps(path, scope, setup=setup)
+                steps = [step for step in required if step in by_step]
+                if path in reload.failed_settings or any(
+                    not by_step[step] for step in steps
+                ):
+                    status = "failed"
+                elif len(steps) != len(required) or (
+                    setup
+                    and (
+                        not self.setup_mode_exited
+                        or (path.startswith("providers[") and scope is ApplyScope.HOT)
+                    )
+                ):
+                    status = "unknown"
+                else:
+                    status = (
+                        "next_session"
+                        if scope is ApplyScope.NEXT_SESSION
+                        else "applied"
+                    )
+            effects.append(SettingsFieldEffect(path, scope, status, steps))
+        return effects
+
+
+def _settings_steps(path: str, scope: ApplyScope, *, setup: bool) -> list[str]:
+    root = path.split(".", 1)[0].split("[", 1)[0]
+    if scope is ApplyScope.NEXT_SESSION:
+        return ["config.yaml", "runtime"] if setup else ["config.yaml"]
+    if root == "providers":
+        step = "runtime" if setup else "provider"
+    elif root == "hooks":
+        step = "runtime" if setup else "hooks"
+    elif root == "commands":
+        step = "prompt commands"
+    elif root == "log":
+        step = "log level"
+    elif setup:
+        step = "auth" if path.startswith("gateway.auth.") else "runtime"
+    else:
+        return ["config.yaml"]
+    return ["config.yaml", step]
 
 
 @dataclass
@@ -283,7 +359,7 @@ class WingRuntime:
 
         install_audit()
 
-        load_hooks(get_config().hooks)
+        self.failed_hook_patterns = load_hooks(get_config().hooks)
         # TODO(future): config 驱动的 backend 选择（sessions.backend / dsn）——
         # SQL 后端（SQLite/PG/Supabase）到来时的扩展点。
         stores: dict[str, SessionStore] = {
@@ -979,7 +1055,16 @@ class WingRuntime:
 
         # ④ 校验（字段级 + 跨字段）：有 problem 就到此为止——全有或全无。
         config, problems = validate_document(incoming, catalog)
-        if problems:
+        if config is not None:
+            # Use the exact committed bytes for the fingerprint, reload and receipt.
+            encoded = emit_config_yaml(
+                incoming.data, catalog, extra=current_doc.extra
+            ).encode()
+            new_doc, new_fp = parse_document(encoded, catalog)
+            disk_config, problems = validate_document(new_doc, catalog)
+        else:
+            disk_config = None
+        if disk_config is None:
             return SettingsApplyResult(
                 ok=False,
                 fingerprint=current_fp.value,
@@ -989,12 +1074,6 @@ class WingRuntime:
                 else None,
                 warnings=warnings,
             )
-
-        # Fingerprint and history describe the exact bytes this request commits.
-        encoded = emit_config_yaml(
-            incoming.data, catalog, extra=current_doc.extra
-        ).encode()
-        new_doc, new_fp = parse_document(encoded, catalog)
 
         # ⑤ 备份（存在才备份；覆盖式：只留最近一份）。原子写（不是 copyfile）：
         # 进程在拷贝中途被杀不会留下截断的 .bak；字节级复制，
@@ -1014,7 +1093,7 @@ class WingRuntime:
         effect = await self.post_write_effect()
 
         # ⑧ 差异 → changed / restart_required（只读叶子路径的 apply）。
-        scopes = setting_changes(current_doc, incoming, catalog)
+        scopes = setting_changes(current_doc, new_doc, catalog)
         changed = list(scopes)
         restart = restart_required_paths(changed, catalog)
 
@@ -1043,7 +1122,7 @@ class WingRuntime:
             backup_path=backup_path,
             change_scopes=scopes,
             saved_document=new_doc,
-            disk_config=config,
+            disk_config=disk_config,
             warnings=warnings,
         )
 
