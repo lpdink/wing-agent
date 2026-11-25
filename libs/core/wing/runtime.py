@@ -802,10 +802,11 @@ class WingRuntime:
         yolo: bool | None = None,
         workspace: str | None = None,
         tools: list[str] | None = None,
+        validate_reasoning: bool = False,
     ) -> None:
         """统一更新 session 状态。
 
-        委托给 Session.update_state()，计算 event 字段后发射事件。
+        委托给 Session，更新成功后广播变更。
 
         Args:
             model_id: 切换模型（引用 providers[].models 的 id；未命中 ValueError）
@@ -816,26 +817,34 @@ class WingRuntime:
                 工具引用无法解析
         """
         session = self._require_session(session_id)
-
-        template = None
-        if agent is not None:
-            template = self.template_manager.get(agent)
-            if template is None:
-                available = self.template_manager.all_names
-                raise LookupError(
-                    f"template '{agent}' not found, available: {available}"
+        if validate_reasoning:
+            if any(
+                v is not None for v in (model_id, agent, title, yolo, workspace, tools)
+            ):
+                raise ValueError(
+                    "validated reasoning updates only accept thinking and reasoning_effort"
                 )
+            session.update_reasoning(thinking, reasoning_effort, validate=True)
+        else:
+            template = None
+            if agent is not None:
+                template = self.template_manager.get(agent)
+                if template is None:
+                    available = self.template_manager.all_names
+                    raise LookupError(
+                        f"template '{agent}' not found, available: {available}"
+                    )
 
-        await session.update_state(
-            model_id=model_id,
-            template=template,
-            title=title,
-            thinking=thinking,
-            reasoning_effort=reasoning_effort,
-            yolo=yolo,
-            workspace=workspace,
-            tools=tools,
-        )
+            await session.update_state(
+                model_id=model_id,
+                template=template,
+                title=title,
+                thinking=thinking,
+                reasoning_effort=reasoning_effort,
+                yolo=yolo,
+                workspace=workspace,
+                tools=tools,
+            )
 
         # 计算 event 字段——agent 切换会重置 thinking/reasoning_effort/yolo
         agent_switched = agent is not None

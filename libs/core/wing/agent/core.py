@@ -46,6 +46,7 @@ from .tool_executor import ToolExecutor, _current_tool_call_id
 if TYPE_CHECKING:
     from wing.event import PendingUserMessage
     from wing.media import MediaAccess
+    from wing.provider.base import ReasoningSupport
 
 
 # ── 打断收口阶梯 ──
@@ -441,6 +442,14 @@ class WingAgent:
         if self._thinking is not None:
             return self._thinking
         return self.model_provider.thinking
+
+    def reasoning_controls(self) -> tuple[ReasoningSupport, bool | None, str | None]:
+        provider = self.model_provider
+        return (
+            provider.reasoning_support(self.model),
+            provider.request_thinking(self._thinking),
+            provider.request_reasoning_effort(self._reasoning_effort),
+        )
 
     def request_options(self) -> RequestOptions:
         """本次模型调用的会话级参数（provider 无状态化的唯一注入点）。

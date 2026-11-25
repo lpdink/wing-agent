@@ -17,10 +17,11 @@ import httpx
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
-from wing.config import get_headers
+from wing.config import get_headers, resolve_model_capabilities
 from wing.provider.base import (
     ModelProvider,
     PendingToolView,
+    ReasoningSupport,
     RequestOptions,
     StreamAccumulator,
     parse_tool_args,
@@ -185,7 +186,30 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         请求会带什么」的口径（会话侧生效值 = 覆盖 ?? 基线，见
         `WingAgent.thinking`）。
         """
-        return bool(self._extra_body.get("enable_thinking", True))
+        return bool(self._request_thinking(None))
+
+    def reasoning_support(self, model: str) -> ReasoningSupport:
+        capabilities = resolve_model_capabilities(self.config, model)
+        effort = capabilities.reasoning_effort
+        return ReasoningSupport(
+            thinking=capabilities.thinking,
+            effort=tuple(dict.fromkeys(effort)) if effort is not None else None,
+        )
+
+    def _request_thinking(self, override: bool | None) -> object:
+        return self._extra_body["enable_thinking"] if override is None else override
+
+    def request_thinking(self, override: bool | None) -> bool | None:
+        thinking = self._request_thinking(override)
+        return thinking if isinstance(thinking, bool) else None
+
+    def _request_effort(self, override: str | None) -> object:
+        effort = self.config.reasoning_effort if override is None else override
+        return effort or self._extra_body.get("reasoning_effort")
+
+    def request_reasoning_effort(self, override: str | None) -> str | None:
+        effort = self._request_effort(override)
+        return effort if isinstance(effort, str) else None
 
     # ─── Request Building ─────────────────────────────────────────
 
@@ -230,20 +254,13 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         if stream:
             body["stream_options"] = {"include_usage": True}
 
-        # 会话级 thinking 覆盖：只改 per-request 视图，绝不写穿共享 extra_body。
-        extra_body = self._extra_body
-        if options.thinking is not None:
-            extra_body = {**self._extra_body, "enable_thinking": options.thinking}
-        for k, v in extra_body.items():
+        for k, v in self._extra_body.items():
             if k not in body:
                 body[k] = v
+        body["enable_thinking"] = self._request_thinking(options.thinking)
 
-        effort = (
-            options.reasoning_effort
-            if options.reasoning_effort is not None
-            else self._config.reasoning_effort
-        )
-        if effort:
+        effort = self._request_effort(options.reasoning_effort)
+        if effort is not None:
             body["reasoning_effort"] = effort
 
         # prompt_cache_key（显式缓存模式）：key 来自调用方注入的会话 id

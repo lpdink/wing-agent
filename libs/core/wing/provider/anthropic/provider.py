@@ -23,6 +23,7 @@ import httpx
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
+from wing.config import resolve_model_capabilities
 from wing.provider.anthropic.serialize import _SerializeMixin
 from wing.provider.anthropic.stream import (
     _StreamMixin,
@@ -32,6 +33,7 @@ from wing.provider.anthropic.stream import (
 from wing.provider.base import (
     ModelProvider,
     PendingToolView,
+    ReasoningSupport,
     RequestOptions,
     StreamAccumulator,
     pending_views,
@@ -173,30 +175,53 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         """
         return self._thinking_enabled(self._extra_body)
 
+    def reasoning_support(self, model: str) -> ReasoningSupport:
+        thinking = self._thinking_override_view(self._extra_body, True)["thinking"]
+        budget = thinking["budget_tokens"]
+        if self._thinking_type(self._extra_body) not in (
+            None,
+            "enabled",
+            "disabled",
+        ) or (
+            not isinstance(budget, int) or not 1024 <= budget < self.config.max_tokens
+        ):
+            return ReasoningSupport()
+        capabilities = resolve_model_capabilities(self.config, model)
+        return ReasoningSupport(thinking=capabilities.thinking)
+
+    def request_thinking(self, override: bool | None) -> bool | None:
+        if override is not None:
+            return override
+        if "thinking" not in self._extra_body:
+            return False
+        mode = self._thinking_type(self._extra_body)
+        if mode in ("enabled", "adaptive"):
+            return True
+        return False if mode == "disabled" else None
+
+    @staticmethod
+    def _thinking_type(extra_body: dict) -> object:
+        thinking = extra_body.get("thinking")
+        return thinking.get("type") if isinstance(thinking, dict) else None
+
     @staticmethod
     def _thinking_enabled(extra_body: dict) -> bool:
         """extra_body 是否启用 thinking（Anthropic 官方开关：thinking.type=enabled）。"""
-        tb = extra_body.get("thinking")
-        return isinstance(tb, dict) and tb.get("type") == "enabled"
+        return AnthropicProvider._thinking_type(extra_body) == "enabled"
 
     @staticmethod
     def _thinking_override_view(extra_body: dict, override: bool) -> dict:
         """会话级 thinking 覆盖的 per-request extra_body 视图（不改共享状态）。
 
-        启用时缺 budget_tokens 则补默认预算（Anthropic 要求 type=enabled 必带
-        budget）；关闭只改 type、保留 budget——序列化时按 Anthropic 校验剥离
-        （disabled 不得携带 budget），再启用时用户原预算原样恢复。
+        启用读取原有预算和显示设置，关闭对象只携带 type。
         """
-        view = dict(extra_body)
-        tb = view.get("thinking")
-        tb = dict(tb) if isinstance(tb, dict) else {}
-        if override:
-            tb["type"] = "enabled"
-            tb.setdefault("budget_tokens", _DEFAULT_THINKING_BUDGET)
-        else:
-            tb["type"] = "disabled"
-        view["thinking"] = tb
-        return view
+        if not override:
+            return {**extra_body, "thinking": {"type": "disabled"}}
+        configured = extra_body.get("thinking")
+        thinking = dict(configured) if isinstance(configured, dict) else {}
+        thinking["type"] = "enabled"
+        thinking.setdefault("budget_tokens", _DEFAULT_THINKING_BUDGET)
+        return {**extra_body, "thinking": thinking}
 
     # ─── Request Building ─────────────────────────────────────────
 

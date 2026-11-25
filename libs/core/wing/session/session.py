@@ -924,8 +924,8 @@ class Session:
         """会话是否已物化（第一条用户消息之后为真；既有会话构造时即为真）。"""
         return self._materialized
 
-    def _save_metadata(self) -> None:
-        """将当前 metadata 模型保存到 store（摘除 / 未物化时是 no-op）。"""
+    def _save_metadata(self, metadata: SessionMetadata | None = None) -> None:
+        """保存 metadata 快照（摘除 / 未物化时是 no-op）。"""
         if self._detached:
             log.warning(
                 f"Session {self._session_id}: metadata write skipped (detached)"
@@ -933,7 +933,9 @@ class Session:
             return
         if not self._materialized:
             return
-        self._store.save_metadata(self._session_id, self._metadata)
+        self._store.save_metadata(
+            self._session_id, self._metadata if metadata is None else metadata
+        )
 
     def set_title(self, title: str) -> None:
         """设置 session 标题（草稿上只改内存，随首条消息落盘）。
@@ -967,6 +969,53 @@ class Session:
             self._metadata.tag_meta = mutation.tag_meta or None
             self._save_metadata()
         return mutation
+
+    def _validate_reasoning_update(
+        self, thinking: bool | None, reasoning_effort: str | None
+    ) -> None:
+        support = self.agent.model_provider.reasoning_support(self.agent.model)
+        if thinking is not None and support.thinking is not True:
+            raise ValueError("thinking control is unavailable for the current model")
+        if reasoning_effort is not None and reasoning_effort not in (
+            support.effort or ()
+        ):
+            raise ValueError(
+                "reasoning_effort is unavailable for the current model"
+                if not support.effort
+                else "reasoning_effort must be one of: " + ", ".join(support.effort)
+            )
+
+    def update_reasoning(
+        self,
+        thinking: bool | None,
+        reasoning_effort: str | None,
+        *,
+        validate: bool = False,
+    ) -> None:
+        """严格编辑先持久化整批设置，再更新 live 状态。"""
+        overrides = {
+            key: value
+            for key, value in (
+                ("thinking", thinking),
+                ("reasoning_effort", reasoning_effort),
+            )
+            if value is not None
+        }
+        if not overrides:
+            return
+        if validate:
+            self._validate_reasoning_update(thinking, reasoning_effort)
+            metadata = self._metadata.model_copy(update=overrides)
+            self._save_metadata(metadata)
+            self._metadata = metadata
+
+        if thinking is not None:
+            self.agent.set_thinking(thinking)
+        if reasoning_effort is not None:
+            self.agent.set_reasoning_effort(reasoning_effort)
+
+        if not validate:
+            self._record_state(**overrides)
 
     async def update_state(
         self,
@@ -1025,13 +1074,7 @@ class Session:
         if title is not None:
             self.set_title(title)
 
-        if thinking is not None:
-            self.agent.set_thinking(thinking)
-            self._record_state(thinking=thinking)
-
-        if reasoning_effort is not None:
-            self.agent.set_reasoning_effort(reasoning_effort)
-            self._record_state(reasoning_effort=reasoning_effort)
+        self.update_reasoning(thinking, reasoning_effort)
 
         if yolo is not None:
             self.agent.set_yolo(yolo)

@@ -49,6 +49,20 @@ Gateway 是一个 FastAPI 服务。**HTTP 负责生命周期 / 查询 / 状态�
 | POST | `/api/session/archive` | **设置会话的归档状态**（幂等）。body `{session_id, archived?}`：`archived` 缺省 `true` = 归档（会话目录移入 `<sessions root>/.archive/`）；`false` = 恢复（移回 live 区）。响应 `{ok, session_id, archived, changed, detail}`——`archived` 是操作后的状态、`changed` 说明本次是否真的移动（`detail` ∈ `archived` / `already archived` / `restored` / `not archived` / `nothing to archive`——最后一档 = 内存中的空会话，从未落盘、没有可移动的东西）。**归档是纯移动**（不改任何字节）；**恢复会刷新会话的 `last_interaction`**——恢复是显式兴趣信号，否则自动 sweep 会按旧年龄在下一轮立刻把它收回去（resume 刻意**不写** metadata——「空转 resume 零写盘」是既有不变量——所以「刚打开的旧会话」由 sweep 的「内存中的会话不动」规则保护）。钉住条件同 release（忙碌 / 排队输入 / 被订阅 / 非归档后端（memory）以 409 拒绝）；空闲可收回的会话先逐出再移动。未知 id 404（归档区未命中即普通 `not_found`） |
 | GET | `/api/session/archive` | 列出归档区条目（**读网关侧索引** `.archive/index.json`，不扫会话目录；索引缺失 / 损坏时按目录重建，`archived_at` 为 null）。条目 = 归档时刻事实快照（`id` / `name`（标题回退同 ps）/ `workspace` / `template_name` / `last_interaction` / `archived_at` / `tags`）+ 投影期补全的模型四件套（与 `/api/session/list` 同一读法）。按最后交互时间降序。`wing archive --list` 对应的端点 |
 
+
+`GET /api/session/info` 的 `template_name` 是当前 Agent 模板。`reasoning` 对象提供当前模型的请求值和可编辑选项：
+
+| 字段 | 含义 |
+|------|------|
+| `thinking` | 当前请求使用的 thinking 设置。Anthropic 的 adaptive 模式视为开启，非标准透传值显示为 `null` |
+| `thinking_supported` | `true` 可编辑，`false` 不支持此开关，`null` 表示模型能力未知 |
+| `effort` | OpenAI 兼容请求实际发送的会话 `reasoning_effort` 字符串，包括 provider 默认及 `extra_body` 回落。无字符串值时为 `null` |
+| `effort_options` | 有序可编辑档位。`[]` 表示不支持，`null` 表示能力未知。既有覆盖或透传配置的值可以在列表之外 |
+
+在模型对象的 `capabilities` 中声明 `thinking: true` 和 `reasoning_effort: [low, high]`，以该模型实际接受的请求字段和档位为准。可用档位为 `low`、`medium`、`high`、`xhigh`、`max`。Anthropic 协议在网关内支持传统 thinking 开关与预算，adaptive 或无有效预算时禁止通过此控件切换。现有 Anthropic 序列化没有会话力度映射，`effort_options` 恒为 `[]`。
+
+新客户端确认 `reasoning` 存在后，可在 `POST /api/session/update` 发送 `validate_reasoning: true` 和 `thinking`、`reasoning_effort` 中至少一项。该模式仅接收这两项更新，未知的请求字段、不可用的控件及未声明的力度返回 400。已物化的会话把本次设置一起持久化，写盘失败返回 500 并保留此前状态。草稿仍随物化落盘。旧请求沿用已有覆盖语义和顶层状态字段。成功回执仍为 `{"ok":true}`。收到 `session_state_changed` 或模型配置热重载后，可按原会话 ID 重读 `info`。切换模型保留显式覆盖，切换 Agent 模板重置模型、工具、thinking、effort、yolo、基础提示词和轮次限额，保留会话、历史、追加提示词与工作区。
+
 > **会话逐出（eviction）**：空闲会话（无 turn 在跑、inbox 无待处理输入、无人订阅、
 > 非 memory 后端，且超过 `sessions.eviction.idle_ttl_seconds`）会被后台周期任务逐出内存——
 > 只回收 worker 与 provider client，`history.jsonl` / `metadata.json` 一概不动。

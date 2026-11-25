@@ -29,6 +29,7 @@ from wing.gateway.protocol import (
     ReloadResultItem,
     SecretState as SecretStateProto,
     SessionInfoResponse,
+    SessionReasoningInfo,
     SettingChoice,
     SettingGroupProto,
     SettingNodeProto,
@@ -46,6 +47,7 @@ from wing.wake import WakeTrigger
 def build_session_info(session: Session) -> SessionInfoResponse:
     """GET /api/session/info 响应——session 运行时状态快照。"""
     status = session.agent.get_status()
+    support, thinking, effort = session.agent.reasoning_controls()
     cm = session.agent.context_manager
     return SessionInfoResponse(
         model=status["model"],
@@ -58,7 +60,14 @@ def build_session_info(session: Session) -> SessionInfoResponse:
         context_window_tokens=status["context_window_tokens"],
         thinking=status["thinking"],
         reasoning_effort=status["reasoning_effort"],
+        reasoning=SessionReasoningInfo(
+            thinking=thinking,
+            thinking_supported=support.thinking,
+            effort=effort,
+            effort_options=list(support.effort) if support.effort is not None else None,
+        ),
         yolo=session.agent.yolo,
+        template_name=session.template_name,
         session_name=session.session_name,
         workdir=session.session_workspace,
         parent_session_id=session.parent_session_id,
