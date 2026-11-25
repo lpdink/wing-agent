@@ -30,7 +30,7 @@ from wing.config import get_config, get_wing_home
 from wing.event import ToolExecution, ToolExecutionTiming
 from wing.hooks import hooks
 from wing.schema import MediaRef, Message, Tool, ToolCall, ToolError, ToolOutput
-from wing.schema.message import ToolResultStatus
+from wing.schema.message import AskOutcome, ToolResultStatus
 
 from .event_sink import AgentEventSink
 from .tool_context import _tool_execution_measurement
@@ -286,8 +286,8 @@ class ToolExecutor:
     ) -> Message:
         """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。
 
-        工具可返回 ``str``（存量，零改动）或 ``ToolOutput``（文本 + 媒体
-        引用）。``after_tool_call`` hook 只接收/改写文本，media 原样透传。
+        ``ToolOutput`` 的媒体引用和 Ask 结算随工具消息保存。
+        ``after_tool_call`` hook 只接收/改写结果文本。
         每个终态都把实测时长（毫秒）交给 tool_finished——会话用量账本据此
         累计工具总时长；**没有真正执行**的两条短路（参数非法 / 未知工具）
         交 ``duration_ms=None``（账本按「不是一次执行」处理），中断合成的
@@ -303,6 +303,7 @@ class ToolExecutor:
             *,
             status: ToolResultStatus,
             media: list[MediaRef] | None = None,
+            ask_outcome: AskOutcome | None = None,
             executed: bool = True,
         ) -> Message:
             measured_at = datetime.now(UTC)
@@ -313,6 +314,7 @@ class ToolExecutor:
                 content=_maybe_truncate(content),
                 media=media or None,
                 tool_status=status,
+                ask_outcome=ask_outcome,
                 duration_ms=duration_ms,
                 message_at=measured_at,
                 tool_args=_executed_args(tc, executions),
@@ -393,11 +395,13 @@ class ToolExecutor:
             if isinstance(result, ToolOutput):
                 content = result.content
                 media = list(result.media)
+                ask_outcome = result.ask_outcome
             else:
                 content = str(result)
                 media = []
+                ask_outcome = None
 
-            # hook 只见文本——media 是引用元数据，hook 无权改写
+            # 结果 hook 只改写正文，媒体和 Ask 结算随原结果保存。
             modified_result = await hooks.invoke_async(
                 "after_tool_call",
                 content,
@@ -412,7 +416,7 @@ class ToolExecutor:
             return finish(str(e), status="error")
         except Exception as e:
             return finish(f"Error executing tool '{tc.name}': {e}", status="error")
-        return finish(content, status="success", media=media)
+        return finish(content, status="success", media=media, ask_outcome=ask_outcome)
 
 
 def _maybe_truncate(result: str) -> str:

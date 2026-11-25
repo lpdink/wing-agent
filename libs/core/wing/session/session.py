@@ -92,6 +92,7 @@ def serialize_message(msg: Message) -> dict:
         "model_display_name",
         "stop_reason",
         "tool_status",
+        "ask_outcome",
         "duration_ms",
         "tool_args",
     ):

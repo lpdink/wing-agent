@@ -334,6 +334,8 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 `tool_call` 保留模型调用参数。`tool_execution_started` 在实参确定后、工具函数调用前发送 `tool_call_id` 和 `tool_name`。`tool_executions` 按调用 ID 提供在途执行，每项含 `tool_name`。签名过滤或 hook 改写导致实参有变化时，两个投影均附完整的 `tool_args` 覆盖值。字段缺失时继续使用该调用的模型参数。显式 `{}` 表示过滤后无实参。
 
+内置 `AskUserQuestion` 接受定向反馈后，`tool_call_result`、已提交工具 Message 和 `uncommitted_tool_results` 使用同一可选 `ask_outcome`。`answered` 表示接受普通答复，`cancelled` 表示接受取消哨兵 `__wing_ask_cancelled__`。两种结算的 `tool_status` 都是 `success`，`after_tool_call` 仍可改写正文。会话停止由 `tool_status: "interrupted"` 表达。旧记录、普通工具、远程同名工具及未结算的提问可省略 `ask_outcome`。消费方按会话与 `tool_call_id` 对账，历史缺值按未知处理。
+
 收到 `tool_call_result` 后由结果接管实际参数，取消也保留已经开始执行的目标。工具 Message 和 `uncommitted_tool_results` 延续相同的可选覆盖值。`tool_call_result.tool_args` 保持对既有客户端的完整参数对象契约。
 
 直播的 `turn_result`（`subtype: "error_max_turns"`）收口轮次。历史用 `history_notice` 展示同一事实，复用 `uuid`、`subtype`、`errors`、`after_message_id`。手动压缩的直播 `compact_done.summary` 是新的摘要 Message。支持该字段的客户端将活跃消息替换成摘要并应用本条通知。历史快照的 `messages` 已含摘要，快照内 `compact_done` 只提供通知。
