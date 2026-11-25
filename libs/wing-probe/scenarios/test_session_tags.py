@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import pytest
+from _session_helpers import evict
 
 from wing_probe import Probe, Session, Turn
 from wing_probe.driver import DriverHttpError
@@ -55,16 +56,6 @@ async def _list_entry(probe: Probe, session_id: str) -> dict:
     entries = {e["id"]: e for e in payload.get("sessions", [])}
     assert session_id in entries, sorted(entries)
     return entries[session_id]
-
-
-async def _evict(probe: Probe, session_id: str) -> None:
-    """逐出：断开订阅 → release（与 test_session_persistence 同款两步）。"""
-    driver = probe.driver_required
-    await driver.http.unsubscribe(session_id, driver.client_id)
-    payload = await driver.http.request(
-        "POST", "/api/session/release", body={"session_id": session_id}
-    )
-    assert payload == {"ok": True, "released": True, "detail": "released"}, payload
 
 
 @pytest.mark.probe_env(models=[TAG_MODEL])
@@ -127,7 +118,7 @@ async def test_evicted_session_can_be_tagged_without_waking(probe: Probe) -> Non
     sid = session.session_id
     await session.chat(HELLO)
 
-    await _evict(probe, sid)
+    await evict(probe, sid)
     entry = await _list_entry(probe, sid)
     assert entry["status"] == "inactive", entry
     assert entry["tags"] == [], entry

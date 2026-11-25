@@ -21,6 +21,7 @@ from _fake_provider import (
 )
 from aiohttp import web
 
+from wing_probe.provider import server as provider_server
 from wing_probe.provider.script import Script, ToolCall, Turn, Usage
 from wing_probe.provider.server import FakeProvider, FrameEmit
 from wing_probe.provider.sse import FRAME_KINDS, SSEFrame, stream_frames
@@ -275,6 +276,169 @@ async def test_concurrent_requests_keep_their_own_frames() -> None:
                 e.frame_index for e in provider.frame_emits if e.request_index == index
             ]
             assert own == list(range(len(own)))
+
+
+@pytest.mark.asyncio
+async def test_first_content_gate_only_holds_one_request() -> None:
+    async with running_provider() as provider:
+        provider.register(MODEL, Script(Turn.of(text="first"), Turn.of(text="second")))
+        async with httpx.AsyncClient(
+            base_url=provider.base_url, timeout=5, trust_env=False
+        ) as client:
+            with pytest.raises(RuntimeError, match="observation failed"):
+                with provider.hold_first_content(MODEL) as reached:
+                    first = await client.send(
+                        client.build_request(
+                            "POST", "/chat/completions", json=request_body(MODEL)
+                        ),
+                        stream=True,
+                    )
+                    assert first.status_code == 200
+                    lines = first.aiter_lines()
+                    role = json.loads((await anext(lines)).removeprefix("data: "))
+                    assert role["choices"][0]["delta"] == {
+                        "role": "assistant",
+                        "content": "",
+                    }
+                    await asyncio.wait_for(reached.wait(), timeout=5)
+                    second = await sse_payload_lines(provider)
+                    assert json.loads(second[1])["choices"][0]["delta"] == {
+                        "content": "second"
+                    }
+                    assert len(provider.emits_for(0)) == 1
+                    raise RuntimeError("observation failed")
+
+            try:
+                remainder = [line async for line in lines if line.startswith("data: ")]
+                assert json.loads(remainder[0].removeprefix("data: "))["choices"][0][
+                    "delta"
+                ] == {"content": "first"}
+                assert remainder[-1] == DONE_LINE
+                assert len(provider.emits_for(0)) == len(provider.emits_for(1)) == 4
+            finally:
+                await first.aclose()
+
+
+@pytest.mark.asyncio
+async def test_only_requests_with_text_claim_the_pending_gate() -> None:
+    async with running_provider() as provider:
+        provider.register(
+            MODEL,
+            Script(
+                Turn.of(text=""),
+                Turn.of(tool_calls=[ToolCall("Bash", {"command": "ls"})]),
+                Turn.of(text="held"),
+            ),
+        )
+        async with (
+            httpx.AsyncClient(
+                base_url=provider.base_url, timeout=5, trust_env=False
+            ) as client,
+            asyncio.TaskGroup() as tasks,
+        ):
+            with provider.hold_first_content(MODEL) as reached:
+                with pytest.raises(ValueError, match="first content already held"):
+                    with provider.hold_first_content(MODEL):
+                        pytest.fail("a second pending gate was accepted")
+
+                for _ in range(2):
+                    ungated = await client.post(
+                        "/chat/completions", json=request_body(MODEL)
+                    )
+                    assert ungated.status_code == 200
+                    assert ungated.text.endswith(f"{DONE_LINE}\n\n")
+                    assert not reached.is_set()
+                assert [emit.kind for emit in provider.frame_emits] == [
+                    "meta",
+                    "meta",
+                    "meta",
+                    "meta",
+                    "tool_call",
+                    "meta",
+                    "meta",
+                ]
+
+                held = tasks.create_task(
+                    client.post("/chat/completions", json=request_body(MODEL))
+                )
+                await asyncio.wait_for(reached.wait(), timeout=5)
+                assert not held.done()
+            response = await held
+            assert response.status_code == 200
+            assert '"content": "held"' in response.text
+            assert response.text.endswith(f"{DONE_LINE}\n\n")
+
+
+@pytest.mark.asyncio
+async def test_first_content_gate_timeout_truncates_stream_with_diagnosis(
+    monkeypatch, caplog
+) -> None:
+    monkeypatch.setattr(provider_server, "_FIRST_CONTENT_GATE_TIMEOUT", 0.05)
+    async with running_provider() as provider:
+        provider.register(MODEL, Script(Turn.of(text="held"), Turn.of(text="next")))
+        async with httpx.AsyncClient(
+            base_url=provider.base_url, timeout=5, trust_env=False
+        ) as client:
+            with provider.hold_first_content(MODEL) as reached:
+                async with client.stream(
+                    "POST", "/chat/completions", json=request_body(MODEL)
+                ) as response:
+                    assert response.status_code == 200
+                    received = []
+                    with pytest.raises(httpx.RemoteProtocolError):
+                        async for line in response.aiter_lines():
+                            if line.startswith("data: "):
+                                received.append(line)
+                assert reached.is_set()
+                (role_line,) = received
+                role = json.loads(role_line.removeprefix("data: "))
+                assert role["choices"][0]["delta"] == {
+                    "role": "assistant",
+                    "content": "",
+                }
+                assert len(provider.emits_for(0)) == 1
+                assert (
+                    f"first-content gate for model {MODEL!r}, request probe-0 "
+                    "timed out after 0.05s without release"
+                ) in caplog.text
+
+                following = await client.post(
+                    "/chat/completions", json=request_body(MODEL)
+                )
+                assert following.status_code == 200
+                assert '"content": "next"' in following.text
+                assert following.text.endswith(f"{DONE_LINE}\n\n")
+
+
+@pytest.mark.asyncio
+async def test_disconnected_client_releases_held_request(monkeypatch) -> None:
+    provider = FakeProvider()
+    provider.register(MODEL, Script(Turn.of(text="never written")))
+    finished = asyncio.Event()
+    handle = provider._handle_completion
+
+    async def track_handler(request: web.Request) -> web.StreamResponse:
+        try:
+            return await handle(request)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(provider, "_handle_completion", track_handler)
+    async with (
+        provider,
+        httpx.AsyncClient(
+            base_url=provider.base_url, timeout=5, trust_env=False
+        ) as client,
+    ):
+        with provider.hold_first_content(MODEL) as reached:
+            async with client.stream(
+                "POST", "/chat/completions", json=request_body(MODEL)
+            ) as response:
+                assert response.status_code == 200
+                await asyncio.wait_for(reached.wait(), timeout=5)
+                assert not finished.is_set()
+            await asyncio.wait_for(finished.wait(), timeout=5)
+            assert len(provider.emits_for(0)) == 1
 
 
 # ── 空表、越界与账本生命周期 ────────────────────────────────

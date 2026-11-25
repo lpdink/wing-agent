@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import time
 from collections.abc import AsyncIterator, Callable, Mapping
 
 import pytest
@@ -64,24 +63,29 @@ def _ids(rows: list[dict]) -> list[str]:
 
 async def _wait_status(http: DriverHttp, session_id: str, expected: str) -> str:
     """在 ``?status=idle,working,waiting`` 的投影里轮询到该会话状态为 expected。"""
-    deadline = time.monotonic() + POLL_DEADLINE
     observed: str | None = None
-    while time.monotonic() < deadline:
-        observed = next(
-            (
-                row["status"]
-                for row in await _list(http, status=ACTIVE_STATUSES)
-                if row["id"] == session_id
-            ),
-            None,
-        )
-        if observed is not None and observed == expected:
-            return observed
-        await asyncio.sleep(POLL_INTERVAL)
-    raise AssertionError(
-        f"session {session_id} stayed {observed!r} in the active projection for "
-        f"{POLL_DEADLINE:.0f}s, expected {expected!r}"
-    )
+    budget = asyncio.timeout(POLL_DEADLINE)
+    try:
+        async with budget:
+            while True:
+                observed = next(
+                    (
+                        row["status"]
+                        for row in await _list(http, status=ACTIVE_STATUSES)
+                        if row["id"] == session_id
+                    ),
+                    None,
+                )
+                if observed == expected:
+                    return expected
+                await asyncio.sleep(POLL_INTERVAL)
+    except TimeoutError as exc:
+        if not budget.expired():
+            raise
+        raise AssertionError(
+            f"session {session_id} stayed {observed!r} in the active projection for "
+            f"{POLL_DEADLINE:g}s, expected {expected!r}"
+        ) from exc
 
 
 async def _tag(http: DriverHttp, session_id: str, tags: list[str]) -> None:
@@ -165,13 +169,25 @@ async def test_status_filter_observes_transitions_without_subscription(
     `test_filters_select_a_subsequence_of_the_full_list` 钉——本场景即使过滤被
     整体忽略也照样通过，它钉的是"未订阅观察者读得到即时状态"。）
     """
-    probe.register(RAIL_MODEL, Turn.of(text="hello there", chunk=2, delay=1.2))
+    probe.register(RAIL_MODEL, Turn.of(text="hello there", chunk=2))
     session = await probe.session(model=RAIL_MODEL)
 
     async with _observer(probe) as observer:
         # 发第一条消息：物化（落盘）+ 起一轮，未订阅的观察者据此看到 working → idle。
-        await session.send("hi")
-        assert await _wait_status(observer, session.session_id, "working") == "working"
+        with probe.provider.hold_first_content(RAIL_MODEL) as reached:
+            # 启动和状态观察合计 28 秒，先于 Provider 的 30 秒兜底。
+            try:
+                async with asyncio.timeout(8):
+                    await session.send("hi")
+                    await asyncio.wait_for(reached.wait(), timeout=5)
+            except TimeoutError as exc:
+                raise AssertionError(
+                    f"session {session.session_id}, model {RAIL_MODEL!r}: timed out "
+                    f"sending the prompt or waiting for first content ({probe.requests.summary()})"
+                ) from exc
+            assert (
+                await _wait_status(observer, session.session_id, "working") == "working"
+            )
 
         result = await session.watch.expect("turn_result", within=20.0)
         assert result.data["subtype"] == "success", result.data

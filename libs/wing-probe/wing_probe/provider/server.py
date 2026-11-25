@@ -25,8 +25,10 @@ from __future__ import annotations
 import asyncio
 import socket
 import time
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 from aiohttp import web
@@ -48,6 +50,7 @@ from wing_probe.provider.sse import (
 
 CHAT_PATH = "/v1/chat/completions"
 MESSAGES_PATH = "/v1/messages"
+_FIRST_CONTENT_GATE_TIMEOUT = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -110,6 +113,7 @@ class FakeProvider:
         """唯一的发射时刻账本：``request_index`` → 该请求按 ``frame_index`` 升序的记录。"""
         self._emits_generation: int | None = None
         """写下第一帧时 ``requests`` 的 generation（检测序号复用）。"""
+        self._first_content_gates: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
         self._port = port
         self._runner: web.AppRunner | None = None
         self._site: web.SockSite | None = None
@@ -184,6 +188,25 @@ class FakeProvider:
 
     def models(self) -> list[str]:
         return self.scripts.models()
+
+    @contextmanager
+    def hold_first_content(self, model: str) -> Iterator[asyncio.Event]:
+        """暂停同模型下一条有正文的流式请求，yield 首个正文帧到达写入点的信号。
+
+        同模型只接受一个待领取的闸门。响应头和正文前的帧照常发送。
+        退出观察块时放行，观察的截止时间应早于服务端 30 秒兜底。
+        """
+        if model in self._first_content_gates:
+            raise ValueError(f"first content already held for {model!r}")
+        reached, release = asyncio.Event(), asyncio.Event()
+        gate = (reached, release)
+        self._first_content_gates[model] = gate
+        try:
+            yield reached
+        finally:
+            if self._first_content_gates.get(model) is gate:
+                del self._first_content_gates[model]
+            release.set()
 
     # ── 发射时刻账本 ────────────────────────────────────────
 
@@ -309,6 +332,10 @@ class FakeProvider:
         headers: dict[str, str],
         request_index: int,
     ) -> web.StreamResponse:
+        # 两种编码器都用 Turn.content_chunks，空文本不生成正文帧。
+        first_content_gate = (
+            self._first_content_gates.pop(model, None) if turn.text else None
+        )
         response = web.StreamResponse(
             status=200,
             headers={
@@ -333,13 +360,57 @@ class FakeProvider:
                 completion_id=completion_id,
                 created=created,
             )
+        before_first_content = (
+            partial(
+                self._wait_for_release,
+                request,
+                *first_content_gate,
+                model=model,
+                request_index=request_index,
+            )
+            if first_content_gate is not None
+            else None
+        )
         try:
-            await self._write_frames(response, frames, request_index=request_index)
+            await self._write_frames(
+                response,
+                frames,
+                request_index=request_index,
+                before_first_content=before_first_content,
+            )
             await response.write_eof()
         except ConnectionResetError:
             # 客户端中途断开（interrupt 场景的常态）——不是错误。
             return response
         return response
+
+    async def _wait_for_release(
+        self,
+        request: web.Request,
+        reached: asyncio.Event,
+        release: asyncio.Event,
+        *,
+        model: str,
+        request_index: int,
+    ) -> None:
+        reached.set()
+        try:
+            async with asyncio.timeout(_FIRST_CONTENT_GATE_TIMEOUT):
+                while not release.is_set():
+                    # aiohttp 默认等下一次写入才报告断连，暂停期间需主动看 transport。
+                    transport = request.transport
+                    if transport is None or transport.is_closing():
+                        raise ConnectionResetError
+                    try:
+                        async with asyncio.timeout(0.05):
+                            await release.wait()
+                    except TimeoutError:
+                        pass
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"first-content gate for model {model!r}, request probe-{request_index} "
+                f"timed out after {_FIRST_CONTENT_GATE_TIMEOUT:g}s without release"
+            ) from exc
 
     async def _write_frames(
         self,
@@ -347,12 +418,16 @@ class FakeProvider:
         frames: Sequence[SSEFrame],
         *,
         request_index: int,
+        before_first_content: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """逐帧等待 + 写；每写成一帧登记一次发射时刻（``[DONE]`` 不登记）。"""
         frame_index = 0
         for frame in frames:
             if frame.delay:
                 await asyncio.sleep(frame.delay)
+            if before_first_content is not None and frame.kind == "content":
+                await before_first_content()
+                before_first_content = None
             payload = frame.encode()
             at = time.monotonic()
             await response.write(payload)

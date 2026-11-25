@@ -17,19 +17,14 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import time
 from pathlib import Path
 
 import pytest
 import yaml
+from _session_helpers import evict_and_wait_inactive, require_session_row
 
 from wing_probe import Probe, Turn
-
-#: 逐出观察预算（release 是显式动作，不需要 TTL 倒计时，留足轮询余量）。
-POLL_DEADLINE = 20.0
-POLL_INTERVAL = 0.2
 
 #: 旧记录场景：id ≠ name（反查补 id 才不是平凡映射）。
 LEGACY_ID = "legacy-id"
@@ -45,33 +40,6 @@ MAPPED_ID = "map-id"
 OLD_NAME = "probe/map-v1"
 NEW_NAME = "probe/map-v2"
 MAPPED_SPEC = {"id": MAPPED_ID, "name": OLD_NAME}
-
-
-async def _evict(probe: Probe, session_id: str) -> None:
-    """退订 → release → 等 ``inactive``（磁盘成为唯一事实来源）。"""
-    driver = probe.driver_required
-    await driver.http.unsubscribe(session_id, driver.client_id)
-    payload = await driver.http.request(
-        "POST", "/api/session/release", body={"session_id": session_id}
-    )
-    assert payload == {"ok": True, "released": True, "detail": "released"}, payload
-    deadline = time.monotonic() + POLL_DEADLINE
-    observed: str | None = None
-    while time.monotonic() < deadline:
-        listing = await driver.http.request("GET", "/api/session/list")
-        for entry in listing.get("sessions", []):
-            if entry.get("id") == session_id:
-                observed = entry.get("status")
-        if observed == "inactive":
-            return
-        await asyncio.sleep(POLL_INTERVAL)
-    raise AssertionError(f"session {session_id} stayed in status {observed!r}")
-
-
-async def _resubscribe(probe: Probe, session_id: str) -> None:
-    """resume 端点不代订阅且句柄已在 driver 注册表里——显式补订阅（重放 sync）。"""
-    driver = probe.driver_required
-    await driver.http.subscribe(session_id, driver.client_id)
 
 
 def _metadata_path(probe: Probe, session_id: str) -> Path:
@@ -92,9 +60,10 @@ def _strip_model_id(probe: Probe, session_id: str) -> dict:
 @pytest.mark.timeout(120)
 @pytest.mark.asyncio
 async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
-    """旧记录（无 id）→ resume：反查补 id + 落盘对齐 + 续跑仍打到原调用名。"""
+    """旧记录冷读可反查 id，显式恢复才将它写回并沿用原调用名。"""
     probe.register(LEGACY_NAME, Turn.of(text="reply one"), Turn.of(text="reply two"))
-    http = probe.driver_required.http
+    driver = probe.driver_required
+    http = driver.http
 
     session = await probe.session(model=LEGACY_ID)
     await session.chat("alpha")
@@ -105,7 +74,7 @@ async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
     assert created.get("model_name") == LEGACY_NAME, created
     assert created.get("provider_name") == "probe", created
 
-    await _evict(probe, session.session_id)
+    await evict_and_wait_inactive(probe, session.session_id)
 
     # ② 构造旧记录：删掉 model_id，快照留原样；盘上确实没有 id 了（前提成立）。
     stripped = _strip_model_id(probe, session.session_id)
@@ -113,14 +82,30 @@ async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
     assert stripped["model_name"] == LEGACY_NAME, stripped
     assert stripped["provider_name"] == "probe", stripped
 
+    metadata = _metadata_path(probe, session.session_id)
+    before_list = metadata.read_bytes()
+    cold = require_session_row(await http.list_sessions(), session.session_id)
+    assert cold["status"] == "inactive", cold
+    fields = ("model_id", "model_name", "provider_name", "model_display_name")
+    expected = (LEGACY_ID, LEGACY_NAME, "probe", "Legacy Upstream")
+    assert tuple(cold[key] for key in fields) == expected, cold
+    assert metadata.read_bytes() == before_list, metadata
+
     # ③ resume：恢复链走快照 + identify 反查补 id。
     resumed = await probe.resume(session.session_id)
-    await _resubscribe(probe, session.session_id)
+    # 逐出后的 subscribe 也会水合，先检查 resume 自己完成了落盘。
+    aligned = probe.history(resumed).metadata() or {}
+    assert aligned.get("model_id") == LEGACY_ID, aligned
+    assert aligned.get("model_name") == LEGACY_NAME, aligned
+    assert aligned.get("provider_name") == "probe", aligned
+
+    await http.subscribe(session.session_id, driver.client_id)
 
     info = await http.get_session_info(session.session_id)
-    assert info["model_id"] == LEGACY_ID, info
-    assert info["model"] == LEGACY_NAME, info
-    assert info["provider_name"] == "probe", info
+    info_fields = ("model_id", "model", "provider_name", "model_display_name")
+    assert tuple(info[key] for key in info_fields) == expected, info
+    active = require_session_row(await http.list_sessions(), session.session_id)
+    assert tuple(active[key] for key in fields) == expected, active
 
     sync = await resumed.watch.expect("sync_session", within=5.0)
     agent = sync.data["agent"]
@@ -128,13 +113,7 @@ async def test_legacy_record_backfills_model_id_on_resume(probe: Probe) -> None:
     assert agent["model_name"] == LEGACY_NAME, agent
     assert agent["provider_name"] == "probe", agent
 
-    # ④ 落盘对齐（一次性迁移）：metadata.json 补回 model_id，快照保持原值。
-    aligned = probe.history(resumed).metadata() or {}
-    assert aligned.get("model_id") == LEGACY_ID, aligned
-    assert aligned.get("model_name") == LEGACY_NAME, aligned
-    assert aligned.get("provider_name") == "probe", aligned
-
-    # ⑤ 恢复后照常跑：请求打到原调用名（id 不外发）。
+    # ④ 恢复后照常跑：请求打到原调用名（id 不外发）。
     result = await resumed.chat("beta")
     assert result.data["subtype"] == "success", result.data
     assert probe.requests.count(LEGACY_NAME) == 2, probe.requests.summary()
@@ -148,13 +127,14 @@ async def test_recorded_id_follows_the_current_mapping_on_resume(probe: Probe) -
     """记录里的 id 命中 → 用**当前映射**：改名后 resume 打到新调用名，id 不变。"""
     probe.register(OLD_NAME, Turn.of(text="v1 reply"), Turn.of(text="v2 reply"))
     probe.register(NEW_NAME, Turn.of(text="renamed reply"))
-    http = probe.driver_required.http
+    driver = probe.driver_required
+    http = driver.http
 
     session = await probe.session(model=MAPPED_ID)
     await session.chat("alpha")
     assert probe.requests.count(OLD_NAME) == 1, probe.requests.summary()
 
-    await _evict(probe, session.session_id)
+    await evict_and_wait_inactive(probe, session.session_id)
     recorded = probe.history(session.session_id).metadata() or {}
     assert recorded.get("model_id") == MAPPED_ID, recorded
     assert recorded.get("model_name") == OLD_NAME, recorded
@@ -174,7 +154,7 @@ async def test_recorded_id_follows_the_current_mapping_on_resume(probe: Probe) -
 
     # resume：id 命中 → name / provider 跟随新映射（不是回落旧快照）。
     resumed = await probe.resume(session.session_id)
-    await _resubscribe(probe, session.session_id)
+    await http.subscribe(session.session_id, driver.client_id)
 
     info = await http.get_session_info(session.session_id)
     assert info["model_id"] == MAPPED_ID, info

@@ -29,6 +29,7 @@ import asyncio
 from datetime import datetime
 
 import pytest
+from _session_helpers import evict
 
 from wing_probe import Driver, Probe, Session, Turn
 
@@ -100,13 +101,7 @@ async def _open(probe: Probe, model: str, label: str, text: str) -> Session:
 
 
 async def _evict(probe: Probe, session: Session) -> None:
-    """显式逐出（离开内存 = 转 ``inactive``）：断开订阅 → ``POST /api/session/release``。"""
-    driver = _driver(probe)
-    await driver.http.unsubscribe(session.session_id, driver.client_id)
-    payload = await driver.http.request(
-        "POST", "/api/session/release", body={"session_id": session.session_id}
-    )
-    assert payload == {"ok": True, "released": True, "detail": "released"}, payload
+    await evict(probe, session.session_id)
     await _wait_status(probe, session.session_id, "inactive")
 
 
