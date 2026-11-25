@@ -1,6 +1,7 @@
 """Opt-in idle admission for template replacement over the public gateway."""
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator, Callable
 
 import pytest
@@ -269,3 +270,59 @@ async def test_guarded_template_update_rejects_other_fields(templates: Probe) ->
             await _replace(session, **fields)
         assert invalid.value.status == 400
     assert (await session.info())["template_name"] == "default"
+
+
+@pytest.mark.skipif(
+    sys.version_info >= (3, 13),
+    reason="non-strict Path.resolve no longer raises on symlink loops",
+)
+@pytest.mark.parametrize("require_idle", [False, True])
+async def test_workspace_assembly_failure_keeps_original_session(
+    templates: Probe, require_idle: bool
+) -> None:
+    probe = templates
+    probe.register(OLD_MODEL, Turn.of(text="seed reply"), Turn.of(text="still working"))
+    probe.register(NEW_MODEL, Turn.of(text="replacement working"))
+    session = await probe.session(effort="high", tools=["Glob"], yolo=True)
+    assert (await session.chat("seed")).data["result"] == "seed reply"
+    before = session.history
+    metadata = before.metadata()
+    workspace = probe.workspace
+    saved = workspace.with_name("workspace-saved")
+    workspace.rename(saved)
+    workspace.symlink_to(workspace.name, target_is_directory=True)
+    try:
+        with pytest.raises(DriverHttpError) as failure:
+            await _replace(session, require_idle=require_idle)
+        assert failure.value.status == 500
+    finally:
+        workspace.unlink()
+        saved.rename(workspace)
+
+    other = await Driver.connect(probe.env)
+    try:
+        assert (await other.http.get_session_info(session.session_id))[
+            "template_name"
+        ] == "default"
+        assert session.history.records == before.records
+        assert session.history.metadata() == metadata
+        session.watch.assert_never("interrupted")
+        session.watch.assert_never("session_state_changed")
+        assert (
+            await other.http.send_message(session.session_id, "send after failure")
+        )["ok"]
+        assert (await session.watch.expect("turn_result")).data[
+            "result"
+        ] == "still working"
+        before_retry = session.history.records
+        assert before_retry[: len(before.records)] == before.records
+        assert await _replace(session, require_idle=require_idle) == {"ok": True}
+        assert (await session.watch.expect("session_state_changed")).data[
+            "agent"
+        ] == "replacement"
+        assert session.history.records == before_retry
+        assert (await session.chat("send after retry")).data[
+            "result"
+        ] == "replacement working"
+    finally:
+        await other.close()

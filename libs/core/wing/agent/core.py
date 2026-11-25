@@ -12,7 +12,8 @@ import functools
 import inspect
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -658,7 +659,9 @@ class WingAgent:
         )
         return dropped
 
-    async def shutdown_for_template_switch(self, *, require_idle: bool = False) -> None:
+    @asynccontextmanager
+    async def template_replacement(self, *, require_idle: bool) -> AsyncIterator[None]:
+        """关闭旧 Agent 并保留回滚能力，直到调用方装配好候选。"""
         if self.replacing:
             raise SessionBusyError("session is replacing its agent")
         if require_idle and (
@@ -676,6 +679,15 @@ class WingAgent:
         self._replacing = True
         try:
             await self.shutdown(notify=self.status != "idle" or self.has_pending_input)
+            yield
+        except BaseException:
+            self._closing = False
+            worker = self._worker
+            if worker.done():
+                self._worker = self._spawn_worker()
+            else:
+                self._arm_worker_renewal(worker)
+            raise
         finally:
             self._replacing = False
 
