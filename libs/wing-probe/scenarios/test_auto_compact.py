@@ -603,6 +603,13 @@ async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -
 
     # 换入（delta 轮）+ 这一轮没有真实 usage。
     before_apply = probe.history(session)
+    info = await session.info()
+    assert info["total_tokens"] == SERVER_TOKENS[2]
+    assert info["context_stats"] == {
+        "message_count": len(before_apply.messages()),
+        "total_tokens": SERVER_TOKENS[2],
+    }
+
     result = await session.chat("delta")
     assert result.data["result"] == "post compact reply", result.data
     _assert_applied(probe, session, before_apply, model=STALE_MODEL)
@@ -614,6 +621,8 @@ async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -
 
     # 边界 = 换入时刻的链尖：换入那一轮请求的最后一条消息（delta）。
     final = probe.history(session)
+    assert info["total_tokens"] == total
+    assert info["context_stats"]["message_count"] == len(final.messages())
     compact_node, boundary = _boundary_of(probe, session)
     assert compact_node["content"] == COMPACT_CONTENT, compact_node
     assert boundary is not None, compact_node
@@ -641,6 +650,7 @@ async def test_applied_compact_does_not_trust_pre_compact_tokens(probe: Probe) -
 
     # 真实 usage 落链 → 口径回到服务端值（边界没有把之后的一切一起否掉）。
     info = await session.info()
+    assert info["total_tokens"] == RECOVERED_TOKENS, info
     assert info["context_stats"]["total_tokens"] == RECOVERED_TOKENS, info
 
 

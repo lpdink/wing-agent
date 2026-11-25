@@ -308,7 +308,10 @@ class TestRestoreChain:
 
         assert restored.agent.model == "other"  # 模板默认
         assert restored.model_id == "other-id"
-        assert any("cannot restore model" in m for m in wing_warnings), wing_warnings
+        assert (
+            f"Session {sid}: cannot restore model 'm' on provider 'p' "
+            "(provider 'p' not found); falling back to template default (record kept)"
+        ) in wing_warnings
         meta = FileSessionStore(root).load_metadata(sid)
         assert meta is not None
         assert (meta.model_id, meta.model_name, meta.provider_name) == (

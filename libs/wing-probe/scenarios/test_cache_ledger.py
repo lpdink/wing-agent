@@ -47,7 +47,7 @@ TURN_PROMPTS = (1000, 1200, 1400, 1600)
 #: 块粒度缺口：落在 `tol = max(256, ceil(0.02 · 参照 prompt))` 之内。
 BLOCK_SLACK = 128
 
-#: rules 注入用（相对会话 workspace 的 glob，`load_rules` 的相对路径基准）。
+#: rules 注入用（相对会话 workspace 的 glob，`load_rule_files` 的相对路径基准）。
 RULES_PATTERN = "rules/*.md"
 RULE_FILE = "team.md"
 

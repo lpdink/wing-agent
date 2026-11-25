@@ -336,7 +336,9 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 | `of_type` | 原始事件的 `type`（诊断用，不参与路由） |
 | `data` | 原始载荷 JSON 文本的一段；所有帧按 `index` 顺序拼接后与原始载荷逐字节相等 |
 
-字段语义不依赖出现顺序；`_chunk` 不是 `WingEvent`（不进事件注册表），Rust 侧也是独立类型（`gateway::chunk::ChunkEnvelope`）。**接收方契约**：客户端读任务的正常路径不变（先按 `WingEvent` 解析；未知类型 `WingEvent::Unknown` 才尝试信封解析，热路径无额外成本）。
+字段语义与键顺序无关。`_chunk` 属于传输层，独立于 `WingEvent` 注册表，Rust 类型为 `gateway::chunk::ChunkEnvelope`。
+没有待重组事件时，Rust 客户端读任务先检查网关规范的 `{"type":"_chunk"` 前缀，命中就直接解析信封。
+普通帧按 `WingEvent` 解码，遇到 `WingEvent::Unknown` 时再尝试信封解析，以接受其他键顺序。
 
 ### 客户端重组与防护
 

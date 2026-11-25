@@ -17,8 +17,9 @@ from wing.context.resources import (
     _resolve_patterns,
     build_skills_prompt,
     load_all_skills,
-    load_rules,
+    load_rule_files,
     render_skills_info,
+    rules_prompt,
 )
 
 
@@ -55,12 +56,12 @@ class TestResolvePatterns:
         assert _resolve_patterns(["rules/*.md"], None) == ["rules/*.md"]
 
 
-# ── load_rules ────────────────────────────────────────────────
+# ── load_rule_files / rules_prompt ────────────────────────────────────────────────
 
 
 class TestLoadRules:
     def test_missing_pattern_yields_empty(self, tmp_path):
-        assert load_rules([], tmp_path) == ("", [])
+        assert rules_prompt(load_rule_files([], tmp_path)) == ("", [])
 
     def test_unreadable_match_is_skipped(self, tmp_path, wing_warnings):
         """glob 匹配到目录时读取失败：告警 + 跳过，其余文件照常拼接。"""
@@ -68,7 +69,7 @@ class TestLoadRules:
         (tmp_path / "rules" / "subdir").mkdir()  # 目录也算 glob 命中
         (tmp_path / "rules" / "a.md").write_text("rule A", encoding="utf-8")
 
-        content, files = load_rules(["rules/*"], tmp_path)
+        content, files = rules_prompt(load_rule_files(["rules/*"], tmp_path))
 
         assert content == f"{tmp_path / 'rules' / 'a.md'}\n\nrule A"
         assert files == [str(tmp_path / "rules" / "a.md")]
@@ -78,7 +79,7 @@ class TestLoadRules:
         (tmp_path / "a.md").write_text("A", encoding="utf-8")
         (tmp_path / "b.md").write_text("B", encoding="utf-8")
 
-        content, files = load_rules(["*.md"], tmp_path)
+        content, files = rules_prompt(load_rule_files(["*.md"], tmp_path))
 
         assert files == [str(tmp_path / "a.md"), str(tmp_path / "b.md")]
         assert content.endswith("A\n\n" + str(tmp_path / "b.md") + "\n\nB")

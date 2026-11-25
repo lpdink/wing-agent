@@ -4,7 +4,6 @@
 - 冷切换（空 chain）：CM 声明集同步更新，无 reminder
 - 热切换（非空 chain）：CM 声明集冻结，reminder 写入 chain
 - Reminder 内容格式：含 namespace、完整 schema、<tools> 标签
-- Compaction 同步：CM 内部在 compact apply 后同步声明集
 - set_tools 原子性：无效工具名时整体不切换
 - GET /api/tools 端点（registry 层验证）
 - POST /api/session/update tools 字段
@@ -15,6 +14,7 @@ from __future__ import annotations
 import pytest
 
 from _support import make_tool
+from wing.agent import WingAgent
 from wing.schema import Message, Tool
 from wing.tool_registry import tool_registry
 
@@ -60,76 +60,51 @@ def register_remote_tools():
         ns_map.pop(t.name, None)
 
 
-class TestColdSwitch:
-    """冷切换：活跃链为空时 CM 声明集同步更新。"""
+async def _request_tool_names(agent: WingAgent) -> set[str]:
+    request = await agent.context_manager.get_messages_for_llm(
+        agent.model, agent.model_provider, current_tools=lambda: agent.tools
+    )
+    return {t.effective_llm_name for t in request.tools}
 
+
+class TestColdSwitch:
     @pytest.mark.asyncio
-    async def test_cold_switch_syncs_declared(
+    async def test_cold_switch_syncs_declared_without_reminder(
         self, runtime, register_test_tools: list[Tool]
     ):
         session = runtime.create_session()
         agent = session.agent
-        cm = agent.context_manager
 
-        # 冷切换（空 chain）
         agent.set_tools(["Beta", "Gamma"])
 
-        assert set(agent._tools.keys()) == {"Beta", "Gamma"}
-        declared_names = {t.effective_llm_name for t in cm.declared_tools}
-        assert declared_names == {"Beta", "Gamma"}
-
-    @pytest.mark.asyncio
-    async def test_cold_switch_no_reminder(
-        self, runtime, register_test_tools: list[Tool]
-    ):
-        session = runtime.create_session()
-        agent = session.agent
-
-        agent.set_tools(["Beta"])
-
-        chain = agent.context_manager.get_context_window()
-        reminders = [m for m in chain if "[System Reminder]" in (m.content or "")]
-        assert len(reminders) == 0
+        assert {t.effective_llm_name for t in agent.tools} == {"Beta", "Gamma"}
+        assert await _request_tool_names(agent) == {"Beta", "Gamma"}
+        assert not any(
+            "[System Reminder]" in (m.content or "")
+            for m in agent.context_manager.get_context_window()
+        )
 
 
 class TestHotSwitch:
-    """热切换：活跃链有消息时 CM 冻结声明集，追加 reminder。"""
-
     @pytest.mark.asyncio
-    async def test_hot_switch_freezes_declared(
-        self, runtime, register_test_tools: list[Tool]
+    @pytest.mark.parametrize(
+        "has_reply", [False, True], ids=["user-only", "with-reply"]
+    )
+    async def test_hot_switch_freezes_declared_and_adds_reminder(
+        self, runtime, register_test_tools: list[Tool], has_reply: bool
     ):
         session = runtime.create_session()
         agent = session.agent
         cm = agent.context_manager
-
-        # 初始化声明集
         agent.set_tools(["Alpha"])
-        # 添加消息使 chain 非空
         cm.add_message(Message(role="user", content="hello"))
-        cm.add_message(Message(role="assistant", content="hi there"))
+        if has_reply:
+            cm.add_message(Message(role="assistant", content="hi there"))
 
         agent.set_tools(["Beta"])
 
-        # executable 变了
-        assert set(agent._tools.keys()) == {"Beta"}
-        # CM declared 冻结
-        declared_names = {t.effective_llm_name for t in cm.declared_tools}
-        assert declared_names == {"Alpha"}
-
-    @pytest.mark.asyncio
-    async def test_hot_switch_adds_reminder(
-        self, runtime, register_test_tools: list[Tool]
-    ):
-        session = runtime.create_session()
-        agent = session.agent
-        cm = agent.context_manager
-
-        agent.set_tools(["Alpha"])
-        cm.add_message(Message(role="user", content="hello"))
-
-        agent.set_tools(["Beta"])
-
+        assert {t.effective_llm_name for t in agent.tools} == {"Beta"}
+        assert await _request_tool_names(agent) == {"Alpha"}
         chain = cm.get_context_window()
         reminders = [m for m in chain if "[System Reminder]" in (m.content or "")]
         assert len(reminders) == 1
@@ -197,32 +172,6 @@ class TestReminderFormat:
         assert '"parameters"' in reminder.content
 
 
-class TestCompactionSync:
-    """Compaction 后 CM 内部同步声明集。"""
-
-    @pytest.mark.asyncio
-    async def test_declared_syncs_on_manual_compact(
-        self, runtime, register_test_tools: list[Tool]
-    ):
-        """do_manual_compact 后声明集同步为 current_tools。"""
-        session = runtime.create_session()
-        agent = session.agent
-        cm = agent.context_manager
-
-        # 设置初始工具并添加消息
-        agent.set_tools(["Alpha"])
-        cm.add_message(Message(role="user", content="hello " * 100))
-        cm.add_message(Message(role="assistant", content="world " * 100))
-
-        # 热切换（冻结 declared 为 Alpha）
-        agent.set_tools(["Beta"])
-        assert {t.effective_llm_name for t in cm.declared_tools} == {"Alpha"}
-
-        # 手动 compact（需要 compactor 配置）——直接测试 _sync_declared_tools
-        cm._sync_declared_tools(agent.tools)
-        assert {t.effective_llm_name for t in cm.declared_tools} == {"Beta"}
-
-
 class TestAtomicity:
     """set_tools 原子性。"""
 
@@ -239,7 +188,7 @@ class TestAtomicity:
             agent.set_tools(["Beta", "ghost.NonExistent"])
 
         # 整体不切换
-        assert set(agent._tools.keys()) == {"Alpha"}
+        assert {t.effective_llm_name for t in agent.tools} == {"Alpha"}
 
 
 class TestToolsListAPI:
@@ -283,7 +232,7 @@ class TestUpdateSessionTools:
 
         await runtime.update_session(session_id=session.session_id, tools=["Beta"])
 
-        assert set(agent._tools.keys()) == {"Beta"}
+        assert {t.effective_llm_name for t in agent.tools} == {"Beta"}
 
     @pytest.mark.asyncio
     async def test_update_tools_invalid_returns_error(
@@ -309,8 +258,5 @@ class TestCreateSessionOverride:
 
         session = runtime.create_session(agent_override=AgentOverride(tools=["Beta"]))
         agent = session.agent
-        cm = agent.context_manager
-
-        assert set(agent._tools.keys()) == {"Beta"}
-        declared_names = {t.effective_llm_name for t in cm.declared_tools}
-        assert declared_names == {"Beta"}
+        assert {t.effective_llm_name for t in agent.tools} == {"Beta"}
+        assert await _request_tool_names(agent) == {"Beta"}

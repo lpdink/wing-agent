@@ -194,13 +194,7 @@ class Compactor:
 
     Be concise but complete - err on the side of including information that would prevent duplicate work or repeated mistakes. Write in a way that enables immediate resumption of the task."""
 
-    # 格式约束尾部：<summary> 标签 + CRITICAL 工具禁令。拆分目的是让用户指令
-    # （/compact <侧重>）条件渲染地插在主体与格式约束之间——对提示词只做增加、
-    # 不做修改，无指令路径（后台自动压缩、裸手动压缩）的 prompt 与历史
-    # COMPACT_PROMPT 逐字节一致。
-    # 指令必须排在格式约束之前、CRITICAL 保持末位 recency：
-    # _extract_compact_result 以正则强提取 <summary> 标签，格式失守
-    # 即整次压缩报废（手动 500 / 后台静默丢弃）。
+    # 侧重指令夹在主体与格式约束之间，工具禁令保持末位。
     _COMPACT_PROMPT_FORMAT = """
 
     Wrap your summary in <summary></summary> tags.
@@ -209,10 +203,6 @@ class Compactor:
     ## DO NOT execute any tool calls.
     ## Your entire response must be ONLY the summary wrapped in <summary> tags.
     ## Any tool calls in your response will be SILENTLY IGNORED."""
-
-    # 兼容别名：恒等于 BODY + FORMAT（测试锁定恒等式，防止后续改动
-    # 其一导致带指令/不带指令两条路径的 prompt 漂移）。
-    COMPACT_PROMPT = _COMPACT_PROMPT_BODY + _COMPACT_PROMPT_FORMAT
 
     def __init__(
         self,
@@ -362,9 +352,8 @@ class Compactor:
         （仅手动压缩传入；后台自动压缩不带）。条件渲染：存在则插入
         BODY 与 FORMAT 之间——指令只声明 summary content 范围内的
         优先级，<summary> 标签 + CRITICAL 格式约束保持末位 recency
-        （_extract_compact_result 强提取标签，格式失守即整次压缩报废）；
-        不存在（含空白）时 prompt 与 COMPACT_PROMPT 逐字节一致，
-        默认路径零影响。
+        （_extract_compact_result 强提取标签，格式失守即整次压缩报废）。
+        缺省或纯空白指令省略整个侧重块。
         """
         instruction_block = ""
         if instruction and instruction.strip():

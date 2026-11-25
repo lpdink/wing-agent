@@ -180,14 +180,29 @@ class TestRecordProjection:
         )
         _use_config(
             monkeypatch,
-            models=[ModelSpec(id="ds-flash", name="renamed-upstream")],
-            agents=[("default", "ds-flash")],
+            models=[
+                ModelSpec(id="ds-flash", name="renamed-upstream"),
+                "template-model",
+            ],
+            agents=[("default", "template-model")],
         )
 
-        entry = _entry(SessionManager({"file": FileSessionStore(root)}), sid)
+        store = FileSessionStore(root)
+        sm = SessionManager({"file": store})
+        entry = _entry(sm, sid)
 
         # 未声明展示名的模型 → None（展示层回落调用名）。
         assert _model_quartet(entry) == ("ds-flash", "renamed-upstream", "p", None)
+
+        store.archive(sid)
+        (archived,) = sm.list_archived_sessions()
+        assert archived.id == sid
+        assert (
+            archived.model_id,
+            archived.model_name,
+            archived.provider_name,
+            archived.model_display_name,
+        ) == _model_quartet(entry)
 
     def test_legacy_record_backfills_the_id_from_the_snapshot(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

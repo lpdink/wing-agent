@@ -21,7 +21,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from _support import gateway_auth_config
-from wing.agent import SessionBusyError
+from wing.agent import SessionBusyError, WingAgent
 from wing.context import CompactionAborted
 from wing.config import ApiKeyEntry, AuthConfig
 from wing.event import AgentInfo, SessionInfo
@@ -963,15 +963,16 @@ class TestSessionInfo:
     def test_info_ok(self, client: TestClient, mock_runtime):
         """正常获取 session 运行时状态。"""
         mock_session = MagicMock()
-        mock_session.agent.get_status.return_value = {
-            "model": "gpt-4o",
-            "api_url": "https://api.openai.com",
-            "tools": ["Bash", "Read"],
-            "total_tokens": 1000,
-            "context_window_tokens": 128000,
-            "thinking": True,
-            "reasoning_effort": "high",
-        }
+        agent = mock_session.agent
+        cm = agent.context_manager
+        cm.get_context_stats.return_value = (5, 1000)
+        cm.context_window_tokens = 128000
+        agent.model = "gpt-4o"
+        agent.model_provider.base_url = "https://api.openai.com"
+        agent.tools = [MagicMock(effective_llm_name=name) for name in ("Bash", "Read")]
+        agent.thinking = True
+        agent.reasoning_effort = "high"
+        agent.get_status.side_effect = lambda: WingAgent.get_status(agent)
         mock_session.model_id = "gpt-4o"
         mock_session.agent.provider_name = "default"
         mock_session.agent.model_display_name = "GPT-4o Flash"
@@ -982,7 +983,6 @@ class TestSessionInfo:
         mock_session.last_turn_end = "2026-01-01T10:00:00.123456"
         mock_session.last_turn_subtype = "success"
         mock_session.status = "idle"
-        mock_session.agent.context_manager.get_context_stats.return_value = (5, 800)
         mock_session.agent.context_manager.get_skills_info.return_value = (
             "skill-a: desc"
         )
@@ -990,7 +990,8 @@ class TestSessionInfo:
             "You are a helpful assistant."
         )
         mock_runtime.get_session.return_value = mock_session
-        mock_session.tag_meta = {}
+        mock_session.tags = ["pin"]
+        mock_session.tag_meta = {"pin": TagMeta(added_at="2026-01-01T09:00:00")}
         mock_session.usage = SessionUsage()
 
         resp = client.get("/api/session/info", params={"session_id": "test-id"})
@@ -1011,11 +1012,15 @@ class TestSessionInfo:
         assert data["workdir"] == "/tmp/ws"
         assert data["status"] == "idle"
         assert data["context_stats"]["message_count"] == 5
-        assert data["context_stats"]["total_tokens"] == 800
+        assert data["context_stats"]["total_tokens"] == data["total_tokens"]
+        cm.get_context_stats.assert_called_once_with()
         assert data["skills_info"] == "skill-a: desc"
         assert data["system_prompt"] == "You are a helpful assistant."
         assert data["last_turn_end"] == "2026-01-01T10:00:00.123456"
         assert data["last_turn_subtype"] == "success"
+        assert data["parent_session_id"] is None
+        assert data["tags"] == ["pin"]
+        assert data["tag_meta"] == {"pin": {"added_at": "2026-01-01T09:00:00"}}
         assert data["usage"] == SessionUsage().model_dump()
 
     def test_info_no_workspace(self, client: TestClient, mock_runtime):
@@ -1025,6 +1030,7 @@ class TestSessionInfo:
             "model": "gpt-4o",
             "api_url": "https://api.openai.com",
             "tools": [],
+            "message_count": 0,
             "total_tokens": 0,
             "context_window_tokens": 128000,
             "thinking": False,
@@ -1040,7 +1046,6 @@ class TestSessionInfo:
         mock_session.last_turn_end = None
         mock_session.last_turn_subtype = None
         mock_session.status = "idle"
-        mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""
         mock_session.agent.context_manager.system_prompt.content = ""
         mock_runtime.get_session.return_value = mock_session
@@ -1061,6 +1066,7 @@ class TestSessionInfo:
             "model": "gpt-4o",
             "api_url": "https://api.openai.com",
             "tools": [],
+            "message_count": 0,
             "total_tokens": 0,
             "context_window_tokens": 128000,
             "thinking": False,
@@ -1076,7 +1082,6 @@ class TestSessionInfo:
         mock_session.last_turn_end = None
         mock_session.last_turn_subtype = None
         mock_session.status = "waiting"
-        mock_session.agent.context_manager.get_context_stats.return_value = (0, 0)
         mock_session.agent.context_manager.get_skills_info.return_value = ""
         mock_session.agent.context_manager.system_prompt.content = ""
         mock_runtime.get_session.return_value = mock_session

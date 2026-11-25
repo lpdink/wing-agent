@@ -284,7 +284,17 @@ async def test_legacy_pool_object_is_served_and_materialized(probe: Probe) -> No
     legacy = probe.env.sessions_path / ".media" / media_id[:2] / media_id
     legacy.parent.mkdir(parents=True, exist_ok=True)
     legacy.write_bytes(data)
-    assert not media_dir(probe, session.session_id).exists()
+    target_dir = media_dir(probe, session.session_id)
+    assert not target_dir.exists()
+
+    # 普通文件占用目录路径时无法物化，HTTP 仍能返回已读取的老池对象。
+    blocker = b"not a media directory"
+    target_dir.write_bytes(blocker)
+    call, body = await read_media(probe, session.session_id, media_id)
+    assert call.status == 200, call.render()
+    assert body == data
+    assert target_dir.read_bytes() == blocker
+    target_dir.unlink()
 
     call, body = await read_media(probe, session.session_id, media_id)
 
