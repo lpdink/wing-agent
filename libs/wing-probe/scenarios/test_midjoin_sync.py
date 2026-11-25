@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -138,27 +139,24 @@ async def test_midjoin_pending_ask_reports_waiting(probe: Probe) -> None:
     THEN ``status == "waiting"``（turn 仍在飞行，阻塞在用户输入上），下发的
     事实事件里带仍挂起的 ask——中途订阅者能直接回答它。
     """
-    probe.register(
-        ASK_MODEL,
-        Turn.of(
-            tool_calls=[
-                ToolCall(
-                    "AskUserQuestion",
-                    {
-                        "questions": [
-                            {
-                                "id": "flavor",
-                                "header": "Flavor",
-                                "question": "Which flavor?",
-                                "options": [{"label": "vanilla"}, {"label": "mocha"}],
-                            }
-                        ]
-                    },
-                )
-            ]
-        ),
-        Turn.of(text="thanks"),
+    ask_turn = Turn.of(
+        tool_calls=[
+            ToolCall(
+                "AskUserQuestion",
+                {
+                    "questions": [
+                        {
+                            "id": "flavor",
+                            "header": "Flavor",
+                            "question": "Which flavor?",
+                            "options": [{"label": "vanilla"}, {"label": "mocha"}],
+                        }
+                    ]
+                },
+            )
+        ]
     )
+    probe.register(ASK_MODEL, ask_turn, ask_turn, Turn.of(text="thanks"))
     session = await probe.session(model=ASK_MODEL)
 
     await session.send("pick something")
@@ -166,12 +164,21 @@ async def test_midjoin_pending_ask_reports_waiting(probe: Probe) -> None:
 
     async with midjoin(probe, session.session_id) as sync:
         assert sync.data["status"] == "waiting", sync.data
+        started_at = sync.data["turn_started_at"]
+        assert datetime.fromisoformat(started_at).utcoffset() == timedelta(0)
         replayed = [e for e in sync.data["events"] if e.get("type") == "ask"]
         assert replayed and replayed[0]["tool_call_id"] == ask.data["tool_call_id"], (
             sync.data["events"]
         )
 
     await session.answer(ask, "flavor: vanilla")
+    next_ask = await session.watch.expect("ask", within=15)
+    assert next_ask.data["tool_call_id"] != ask.data["tool_call_id"]
+    async with midjoin(probe, session.session_id) as sync:
+        assert sync.data["status"] == "waiting", sync.data
+        assert sync.data["turn_started_at"] == started_at, sync.data
+
+    await session.answer(next_ask, "flavor: mocha")
     result = await session.watch.expect("turn_result", within=15.0)
     assert result.data["subtype"] == "success", result.data
 

@@ -38,7 +38,7 @@ def _seed(session, *contents: str) -> None:
 
 def _go_working(session) -> None:
     """把会话置为 working（在飞 turn）。"""
-    session.agent._working = True
+    session.agent._set_working(True)
 
 
 def _go_waiting(session) -> None:

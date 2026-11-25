@@ -304,6 +304,8 @@ class TestTraceChain:
         tl: TrackedList[Message] = TrackedList(FileMessageLog(tmp_dir))
         chain = tl.trace_chain()
         assert chain == []
+        with pytest.raises(IndexError):
+            tl._leaf_uuid()
 
     def test_trace_chain_single(self, tmp_dir):
         """trace_chain with single message."""
@@ -353,6 +355,42 @@ class TestTraceChain:
         chain = tl.trace_chain(from_uuid="u3")
         assert len(chain) == 3
         assert [m.content for m in chain] == ["a", "b", "c"]
+
+    def test_last_leaf_uses_append_order_with_duplicate_uuid(self):
+        chain: TrackedList[Message] = TrackedList()
+        parent = Message(role="user", uuid="parent")
+        first = Message(role="assistant", uuid="leaf", parent_uuid="parent")
+        sibling = Message(role="assistant", uuid="sibling", parent_uuid="parent")
+        replacement = Message(role="assistant", uuid="leaf", parent_uuid="missing")
+        chain.extend_detached([parent, first, sibling, replacement, parent])
+
+        assert chain.trace_chain() == [replacement]
+        assert chain.walk_full_chain() == [replacement]
+        assert chain.walk_full_chain("sibling") == [parent, sibling]
+        assert chain.trace_chain("missing") == []
+
+    def test_leaf_fallback_uses_last_append_when_every_uuid_is_a_parent(self):
+        chain: TrackedList[Message] = TrackedList()
+        original = Message(role="user", uuid="root", parent_uuid="child")
+        child = Message(role="assistant", uuid="child", parent_uuid="root")
+        replacement = Message(role="user", uuid="root")
+        chain.extend_detached([original, child, replacement])
+
+        # The older record leaves "child" in the parent set after "root" is replaced.
+        assert chain.trace_chain() == [replacement]
+        assert chain.walk_full_chain() == [replacement]
+
+    def test_full_walk_does_not_follow_unzip_with_an_empty_parent(self):
+        chain: TrackedList[Message] = TrackedList()
+        root = Message(role="user", uuid="root")
+        compact = Message(
+            role="assistant", uuid="compact", parent_uuid="", unzip_last_uuid="root"
+        )
+        chain.extend_detached([root, compact])
+
+        assert chain.trace_chain("compact") == [compact]
+        assert chain.walk_full_chain("compact") == [compact]
+        assert chain.walk_full_chain("") == []
 
     def test_trace_chain_stops_at_compact_node(self, tmp_dir):
         """trace_chain stops at compact node (parent_uuid=None)."""

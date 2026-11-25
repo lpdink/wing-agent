@@ -117,6 +117,14 @@ async def test_fork_chain_integrity_and_uuid_remap(probe: Probe) -> None:
     for expected, actual in zip(source_events, child_events):
         assert node_semantics(expected) == node_semantics(actual), (expected, actual)
 
+    # typed 写入的 assistant 经 raw fork 复制，块内容保持一致。
+    source_reply = next(r for r in source.records if r["role"] == "assistant")
+    child_uuid = material["uuid_map"][source_reply["uuid"]]
+    child_reply = next(r for r in child_view.records if r["uuid"] == child_uuid)
+    assert child_reply["content_blocks"] == source_reply["content_blocks"]
+    for reply in (source_reply, child_reply):
+        assert {"content", "reasoning_content", "tool_calls"}.isdisjoint(reply), reply
+
     # 目标及其后续不随 fork 走。
     assert target["uuid"] not in child_view.by_uuid
     assert "gamma" not in [message["content"] for message in child_view.messages()]

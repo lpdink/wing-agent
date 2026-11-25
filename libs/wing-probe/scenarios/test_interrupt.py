@@ -19,7 +19,7 @@ import time
 
 import pytest
 
-from wing_probe import Probe, Session, Turn
+from wing_probe import Driver, Probe, Session, Turn
 
 #: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
 STREAM_MODEL = "probe/interrupt-stream"
@@ -82,6 +82,14 @@ async def test_interrupt_mid_stream_closes_turn_and_keeps_chain_valid(
     session = await _start_and_interrupt(probe, STREAM_MODEL)
 
     assert await _wait_idle(session) == "idle"
+    observer = await Driver.connect(probe.env)
+    try:
+        joined = await observer.attach(session.session_id)
+        sync = await joined.watch.expect("sync_session", within=5)
+        assert sync.data["status"] == "idle", sync.data
+        assert "turn_started_at" not in sync.data, sync.data
+    finally:
+        await observer.close()
     session.watch.assert_never("error")
 
     # ── 落盘：user + 半截 assistant（stop_reason=interrupted）+ interrupted 事件 ──

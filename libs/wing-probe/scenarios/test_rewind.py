@@ -391,6 +391,11 @@ async def test_rewind_after_compact_keeps_region_reachable(probe: Probe) -> None
 
     # 回退后继续：新消息接在回退行之后，区间始终不进链
     await session.chat("restart")
+    request = probe.last_request(COMPACT_REWIND_MODEL).context()
+    assert [message.content for message in request.messages] == [
+        rewind_row["content"],
+        "restart",
+    ], request.describe()
     assert [message["content"] for message in probe.history(session).messages()] == [
         rewind_row["content"],
         "restart",

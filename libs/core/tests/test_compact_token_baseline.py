@@ -26,6 +26,7 @@ import pytest
 
 from _support import make_cm
 from wing.context import Compactor, ContextManager
+from wing.event import DiffContentEvent
 from wing.schema import ChainNode, LLMResponse, LLMUsage, Message
 
 #: 双阈值（apply = 窗口，early = 窗口 − 保留区 = 600）。
@@ -316,6 +317,23 @@ async def test_legacy_compact_node_keeps_historical_baseline(tmp_dir):
     await cm.do_manual_compact("m", _provider(), current_tools=lambda: [])
     assert cm.get_context_window()[0].usage_boundary_uuid is not None
     assert cm._last_prompt_tokens() is None
+
+
+def test_usage_boundary_resolves_last_duplicate_event_in_message_coordinates(tmp_dir):
+    cm = _make_cm(tmp_dir)
+    marker = Message(role="user", uuid="same", content="first")
+    boundary = Message(role="user", content="boundary", usage_boundary_uuid="same")
+    stale = _turn_reply("stale")
+    fresh = _turn_reply("fresh", prompt_tokens=42)
+    zero = _turn_reply("zero", prompt_tokens=0)
+    cm.add_messages([marker, boundary, stale])
+    cm.append_event(DiffContentEvent(uuid="same", path="f", new_text="x"))
+
+    assert cm._usage_window() == (3, None)
+    cm.add_messages([fresh, zero])
+    assert cm._usage_window() == (3, 42)
+    assert cm.get_context_window() == [marker, boundary, stale, fresh, zero]
+    assert cm.get_context_stats() == (5, 42)
 
 
 def test_dangling_boundary_trusts_no_usage(tmp_dir):

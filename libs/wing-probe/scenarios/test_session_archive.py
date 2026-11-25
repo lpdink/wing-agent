@@ -200,14 +200,21 @@ async def test_archive_roundtrip_is_a_pure_move_and_freezes(probe: Probe) -> Non
     again = await _archive(probe, session_id, archived=True)
     assert again["changed"] is False and again["detail"] == "already archived"
 
+    index = archived_dir.parent / "index.json"
+    index.unlink()
+    await probe.restart_gateway()
+    async with asyncio.timeout(POLL_DEADLINE):
+        while not index.is_file():
+            await asyncio.sleep(POLL_INTERVAL)
+    assert await _archived_entries(probe) == [{**entries[0], "archived_at": None}]
+    assert (archived_dir / "history.jsonl").read_bytes() == live_bytes
+
     # 恢复：字节一致 + 继续对话后链的前缀逐记录一致（红线）。
     restored = await _archive(probe, session_id, archived=False)
     assert restored["changed"] is True and restored["detail"] == "restored"
     assert (live_dir / "history.jsonl").read_bytes() == live_bytes
 
-    # 重新订阅要走显式调用（句柄已挂载，``resume`` 不会二次订阅）。
-    await _driver(probe).http.subscribe(session_id, _driver(probe).client_id)
-    resumed = _driver(probe).get(session_id)
+    resumed = await _driver(probe).attach(session_id)
     await resumed.chat("after restore")
     after = list(probe.history(resumed).records)
     assert len(after) > len(records_before)

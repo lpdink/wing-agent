@@ -4,6 +4,7 @@ import json
 import uuid
 from collections.abc import Callable
 from dataclasses import replace
+from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -834,12 +835,14 @@ class ContextManager:
         表示一条可信 usage 都没有。压缩切点（`select_cut`）与阈值判定共用本方法
         ——两者必须同一个数字，否则会出现"按服务端触发、按估算切"的混口径。
         """
-        chain = self._messages.active_chain
+        chain = self._messages
         start = self._usage_trust_start(chain)
         if start is None:
             return 0, None
-        window_start = sum(1 for node in chain[:start] if isinstance(node, Message))
-        for node in reversed(chain[start:]):
+        window_start = sum(
+            1 for node in islice(chain, start) if isinstance(node, Message)
+        )
+        for node in islice(reversed(chain), len(chain) - start):
             if (
                 isinstance(node, Message)
                 and node.role == "assistant"
@@ -849,7 +852,7 @@ class ContextManager:
                 return window_start, node.usage.prompt_tokens
         return window_start, None
 
-    def _usage_trust_start(self, chain: list[ChainNode]) -> int | None:
+    def _usage_trust_start(self, chain: TrackedList[ChainNode]) -> int | None:
         """活跃链上「服务端 usage 可采信」的起点下标（None = 一条都不采信）。
 
         压缩换入会重排窗口：换入之前产生的 usage（**含被重链接的保留区**——它的
@@ -900,7 +903,7 @@ class ContextManager:
         这是 LLM 上下文的唯一视图：get_messages_for_llm、token 统计、
         compact、序列化等所有消费方都经此过滤，事件节点绝不进入模型请求。
         """
-        return [m for m in self._messages.active_chain if isinstance(m, Message)]
+        return [m for m in self._messages if isinstance(m, Message)]
 
     def get_active_events(
         self, pending_ask_ids: set[str] | None = None
@@ -920,7 +923,7 @@ class ContextManager:
         from wing.event import FACT_EVENTS, AskEvent, WingEvent
 
         result: list[WingEvent] = []
-        for e in self._messages.active_chain:
+        for e in self._messages:
             if not isinstance(e, WingEvent):
                 continue
             if e.type not in FACT_EVENTS:
