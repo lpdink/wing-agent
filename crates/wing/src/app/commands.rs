@@ -704,16 +704,7 @@ impl App {
                 tracing::info!(model = %self.status.model, model_id = ?self.status.model_id, "session info received");
             }
             FetchPayload::Commands(resp) => {
-                self.popup.cache.commands = resp
-                    .commands
-                    .into_iter()
-                    .map(|c| crate::protocol::CommandInfo {
-                        name: c.name,
-                        aliases: c.aliases,
-                        description: c.description,
-                        params: c.params,
-                    })
-                    .collect();
+                self.popup.cache.commands = resp.commands;
                 self.update_popup();
             }
             FetchPayload::Models(resp) => {

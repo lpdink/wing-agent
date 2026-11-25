@@ -340,12 +340,7 @@ fn build_update(args: &UpdateArgs) -> Result<(UpdateSessionRequest, Vec<AppliedF
         });
     }
     // 全量替换语义：显式给出的空值 = 空工具集（不是"不动"——不动是不传该旗标）。
-    let tools = args.tools.as_ref().map(|raw| {
-        raw.split(',')
-            .map(|tool| tool.trim().to_string())
-            .filter(|tool| !tool.is_empty())
-            .collect::<Vec<String>>()
-    });
+    let tools = args.tools.as_deref().map(super::args::parse_tool_list);
     if let Some(tools) = &tools {
         applied.push(AppliedField {
             field: "tools",

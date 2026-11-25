@@ -224,6 +224,19 @@ pub fn warn_if_parent_dropped(requested: Option<&str>, read_back: Option<&str>) 
     }
 }
 
+pub(crate) async fn add_resume_tags(
+    http: &GatewayApiClient,
+    session_id: &str,
+    tags: &[String],
+) -> Result<()> {
+    if !tags.is_empty() {
+        http.tag_session(session_id, Some(tags.to_vec()), None)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to tag session: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Verify the requested tags actually landed on `session_id`.
 ///
 /// Guards against a gateway that predates session tags: the create endpoint

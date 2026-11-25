@@ -22,30 +22,16 @@ pub(crate) enum WakeMode {
     Cancel(i64),
 }
 
-/// 一次调用的完整输入：每个形态带自己的载荷。
-///
-/// 形态与载荷的对应关系由类型保证——"Create 却没有请求体"这类组合写不出来
-/// （合并前它靠调用方自觉 + 一个 `expect`）。
 pub(crate) enum WakeCall {
-    Create {
-        request: WakeCreateRequest,
-        json: bool,
-    },
-    List {
-        /// `--list --all`
-        all: bool,
-        json: bool,
-    },
-    Cancel {
-        id: i64,
-        json: bool,
-    },
+    Create(WakeCreateRequest),
+    List { all: bool },
+    Cancel(i64),
 }
 
 /// 按形态发请求并输出。
-pub(crate) async fn dispatch(http: &GatewayApiClient, call: WakeCall) -> Result<()> {
+pub(crate) async fn dispatch(http: &GatewayApiClient, call: WakeCall, json: bool) -> Result<()> {
     match call {
-        WakeCall::Cancel { id, json } => {
+        WakeCall::Cancel(id) => {
             let resp = http.cancel_wake(id).await?;
             if json {
                 common::print_json_compact(&WakeCancelOutput {
@@ -58,7 +44,7 @@ pub(crate) async fn dispatch(http: &GatewayApiClient, call: WakeCall) -> Result<
                 println!("{id} was already finished (nothing to cancel)");
             }
         }
-        WakeCall::List { all, json } => {
+        WakeCall::List { all } => {
             let resp = http.list_wakes(all).await?;
             if json {
                 common::print_json_compact(&resp.wakes);
@@ -66,7 +52,7 @@ pub(crate) async fn dispatch(http: &GatewayApiClient, call: WakeCall) -> Result<
                 print!("{}", render_wakes(&resp.wakes, all));
             }
         }
-        WakeCall::Create { request, json } => {
+        WakeCall::Create(request) => {
             let resp = http.create_wake(&request).await?;
             if json {
                 common::print_json_compact(&WakeOutput { wake: resp.wake });

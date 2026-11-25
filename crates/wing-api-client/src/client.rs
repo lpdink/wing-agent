@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use reqwest::Client;
 use reqwest::header::{AUTHORIZATION, HeaderMap};
+use reqwest::{Client, RequestBuilder, Response};
 
 use crate::error::{ApiClientError, extract_api_error};
 use crate::models::*;
@@ -144,9 +144,8 @@ impl GatewayClient {
     /// 从磁盘恢复已有 session，并应用 resume 覆盖（`AgentOverride` 子集）。
     ///
     /// 覆盖只应用 `model_id` / `effort` / `tools`——见
-    /// [`ResumeSessionRequest`] 的字段说明。`agent` 为 `None` 时与
-    /// [`Self::resume_session`] 等价（保留这个变体方法而不是给
-    /// `resume_session` 加参数：既有调用点零改动，合并面更小）。
+    /// [`ResumeSessionRequest`] 的字段说明。`agent` 为 `None` 时，请求省略该字段，
+    /// 与 [`Self::resume_session`] 相同。
     pub async fn resume_session_with_override(
         &self,
         session_id: &str,
@@ -263,19 +262,13 @@ impl GatewayClient {
         if let Some(name) = name {
             query.push(("name", name));
         }
-        let resp = self
+        let request = self
             .http
             .post(format!("{}{}", self.base_url, "/api/session/media"))
             .query(&query)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-            .body(bytes)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        let parsed: UploadMediaResponse = resp.json().await?;
+            .body(bytes);
+        let parsed: UploadMediaResponse = Self::send_json(request).await?;
         Ok(parsed.media)
     }
 
@@ -296,17 +289,11 @@ impl GatewayClient {
         session_id: &str,
         media_id: &str,
     ) -> Result<Vec<u8>, ApiClientError> {
-        let resp = self
+        let request = self
             .http
             .get(format!("{}{}", self.base_url, "/api/session/media"))
-            .query(&[("session_id", session_id), ("media_id", media_id)])
-            .send()
-            .await?;
-
-        let mut resp = resp;
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
+            .query(&[("session_id", session_id), ("media_id", media_id)]);
+        let mut resp = Self::send_checked(request).await?;
         if resp
             .content_length()
             .is_some_and(|len| len > MAX_MEDIA_BODY_BYTES as u64)
@@ -347,17 +334,11 @@ impl GatewayClient {
         parent: Option<&str>,
     ) -> Result<SessionListResponse, ApiClientError> {
         let query: Vec<(&str, &str)> = parent.into_iter().map(|p| ("parent", p)).collect();
-        let resp = self
+        let request = self
             .http
             .get(format!("{}{}", self.base_url, "/api/session/list"))
-            .query(&query)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .query(&query);
+        Self::send_json(request).await
     }
 
     /// 获取指定 session 的完整状态。
@@ -365,17 +346,11 @@ impl GatewayClient {
         &self,
         session_id: &str,
     ) -> Result<SessionGetResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
             .get(format!("{}{}", self.base_url, "/api/session/get"))
-            .query(&[("session_id", session_id)])
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .query(&[("session_id", session_id)]);
+        Self::send_json(request).await
     }
 
     // ============================================================
@@ -387,32 +362,20 @@ impl GatewayClient {
         &self,
         session_id: &str,
     ) -> Result<SessionInfoResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
             .get(format!("{}{}", self.base_url, "/api/session/info"))
-            .query(&[("session_id", session_id)])
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .query(&[("session_id", session_id)]);
+        Self::send_json(request).await
     }
 
     /// 获取 session 的可回退/分叉消息节点列表。
     pub async fn get_branches(&self, session_id: &str) -> Result<BranchesResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
             .get(format!("{}{}", self.base_url, "/api/session/branches"))
-            .query(&[("session_id", session_id)])
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .query(&[("session_id", session_id)]);
+        Self::send_json(request).await
     }
 
     /// 读取会话的 KV 前缀缓存账本报告（`forks` / `calls` 各最多 `limit` 条，新→旧）。
@@ -425,17 +388,11 @@ impl GatewayClient {
         limit: u32,
     ) -> Result<CacheReportResponse, ApiClientError> {
         let limit = limit.to_string();
-        let resp = self
+        let request = self
             .http
             .get(format!("{}{}", self.base_url, "/api/session/cache"))
-            .query(&[("session_id", session_id), ("limit", limit.as_str())])
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .query(&[("session_id", session_id), ("limit", limit.as_str())]);
+        Self::send_json(request).await
     }
 
     // ============================================================
@@ -447,17 +404,11 @@ impl GatewayClient {
     /// 整条路径只读库：不水合会话、不发事件。错误语义：语义非法 400、未知会话 404、
     /// `limit` 越界 422、空数据永远 200。
     pub async fn get_usage(&self, query: &UsageQuery) -> Result<UsageResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
             .get(format!("{}{}", self.base_url, "/api/usage"))
-            .query(&query.pairs())
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .query(&query.pairs());
+        Self::send_json(request).await
     }
 
     // ============================================================
@@ -507,9 +458,6 @@ impl GatewayClient {
             session_id: session_id.to_owned(),
             instruction: instruction.map(str::to_owned),
         };
-        // 服务端给压缩 1200s（`gateway/routes/session.py`），client 级 60s 会在
-        // 长压缩上先超时：调用方看到"失败"、后端却已经把链换成了摘要。这里必须
-        // 给足预算（服务端超时 + 余量）。
         self.post_json_with_timeout("/api/session/compact", &body, Some(COMPACT_TIMEOUT))
             .await
     }
@@ -560,16 +508,10 @@ impl GatewayClient {
 
     /// 列出归档区条目（读网关侧索引，不扫会话目录）。
     pub async fn list_archived(&self) -> Result<ArchivedSessionsResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
-            .get(format!("{}{}", self.base_url, "/api/session/archive"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .get(format!("{}{}", self.base_url, "/api/session/archive"));
+        Self::send_json(request).await
     }
 
     /// 回退 session 到指定消息节点。
@@ -603,17 +545,11 @@ impl GatewayClient {
     /// 列出唤醒触发器（`GET /api/wake/list`；`all=true` 含已终结的）。
     pub async fn list_wakes(&self, all: bool) -> Result<WakeListResponse, ApiClientError> {
         let query: Vec<(&str, &str)> = if all { vec![("all", "true")] } else { vec![] };
-        let resp = self
+        let request = self
             .http
             .get(format!("{}{}", self.base_url, "/api/wake/list"))
-            .query(&query)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .query(&query);
+        Self::send_json(request).await
     }
 
     /// 取消一条触发器（`POST /api/wake/cancel`）：`canceled=false` = 本来就已终结。
@@ -639,16 +575,10 @@ impl GatewayClient {
     ///
     /// 纯静态，可长缓存；setup mode 下同样可用（它是修复配置的依据）。
     pub async fn settings_schema(&self) -> Result<SettingsSchemaResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
-            .get(format!("{}{}", self.base_url, "/api/settings/schema"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .get(format!("{}{}", self.base_url, "/api/settings/schema"));
+        Self::send_json(request).await
     }
 
     /// 读当前配置：稀疏文档（密文叶子 = `null`）+ 指纹 + 密文状态 + 问题。
@@ -656,30 +586,18 @@ impl GatewayClient {
     /// **回传契约**：密文的 `null` 必须原样带回 [`Self::settings_set`]（`null` = 保留磁盘现值；
     /// 丢掉键 = 清空密钥）。前端在 `values` 上做编辑，保存时发整份。
     pub async fn settings_get(&self) -> Result<SettingsGetResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
-            .get(format!("{}{}", self.base_url, "/api/settings/get"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .get(format!("{}{}", self.base_url, "/api/settings/get"));
+        Self::send_json(request).await
     }
 
     /// 极简健康判定（启动路径的预检：`valid=false` ⇒ 网关处于 setup mode，走修复流程）。
     pub async fn settings_status(&self) -> Result<SettingsStatusResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
-            .get(format!("{}{}", self.base_url, "/api/settings/status"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .get(format!("{}{}", self.base_url, "/api/settings/status"));
+        Self::send_json(request).await
     }
 
     /// 保存配置（全文档替换 + 乐观并发指纹）。
@@ -700,58 +618,28 @@ impl GatewayClient {
 
     /// 获取可用命令列表。
     pub async fn get_commands(&self) -> Result<CommandsResponse, ApiClientError> {
-        let resp = self
+        let request = self
             .http
-            .get(format!("{}{}", self.base_url, "/api/commands"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .get(format!("{}{}", self.base_url, "/api/commands"));
+        Self::send_json(request).await
     }
 
     /// 获取可用模型列表。
     pub async fn get_models(&self) -> Result<ModelsResponse, ApiClientError> {
-        let resp = self
-            .http
-            .get(format!("{}{}", self.base_url, "/api/models"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+        let request = self.http.get(format!("{}{}", self.base_url, "/api/models"));
+        Self::send_json(request).await
     }
 
     /// 获取可用 agent 模板列表。
     pub async fn get_agents(&self) -> Result<AgentsResponse, ApiClientError> {
-        let resp = self
-            .http
-            .get(format!("{}{}", self.base_url, "/api/agents"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+        let request = self.http.get(format!("{}{}", self.base_url, "/api/agents"));
+        Self::send_json(request).await
     }
 
     /// 获取全局工具列表（含内置 + 远程）。
     pub async fn list_tools(&self) -> Result<ToolsListResponse, ApiClientError> {
-        let resp = self
-            .http
-            .get(format!("{}{}", self.base_url, "/api/tools"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+        let request = self.http.get(format!("{}{}", self.base_url, "/api/tools"));
+        Self::send_json(request).await
     }
 
     // ============================================================
@@ -760,16 +648,8 @@ impl GatewayClient {
 
     /// 健康检查。
     pub async fn health(&self) -> Result<HealthResponse, ApiClientError> {
-        let resp = self
-            .http
-            .get(format!("{}{}", self.base_url, "/api/health"))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+        let request = self.http.get(format!("{}{}", self.base_url, "/api/health"));
+        Self::send_json(request).await
     }
 
     /// 优雅关闭 Gateway。
@@ -797,18 +677,12 @@ impl GatewayClient {
         tools: Vec<RemoteToolSpec>,
     ) -> Result<RegisterToolsResponse, ApiClientError> {
         let body = RegisterToolsRequest { tools };
-        let resp = self
+        let request = self
             .http
             .post(format!("{}{}", self.base_url, "/api/tools/register"))
             .header("X-Client-Id", client_id)
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+            .json(&body);
+        Self::send_json(request).await
     }
 
     // ============================================================
@@ -820,16 +694,8 @@ impl GatewayClient {
         &self,
         path: &str,
     ) -> Result<Resp, ApiClientError> {
-        let resp = self
-            .http
-            .post(format!("{}{}", self.base_url, path))
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+        let request = self.http.post(format!("{}{}", self.base_url, path));
+        Self::send_json(request).await
     }
 
     /// POST JSON body → deserialize JSON response。
@@ -842,10 +708,6 @@ impl GatewayClient {
     }
 
     /// POST JSON body，按需覆盖 client 级的 60s 超时 → deserialize JSON response。
-    ///
-    /// 长耗时端点（手动压缩：服务端允许 1200s）必须自己给预算——client 级超时
-    /// 到期只会让调用方看到一条"超时失败"，而后端照样在跑并把链改写掉。`None`
-    /// 沿用 client 级超时。
     async fn post_json_with_timeout<Req: serde::Serialize, Resp: serde::de::DeserializeOwned>(
         &self,
         path: &str,
@@ -859,12 +721,7 @@ impl GatewayClient {
         if let Some(timeout) = timeout {
             request = request.timeout(timeout);
         }
-        let resp = request.send().await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
-        Ok(resp.json().await?)
+        Self::send_json(request).await
     }
 
     /// POST JSON body with X-Client-Id header → discard response body。
@@ -874,18 +731,27 @@ impl GatewayClient {
         body: &Req,
         client_id: &str,
     ) -> Result<(), ApiClientError> {
-        let resp = self
+        let request = self
             .http
             .post(format!("{}{}", self.base_url, path))
             .header("X-Client-Id", client_id)
-            .json(body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            return Err(extract_api_error(resp).await);
-        }
+            .json(body);
+        Self::send_checked(request).await?;
         Ok(())
+    }
+
+    async fn send_checked(request: RequestBuilder) -> Result<Response, ApiClientError> {
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(extract_api_error(response).await);
+        }
+        Ok(response)
+    }
+
+    async fn send_json<T: serde::de::DeserializeOwned>(
+        request: RequestBuilder,
+    ) -> Result<T, ApiClientError> {
+        Ok(Self::send_checked(request).await?.json().await?)
     }
 }
 
@@ -969,6 +835,7 @@ mod tests {
         path: String,
         authorization: Option<String>,
         content_type: Option<String>,
+        client_id: Option<String>,
         body: String,
         /// 原始 body 字节：二进制上传（`upload_media`）在 `body` 里是有损的。
         body_raw: Vec<u8>,
@@ -1039,6 +906,7 @@ mod tests {
                             path: path.clone(),
                             authorization: header_value(&head, "authorization"),
                             content_type: header_value(&head, "content-type"),
+                            client_id: header_value(&head, "x-client-id"),
                             body: String::from_utf8_lossy(
                                 &buf[body_start..body_end.min(buf.len())],
                             )
@@ -1092,6 +960,68 @@ mod tests {
             409 => "Conflict",
             503 => "Service Unavailable",
             _ => "Error",
+        }
+    }
+
+    #[tokio::test]
+    async fn settings_status_preserves_preflight_error_classification() {
+        for (status, body) in [
+            (404, r#"{"error":"not_found"}"#),
+            (503, r#"{"error":"setup_mode"}"#),
+            (200, "{}"),
+        ] {
+            let server = MockGateway::start(vec![("/api/settings/status", status, body)]).await;
+            let client = GatewayClient::new(&server.url, None).unwrap();
+            let error = client.settings_status().await.unwrap_err();
+            match status {
+                404 => assert!(error.is_not_found(), "unexpected error: {error:?}"),
+                503 => assert!(error.is_setup_mode(), "unexpected error: {error:?}"),
+                _ => assert!(
+                    matches!(&error, ApiClientError::Transport(error) if error.is_decode()),
+                    "unexpected error: {error:?}"
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn response_status_and_body_are_handled_by_endpoint_contract() {
+        let server = MockGateway::start(vec![
+            ("/api/session/subscribe", 204, ""),
+            ("/api/session/unsubscribe", 204, ""),
+            ("/api/shutdown", 204, ""),
+            ("/api/health", 204, ""),
+            ("/api/session/list", 302, "missing redirect location"),
+        ])
+        .await;
+        let client = GatewayClient::new(&server.url, None).unwrap();
+        client.subscribe("s1", "ws-1").await.unwrap();
+        client.subscribe_live("s1", "ws-1").await.unwrap();
+        client.unsubscribe("s1", "ws-1").await.unwrap();
+        client.shutdown().await.unwrap();
+        assert!(matches!(
+            client.health().await,
+            Err(ApiClientError::Transport(error)) if error.is_decode()
+        ));
+        assert!(matches!(
+            client.list_sessions().await,
+            Err(ApiClientError::Api { status: 302, detail, body: None })
+                if detail == "missing redirect location"
+        ));
+
+        let requests = server.recorded();
+        for (request, (path, body)) in requests[..3].iter().zip([
+            ("/api/session/subscribe", r#"{"session_id":"s1"}"#),
+            (
+                "/api/session/subscribe",
+                r#"{"session_id":"s1","replay":false}"#,
+            ),
+            ("/api/session/unsubscribe", r#"{"session_id":"s1"}"#),
+        ]) {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, path);
+            assert_eq!(request.client_id.as_deref(), Some("ws-1"));
+            assert_eq!(request.body, body);
         }
     }
 

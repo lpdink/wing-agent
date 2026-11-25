@@ -83,6 +83,7 @@ struct StubState {
     updated: serde_json::Map<String, Value>,
     /// Session tags (set by create, readable/extendable via `/api/session/tag`).
     tags: Vec<String>,
+    tag_status: u16,
     /// `/api/system/reload` items, in the order the stub reports them.
     reload_items: Vec<(String, bool, Option<String>)>,
     /// Connected WS clients (client_id → outbound frame sender). The subscribe
@@ -120,6 +121,7 @@ impl Default for StubState {
             hydrate_paths: Vec::new(),
             updated: serde_json::Map::new(),
             tags: Vec::new(),
+            tag_status: 200,
             reload_items: [
                 "config.yaml",
                 "hooks",
@@ -466,6 +468,10 @@ fn route(
             )
         }
 
+        ("POST", "/api/session/tag") if state.tag_status != 200 => (
+            state.tag_status,
+            json!({"error": "invalid_tag", "detail": "tag rejected"}).to_string(),
+        ),
         ("POST", "/api/session/tag") => {
             // Atomic-ish: idempotent add, then report the resulting set.
             if let Some(add) = request["add"].as_array() {
@@ -2163,6 +2169,86 @@ async fn wake_without_a_target_says_what_to_do() {
     let _ = std::fs::remove_dir_all(&stub.home);
 }
 
+#[tokio::test]
+async fn resumed_prompts_tag_the_resolved_id_before_sending() {
+    let stub = Stub::start("resume-tags").await;
+    let cli: &[&str] = &[
+        "run",
+        "-r",
+        "alias",
+        "-p",
+        "ping",
+        "--tag",
+        "nightly",
+        "--notify-to",
+        "parent-1",
+    ];
+    let stdio: &[&str] = &[
+        "-r",
+        "alias",
+        "-p",
+        "ping",
+        "--tag",
+        "nightly",
+        "--tools",
+        ",",
+        "--output-format",
+        "json",
+    ];
+    for (args, resume_body, sends_wake) in [
+        (cli, json!({"session_id": "alias"}), true),
+        (
+            stdio,
+            json!({"session_id": "alias", "agent": {"tools": []}}),
+            false,
+        ),
+    ] {
+        for status in [200, 400] {
+            stub.with(|state| {
+                state.requests.clear();
+                state.tag_status = status;
+            });
+            let (code, stdout, stderr) = run_wing_env(args, &stub.home, &[]).await;
+            let requests = stub.requests();
+            let from_resume = requests
+                .iter()
+                .skip_while(|request| request.path != "/api/session/resume")
+                .collect::<Vec<_>>();
+            assert!(from_resume.len() >= 2, "{requests:?}");
+            assert_eq!(from_resume[1].path, "/api/session/tag");
+            assert_eq!(json_of(&from_resume[0].body), resume_body);
+            assert_eq!(
+                json_of(&from_resume[1].body),
+                json!({"session_id": SESSION_ID, "add": ["nightly"]})
+            );
+            if status == 400 {
+                assert_eq!(code, 1, "{stdout}{stderr}");
+                assert!(stdout.is_empty(), "{stdout}");
+                assert!(
+                    stderr.contains("Failed to tag session: API error (400): tag rejected"),
+                    "{stderr}"
+                );
+                assert_eq!(
+                    from_resume.len(),
+                    2,
+                    "tag failure must stop dispatch: {requests:?}"
+                );
+            } else {
+                assert_eq!(code, 0, "{stdout}{stderr}");
+                let next = if sends_wake {
+                    "/api/wake/create"
+                } else {
+                    "/api/session/subscribe"
+                };
+                assert_eq!(from_resume[2].path, next);
+                assert_eq!(from_resume[3].path, "/api/session/send");
+                assert_eq!(json_of(&from_resume[3].body)["session_id"], SESSION_ID);
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&stub.home);
+}
+
 /// `wing run` 的 notify 接线：登记发生在 send **之前**；四种"不登记"各有
 /// 各的理由，且都写在输出里。
 #[tokio::test]
@@ -2183,12 +2269,19 @@ async fn run_notify_registration_and_its_four_opt_outs() {
             "look at the failing test",
             "--tag",
             "dispatched",
+            "--tools",
+            "",
         ],
         &stub.home,
         &[],
     )
     .await;
     assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        body_of(&stub, "/api/session/create")["agent"]["tools"],
+        json!([]),
+        "wing run --tools '' must send an explicit empty agent.tools array"
+    );
     assert!(
         stdout.contains("notify:      #7 → parent-1 (on ask)"),
         "{stdout}"

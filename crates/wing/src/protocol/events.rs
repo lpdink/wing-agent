@@ -5,11 +5,6 @@
 //!   - wing/event/react.py
 //!   - wing/event/state_change.py
 //!   - wing/event/query_response.py
-//!
-//! 一处刻意的例外：`sync_session.usage` 与 `GET /api/session/info.usage` 是
-//! **同一份线格式**（Python 侧也刻意复用 `wing.store.SessionUsage`，不另立
-//! 镜像），所以这里直接复用 [`wing_api_client::models::SessionUsage`] 而不是
-//! 再定义一份——两份定义必然漂移，而它们本就该逐字段相同。
 
 use std::collections::HashMap;
 
@@ -18,6 +13,9 @@ use serde::Serialize;
 
 use wing_api_client::models::MediaRef;
 use wing_api_client::models::SessionUsage;
+
+// HTTP and WS share these nested payloads.
+pub use wing_api_client::models::{AgentInfo, BranchTargetInfo, CommandInfo};
 
 // ============================================================
 // Shared / nested types
@@ -103,32 +101,6 @@ impl SessionStatus {
     }
 }
 
-/// Agent configuration snapshot.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentInfo {
-    pub model_name: String,
-    /// 模型的**引用词**（∈ 配置声明的 id 空间）；不可用时缺席（serde → None）。
-    /// 前端的选择态 / 匹配以它为准（展示回落 `model_display_name`‖`model_name`）。
-    #[serde(default)]
-    pub model_id: Option<String>,
-    pub system_prompt: Option<String>,
-    #[serde(default)]
-    pub tools: Vec<String>,
-    #[serde(default)]
-    pub skills: Vec<String>,
-    #[serde(default)]
-    pub rules: Vec<String>,
-    pub workspace: Option<String>,
-    /// Active provider name; absent on old gateways (serde → None).
-    #[serde(default)]
-    pub provider_name: Option<String>,
-    /// Display label declared for `model_name` (gateway config); absent on old
-    /// gateways / undeclared models (serde → None). Display-only — identity is
-    /// `model_id`.
-    #[serde(default)]
-    pub model_display_name: Option<String>,
-}
-
 /// A selectable option in an Ask question: label + optional description.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AskOption {
@@ -166,31 +138,6 @@ impl AskQuestion {
             &self.header
         }
     }
-}
-
-/// Magic command metadata for command list.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommandInfo {
-    pub name: String,
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub params: String,
-}
-
-/// Branch target for /rewind and /fork.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BranchTargetInfo {
-    pub uuid: String,
-    pub content: String,
-    #[serde(default = "default_role")]
-    pub role: String,
-}
-
-fn default_role() -> String {
-    "user".into()
 }
 
 /// `tool_media` 走共享的宽容解码（见 [`super::media::tolerant_media_array`]）。
@@ -1090,6 +1037,28 @@ mod tests {
         let event: WingEvent = serde_json::from_str(json).unwrap();
         assert!(matches!(event, WingEvent::Unknown));
         assert_eq!(event.event_type(), "unknown");
+    }
+
+    #[test]
+    fn branch_targets_keep_default_and_explicit_roles_on_the_wire() {
+        let event: WingEvent = serde_json::from_value(serde_json::json!({
+            "type": "branch_targets",
+            "created_at": "2026-01-01T00:00:00",
+            "request_id": "req-branches",
+            "targets": [
+                {"uuid": "u1", "content": "question", "future_field": true},
+                {"uuid": "u2", "content": "answer", "role": "assistant"},
+            ],
+        }))
+        .unwrap();
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            encoded["targets"],
+            serde_json::json!([
+                {"uuid": "u1", "content": "question", "role": "user"},
+                {"uuid": "u2", "content": "answer", "role": "assistant"},
+            ])
+        );
     }
 
     #[test]
