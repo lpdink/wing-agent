@@ -221,7 +221,8 @@ class SettingsGetResponse(BaseModel):
     config_path: str = Field(description="config.yaml 的绝对路径")
     effective: EffectiveSettings = Field(description="磁盘配置的生效值与来源")
     pending_restart: list[str] | None = Field(
-        default=None, description="相对启动配置仍待重启的路径；无法判定时为 null"
+        default=None,
+        description="相对本进程已装配配置仍待重启的路径；无法判定时为 null",
     )
 
 
@@ -287,7 +288,8 @@ class SettingsSetResponse(BaseModel):
         default_factory=list, description="此次变更的逐路径生效回执"
     )
     pending_restart: list[str] | None = Field(
-        default=None, description="相对启动配置仍待重启的路径；无法判定时为 null"
+        default=None,
+        description="相对本进程已装配配置仍待重启的路径；无法判定时为 null",
     )
     fingerprint: str = Field(description="落盘后的新指纹（ok=false 时是磁盘当前指纹）")
     problems: list[SettingProblem] = Field(

@@ -425,13 +425,19 @@ async def test_empty_config_exposes_defaults_and_accepts_initial_setup(
 
         document = _fixed_document(probe)
         document["sessions"] = {"archive": {"sweep_interval_seconds": 12.0}}
+        # The repair registers background jobs but keeps the original listener and CORS middleware.
+        port = probe.env.port
+        assert port is not None
+        origin = "https://setup.probe.example"
+        document["gateway"] = {"port": 0, "cors": {"origins": [origin]}}
         saved = await http.request(
             "POST",
             "/api/settings/set",
             body={"base": current["fingerprint"], "document": document},
         )
         assert saved["written"] is saved["setup_mode_exited"] is True
-        assert saved["pending_restart"] == []
+        frozen_gateway = ["gateway.port", "gateway.cors.origins[0]"]
+        assert saved["pending_restart"] == frozen_gateway
         assert "sessions.archive.sweep_interval_seconds" in saved["restart_required"]
         assert {
             "path": "sessions.archive.sweep_interval_seconds",
@@ -440,6 +446,29 @@ async def test_empty_config_exposes_defaults_and_accepts_initial_setup(
             "steps": [],
         } in saved["effects"]
         assert (await http.request("GET", "/api/settings/status"))["valid"] is True
+        preflight = {"Origin": origin, "Access-Control-Request-Method": "GET"}
+        with pytest.raises(DriverHttpError) as denied:
+            await http.request_raw("OPTIONS", "/api/settings/get", headers=preflight)
+        assert denied.value.call.status == 400
+        assert "access-control-allow-origin" not in denied.value.call.response_headers
+
+        current = await http.request("GET", "/api/settings/get")
+        assert current["pending_restart"] == frozen_gateway
+        changed_interval = current["values"]
+        changed_interval["gateway"]["port"] = port
+        changed_interval["sessions"]["archive"]["sweep_interval_seconds"] = 15.0
+        retried = await http.request(
+            "POST",
+            "/api/settings/set",
+            body={"base": current["fingerprint"], "document": changed_interval},
+        )
+        assert retried["pending_restart"] == [
+            "sessions.archive.sweep_interval_seconds",
+            "gateway.cors.origins[0]",
+        ]
+        assert (await http.request("GET", "/api/settings/get"))[
+            "pending_restart"
+        ] == retried["pending_restart"]
     finally:
         await http.close()
 

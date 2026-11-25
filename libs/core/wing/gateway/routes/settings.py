@@ -238,10 +238,11 @@ async def settings_set(
                 document=body.document, base=body.base
             )
         except SettingsConflictError as exc:
-            assert body.base is not None
-            paths = server.settings_history.changes_since(
-                body.base, exc.fingerprint, exc.document, catalog
-            )
+            paths = None
+            if body.base is not None:
+                paths = server.settings_history.changes_since(
+                    body.base, exc.fingerprint, exc.document, catalog
+                )
             conflict = SettingsConflictResponse(
                 error="conflict",
                 detail=str(exc),
@@ -249,9 +250,7 @@ async def settings_set(
                     current_fingerprint=exc.fingerprint, changed_paths=paths
                 ),
             )
-            return JSONResponse(
-                status_code=409, content=conflict.model_dump(exclude_unset=True)
-            )
+            return conflict.to_response(409)
         except OSError as exc:
             raise HTTPException(
                 status_code=500, detail=f"failed to write config.yaml: {exc}"

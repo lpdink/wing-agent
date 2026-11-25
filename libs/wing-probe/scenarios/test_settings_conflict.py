@@ -61,6 +61,7 @@ async def test_concurrent_writes_and_external_edits_report_paths(probe: Probe) -
     with pytest.raises(DriverHttpError) as unknown:
         await _save(http, "0" * 64, fresh["values"])
     assert unknown.value.status == 409
+    assert set(unknown.value.call.response) == {"error", "detail", "conflict"}
     assert unknown.value.call.response["conflict"]["changed_paths"] is None
     assert path.read_bytes() == external
 
