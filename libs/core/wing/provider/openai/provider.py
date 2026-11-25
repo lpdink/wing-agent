@@ -17,10 +17,11 @@ import httpx
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
-from wing.config import get_headers
+from wing.config import get_headers, resolve_model_capabilities
 from wing.provider.base import (
     ModelProvider,
     PendingToolView,
+    ReasoningSupport,
     RequestOptions,
     StreamAccumulator,
     parse_tool_args,
@@ -187,6 +188,22 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         """
         return bool(self._extra_body.get("enable_thinking", True))
 
+    def reasoning_support(self, model: str) -> ReasoningSupport:
+        capabilities = resolve_model_capabilities(self.config, model)
+        effort = capabilities.reasoning_effort
+        return ReasoningSupport(
+            thinking=capabilities.thinking,
+            effort=tuple(dict.fromkeys(effort)) if effort is not None else None,
+        )
+
+    def _request_effort(self, override: str | None) -> object:
+        effort = self.config.reasoning_effort if override is None else override
+        return effort or self._extra_body.get("reasoning_effort")
+
+    def request_reasoning_effort(self, override: str | None) -> str | None:
+        effort = self._request_effort(override)
+        return effort if isinstance(effort, str) and effort else None
+
     # ─── Request Building ─────────────────────────────────────────
 
     def _build_body(
@@ -238,12 +255,8 @@ class OpenAICompatProvider(_SerializeMixin, _StreamMixin, ModelProvider):
             if k not in body:
                 body[k] = v
 
-        effort = (
-            options.reasoning_effort
-            if options.reasoning_effort is not None
-            else self._config.reasoning_effort
-        )
-        if effort:
+        effort = self._request_effort(options.reasoning_effort)
+        if effort is not None:
             body["reasoning_effort"] = effort
 
         # prompt_cache_key（显式缓存模式）：key 来自调用方注入的会话 id

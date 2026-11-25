@@ -185,6 +185,10 @@ class UpdateSessionRequest(BaseModel):
         default=None,
         description="切换工具集（全量替换，ref 格式：namespace.name 或裸名）",
     )
+    validate_reasoning: bool = Field(
+        default=False,
+        description="按当前模型校验 thinking / reasoning_effort；仅可与这两项一起提交",
+    )
 
 
 class TagSessionRequest(BaseModel):
@@ -342,6 +346,17 @@ class ContextStatsInfo(BaseModel):
     total_tokens: int = Field(description="当前上下文 token 总数")
 
 
+class SessionReasoningInfo(BaseModel):
+    """当前 provider 实际请求值及当前模型可编辑的推理选项。"""
+
+    thinking: bool
+    thinking_supported: bool | None = Field(description="null 表示模型能力未知")
+    effort: str | None = Field(description="会话力度的实际请求值，未发送时为 null")
+    effort_options: list[str] | None = Field(
+        description="null 表示未知，空列表表示不支持"
+    )
+
+
 class SessionInfoResponse(BaseModel):
     """GET /api/session/info 响应——session 运行时状态。"""
 
@@ -369,7 +384,13 @@ class SessionInfoResponse(BaseModel):
     reasoning_effort: str | None = Field(
         default=None, description=f"推理力度: {_EFFORT_VALUES}"
     )
+    reasoning: SessionReasoningInfo = Field(
+        description="实际请求值及当前模型的推理控件能力"
+    )
     yolo: bool = Field(description="yolo 模式是否开启")
+    template_name: str | None = Field(
+        default=None, description="当前会话使用的 Agent 模板"
+    )
     session_name: str | None = Field(default=None, description="session 名称")
     workdir: str | None = Field(
         default=None,

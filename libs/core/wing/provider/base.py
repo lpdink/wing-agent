@@ -62,6 +62,14 @@ class RequestOptions:
     cache_probe: CacheProbe | None = None
 
 
+@dataclass(frozen=True)
+class ReasoningSupport:
+    """Per-model session controls implemented by the active request protocol."""
+
+    thinking: bool | None = False
+    effort: tuple[str, ...] | None = ()
+
+
 class ProviderClosedError(RuntimeError):
     """已经关闭的 provider 实例被用于发起新调用。
 
@@ -274,6 +282,15 @@ class ModelProvider(ABC):
         （见 `WingAgent.thinking`）。基类默认 False。
         """
         return False
+
+    def reasoning_support(self, model: str) -> ReasoningSupport:
+        return ReasoningSupport()
+
+    def request_thinking(self, override: bool | None) -> bool:
+        return self.thinking if override is None else override
+
+    def request_reasoning_effort(self, override: str | None) -> str | None:
+        return None
 
     # ── 生命周期（池所有权）───────────────
 

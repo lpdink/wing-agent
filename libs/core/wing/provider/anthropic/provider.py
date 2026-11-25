@@ -23,6 +23,7 @@ import httpx
 
 from wing.common.logger import log
 from wing.common.with_retry import with_retry
+from wing.config import resolve_model_capabilities
 from wing.provider.anthropic.serialize import _SerializeMixin
 from wing.provider.anthropic.stream import (
     _StreamMixin,
@@ -32,6 +33,7 @@ from wing.provider.anthropic.stream import (
 from wing.provider.base import (
     ModelProvider,
     PendingToolView,
+    ReasoningSupport,
     RequestOptions,
     StreamAccumulator,
     pending_views,
@@ -173,11 +175,34 @@ class AnthropicProvider(_SerializeMixin, _StreamMixin, ModelProvider):
         """
         return self._thinking_enabled(self._extra_body)
 
+    def reasoning_support(self, model: str) -> ReasoningSupport:
+        thinking = self._thinking_override_view(self._extra_body, True)["thinking"]
+        budget = thinking["budget_tokens"]
+        if self._thinking_type(self._extra_body) not in (
+            None,
+            "enabled",
+            "disabled",
+        ) or (
+            not isinstance(budget, int) or not 1024 <= budget < self.config.max_tokens
+        ):
+            return ReasoningSupport()
+        capabilities = resolve_model_capabilities(self.config, model)
+        return ReasoningSupport(thinking=capabilities.thinking)
+
+    def request_thinking(self, override: bool | None) -> bool:
+        if override is None and self._thinking_type(self._extra_body) == "adaptive":
+            return True
+        return super().request_thinking(override)
+
+    @staticmethod
+    def _thinking_type(extra_body: dict) -> object:
+        thinking = extra_body.get("thinking")
+        return thinking.get("type") if isinstance(thinking, dict) else None
+
     @staticmethod
     def _thinking_enabled(extra_body: dict) -> bool:
         """extra_body 是否启用 thinking（Anthropic 官方开关：thinking.type=enabled）。"""
-        tb = extra_body.get("thinking")
-        return isinstance(tb, dict) and tb.get("type") == "enabled"
+        return AnthropicProvider._thinking_type(extra_body) == "enabled"
 
     @staticmethod
     def _thinking_override_view(extra_body: dict, override: bool) -> dict:

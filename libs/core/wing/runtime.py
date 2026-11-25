@@ -802,6 +802,7 @@ class WingRuntime:
         yolo: bool | None = None,
         workspace: str | None = None,
         tools: list[str] | None = None,
+        validate_reasoning: bool = False,
     ) -> None:
         """统一更新 session 状态。
 
@@ -816,6 +817,14 @@ class WingRuntime:
                 工具引用无法解析
         """
         session = self._require_session(session_id)
+        if validate_reasoning:
+            if any(
+                v is not None for v in (model_id, agent, title, yolo, workspace, tools)
+            ):
+                raise ValueError(
+                    "validated reasoning updates only accept thinking and reasoning_effort"
+                )
+            session.validate_reasoning_update(thinking, reasoning_effort)
 
         template = None
         if agent is not None:

@@ -968,6 +968,21 @@ class Session:
             self._save_metadata()
         return mutation
 
+    def validate_reasoning_update(
+        self, thinking: bool | None, reasoning_effort: str | None
+    ) -> None:
+        support = self.agent.model_provider.reasoning_support(self.agent.model)
+        if thinking is not None and support.thinking is not True:
+            raise ValueError("thinking control is unavailable for the current model")
+        if reasoning_effort is not None and reasoning_effort not in (
+            support.effort or ()
+        ):
+            raise ValueError(
+                "reasoning_effort is unavailable for the current model"
+                if not support.effort
+                else "reasoning_effort must be one of: " + ", ".join(support.effort)
+            )
+
     async def update_state(
         self,
         *,

@@ -679,6 +679,7 @@ async def update_session(
             yolo=body.yolo,
             workspace=body.workspace,
             tools=body.tools,
+            validate_reasoning=body.validate_reasoning,
         )
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))

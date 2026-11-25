@@ -55,18 +55,31 @@ PROVIDER_NAME_PATTERN = r"^[a-zA-Z0-9_-]+$"
 class ModelCapabilities(BaseModel):
     """模型能力声明（models 对象形态的 capabilities 字段）。
 
-    未声明 = 全 false（安全默认）；不做名字启发式。frozen：声明是配置事实，
-    运行期只读，同时可被 provider 层投影安全共享（无需复制）。
+    图片输入默认关闭，推理控件默认未知。不做名字启发式。
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore")
     """extra="ignore"：未来新增能力（audio 等）时旧版本忽略未知键而非拒绝配置。"""
 
     vision: bool = S(
-        doc="是否接受图片输入（本期唯一能力）",
+        doc="是否接受图片输入",
         notes="未声明或 false 时，ReadImage 不会为该模型附图片（请求里只留占位文本）。",
         apply=ApplyScope.HOT,
         default=False,
+    )
+
+    thinking: bool | None = S(
+        doc="该模型是否支持当前 provider 协议的会话 thinking 开关",
+        notes="null 表示未知。仅在上游支持开关两种取值时声明 true。",
+        apply=ApplyScope.HOT,
+        default=None,
+    )
+    reasoning_effort: list[Literal["low", "medium", "high", "xhigh", "max"]] | None = S(
+        doc="该模型通过 OpenAI 兼容 reasoning_effort 字段接受的会话力度档位",
+        notes="按展示顺序填写。null 表示未知，空列表表示不支持。",
+        apply=ApplyScope.HOT,
+        default=None,
+        choices={**REASONING_EFFORT_CHOICES, "xhigh": "很高推理强度（由上游定义）"},
     )
 
 
@@ -125,7 +138,7 @@ class ModelSpec(BaseModel):
         ge=0,
     )
     capabilities: ModelCapabilities = S(
-        doc="能力声明（未声明 = 全 false 的安全默认）",
+        doc="模型能力声明",
         apply=ApplyScope.HOT,
         default_factory=ModelCapabilities,
     )
@@ -415,7 +428,7 @@ def resolve_model_capabilities(
 ) -> ModelCapabilities:
     """解析模型的能力声明（读图门禁与请求期投影的唯一入口）。
 
-    未声明（含字符串形态 / 不在列表内）= 全 false 的安全默认；不做名字启发式。
+    未声明（含字符串形态 / 不在列表内）使用 ModelCapabilities 的默认值。
     """
     spec = provider_cfg.find_model(model)
     return spec.capabilities if spec is not None else ModelCapabilities()
