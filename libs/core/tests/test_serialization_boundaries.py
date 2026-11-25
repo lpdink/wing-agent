@@ -37,6 +37,7 @@ from wing.schema import (
     ThinkingBlock,
     ToolUseBlock,
 )
+from wing.session import serialize_message
 from wing.store.file import FileMessageLog
 
 
@@ -414,3 +415,18 @@ class TestBackoffWindowResidueKnownLimitation:
         acc.state = fresh
         blocks2 = provider.snapshot_blocks(acc)
         assert blocks2[0].text == "new attempt"
+
+
+def test_legacy_tool_result_text_has_no_ask_outcome() -> None:
+    record = {
+        "role": "tool",
+        "tool_call_id": "legacy-ask",
+        "content": "User cancelled the questions. Proceed with your best judgment.",
+        "tool_status": "success",
+    }
+    message = Message.model_validate(record)
+    assert message.ask_outcome is None
+    assert message.dump_for_history() == record
+    projected = serialize_message(message)
+    assert "ask_outcome" not in projected
+    assert projected["content"] == record["content"]

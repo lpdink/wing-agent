@@ -557,11 +557,13 @@ def rewrite(call):
         assert (await session.interrupt())["ok"]
         tool = (await joined.watch.expect("tool_call_result")).data
         assert tool["tool_status"] == "interrupted"
+        assert "ask_outcome" not in tool
         assert tool["tool_args"] == execution["tool_args"]
         assert tool["tool_args"]["questions"][0]["question"] == "Rewritten question?"
         saved_assistant, saved_tool = (await _history(session))["messages"][1:]
         assert saved_assistant["tool_calls"][0]["arguments"] == ASK_ARGS
         assert saved_tool["tool_args"] == tool["tool_args"]
+        assert "ask_outcome" not in saved_tool
         _assert_fields(
             saved_tool, tool, (*MESSAGE_FIELDS, "tool_call_id", "tool_status")
         )

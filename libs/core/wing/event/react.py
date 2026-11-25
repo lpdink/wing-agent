@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, Self
 from pydantic import BaseModel, Field, SerializerFunctionWrapHandler, model_serializer
 
 from wing.schema import MediaRef, usage_wire
-from wing.schema.message import ToolResultStatus
+from wing.schema.message import AskOutcome, ToolResultStatus
 
 from .base import HistoryNotice, WingEvent
 
@@ -132,6 +132,7 @@ class ToolCallResultEvent(WingEvent):
     tool_result: str
     tool_success: bool
     tool_status: ToolResultStatus | None = None
+    ask_outcome: AskOutcome | None = None
     message_id: str | None = None
     message_at: str | None = None
     model: str = ""
@@ -170,6 +171,7 @@ class ToolCallResultEvent(WingEvent):
             tool_result=result,
             tool_success=success,
             tool_status=message.tool_status if message else None,
+            ask_outcome=message.ask_outcome if message else None,
             message_id=message.message_id if message else None,
             message_at=(
                 message.message_at.isoformat()

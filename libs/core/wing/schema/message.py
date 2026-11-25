@@ -136,6 +136,7 @@ class MediaRef(BaseModel):
 
 
 ToolResultStatus = Literal["success", "error", "interrupted"]
+AskOutcome = Literal["answered", "cancelled"]
 
 
 class Message(ChainNode):
@@ -147,6 +148,7 @@ class Message(ChainNode):
     provider_name: str | None = None
     model_display_name: str | None = None
     tool_status: ToolResultStatus | None = None
+    ask_outcome: AskOutcome | None = None
     duration_ms: int | None = None
     tool_args: dict[str, Any] | None = None
     content_blocks: list[ContentBlock] | None = None
