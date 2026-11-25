@@ -213,7 +213,7 @@ def pending_settings_restart(
 ) -> list[str] | None:
     if config is None:
         return None
-    current = SparseDocument(data=config.model_dump(include={"gateway", "sessions"}))
+    current = SparseDocument(data=config.model_dump(include=set(startup.data)))
     return restart_required_paths(changed_paths(startup, current, catalog), catalog)
 
 

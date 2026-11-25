@@ -153,7 +153,10 @@ emitter 的输出规则（`config/emit.py`，首启模板与每次保存写盘�
 （**结构性三元组** `ExtraKey(父容器前缀, 原始键名, 值)`，如 `("gateway", "weird", …)` /
 `("providers[0]", "foo", …)`；freeform map 的内部键不算），
 保存时从**磁盘文档**取回、写在父容器已知键之后，上面一行
-`# unknown key (not recognized by this wing version)`；父容器缺席时兜底写在文件末尾。与根部已有键或声明键重名的条目在独立未知键中保留原父路径、键名和值。
+`# unknown key (not recognized by this wing version)`。父容器缺席时，条目追加在文件末尾。
+如果与根部已有键或声明键重名，则在 `_wing_orphaned_settings` 列表中记录原 `parent`、`key` 和 `value`。
+该键已被占用时追加下划线，直到找到空闲键。后续保存按未知根键保留备份。确认不再需要时，在 `config.yaml`
+中手动删除相应条目或整个备份根键。需要恢复时，从备份条目取出原值并放回正确的父容器。
 ——新版本写的键，旧版本编辑时**不能吃掉**（这是"安全"与"毁掉用户配置"的分界线）。
 **键名不参与任何字符串切分**：`gateway.foo.bar` 这种「键名本身含点」的未知键必须原地写回
 （曾经用 `rpartition(".")` 反推父容器，会把键挪到错误的名字 / 位置）。
@@ -236,7 +239,7 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 | `warnings` | 非致命告知（与 `problems` 的区别：problems 让保存失败，warnings 只是提醒） |
 | `written` | 此次保存已完成配置文件写盘，热重载失败仍为 `true`。校验失败为 `false` |
 | `effects` | 此次变更的逐路径应用结果。`scope` 来自目录。`steps` 引用实际尝试过的重载阶段。状态为 `applied`、`next_session`、`restart_required`、`failed`、`unknown` 或 `readonly` |
-| `pending_restart` | 相对进程启动配置仍待重启的已知路径，`get` 同样返回。重复保存仍报告，复位到启动值或重启后消失。配置无效或处于 setup mode 时为 `null` |
+| `pending_restart` | 磁盘值与本进程已经装配的值仍有差异的重启域路径，`get` 同样返回。重复保存仍报告。配置无效或处于 setup mode 时为 `null` |
 
 同一网关进程的 HTTP 保存和手动重载沿用同一把应用锁。锁覆盖配置读取、写盘和运行期应用。冲突回执保留 `error` 与字符串 `detail`，
 增 `conflict.current_fingerprint` 和 `conflict.changed_paths`。`changed_paths` 比较服务器近期观察过的
@@ -248,9 +251,10 @@ name    := [A-Za-z_][A-Za-z0-9_]*      idx := 非负整数（≤ 2**64-1，拒�
 逐路径回执报告 `failed`。保存的 `reload.failed_settings` 和手动重载的 `failed_settings` 均返回本次
 可以定位的资源失败路径。重复保存也会重新检查文件，即使 `changed` 为空。步骤 `detail` 继续点名配置路径，
 原有步骤的 `ok` 仍表示整步是否中止。阶段级异常继续看 `results[].ok`。
-setup 中 Provider 保持惰性构造，相关热字段在首启回执中报告 `unknown`。`pending_restart` 比较配置启动基线，
-`gateway.host` 与 `gateway.port` 的命令行覆盖属于进程部署参数。setup 原地注册的后台任务采用修复时的配置，
-应用结果会反映该状态。旧 `restart_required` 继续报告本次变更的重启域路径。
+setup 中 Provider 保持惰性构造，相关热字段在首启回执中报告 `unknown`。`pending_restart` 由已装配的
+网关和会话配置比较得出，监听地址和端口包含本次进程实际采用的命令行覆盖。两侧值一致时清除相应路径。
+setup 修复后原有监听和 CORS 中间件仍使用启动时的值，原地注册的后台任务采用修复时的配置。
+旧 `restart_required` 继续报告本次变更的重启域路径。
 
 
 `changed_paths` 的口径：对两棵稀疏文档做递归 diff，**列表按下标**（删除 `providers[0]` 会把后续项

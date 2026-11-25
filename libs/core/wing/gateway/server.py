@@ -33,7 +33,6 @@ from wing.config import (
     ConfigProblem,
     GatewayConfig,
     ProblemKind,
-    SessionsConfig,
     load_config,
 )
 from wing.config.boot import BootFailure, BootResult, boot_config
@@ -175,18 +174,13 @@ class GatewayServer:
         self.port = port
         self._boot = boot if boot is not None else boot_config()
         startup_config = self._boot.config
-        startup_host, startup_port = (
-            (startup_config.gateway.host, startup_config.gateway.port)
-            if startup_config is not None
-            else self._boot.endpoint or (DEFAULT_HOST, DEFAULT_PORT)
-        )
         # setup mode 的替身：``runtime`` 因此恒非 Optional——配置不可用不是
         # 「有时没有 runtime」，而是「除修复路径外一律 503」（守门 + 替身共同保证）。
         self._runtime: WingRuntime = _SetupRuntime(self)
         self._in_setup_mode = True
         self.settings_lock = asyncio.Lock()
         self.settings_history = SettingsHistory()
-        self._installed_sessions_config: SessionsConfig | None = None
+        self._startup_settings: dict[str, Any] = {}
         self._client_to_ws: dict[str, WebSocket] = {}
         self._ws_to_client: dict[WebSocket, str] = {}
         self._event_senders: dict[WebSocket, _EventSender] = {}
@@ -205,12 +199,16 @@ class GatewayServer:
                 # 会静默降级：boot_reason=None、problems 为空、503 说「共 0 条问题」，
                 # 而 status.valid=true（预检把用户送进正常启动链再吃一串 503）。
                 self._record_startup_failure(result)
+        gateway = (
+            startup_config.gateway
+            if startup_config is not None and not self._in_setup_mode
+            else GatewayConfig()
+        )
+        self._startup_settings["gateway"] = gateway.model_copy(
+            update={"host": self.host, "port": self.port}
+        ).model_dump()
+        self._cors_origins = tuple(gateway.cors.origins)
         self._app = create_app(self)
-        self._startup_gateway_settings = {
-            "host": startup_host,
-            "port": startup_port,
-            "cors": {"origins": self.cors_origins},
-        }
 
     # ============================================================
     # 运行模式
@@ -333,7 +331,7 @@ class GatewayServer:
 
         # 全部成功：同一个同步块里原子翻转（请求处理之间看不到中间态）。
         self._runtime = runtime
-        self._installed_sessions_config = config.sessions
+        self._startup_settings["sessions"] = config.sessions.model_dump()
         self._in_setup_mode = False
         log.info(
             "setup mode exited: gateway is operational (config reloaded from disk)"
@@ -342,10 +340,7 @@ class GatewayServer:
 
     def settings_startup(self) -> SparseDocument:
         """Configuration captured when process resources were installed."""
-        data: dict[str, Any] = {"gateway": self._startup_gateway_settings}
-        if self._installed_sessions_config is not None:
-            data["sessions"] = self._installed_sessions_config.model_dump()
-        return SparseDocument(data=data)
+        return SparseDocument(data=self._startup_settings)
 
     def _record_startup_failure(self, result: ReloadResult) -> None:
         """启动路径转入正常模式失败：**不静默降级**。
@@ -448,9 +443,7 @@ class GatewayServer:
         **app 装配时读一次**（CORS 中间件在进程启动时装配）——改配置要重启网关；
         setup mode 下配置不可信，返回空列表（只保留 loopback 默认放通）。
         """
-        if self._in_setup_mode:
-            return []
-        return list(load_config().gateway.cors.origins)
+        return list(self._cors_origins)
 
     def _warn_auth_lockout(self, auth: AuthConfig | None = None) -> str | None:
         """检查 auth 配置，空 keys 锁死时发出警告；返回告警文案（未锁死 = ``None``）。

@@ -286,12 +286,16 @@ async def test_pending_restart_survives_another_save_and_clears_on_restart(
     current["values"]["gateway"]["cors"] = {"origins": [RESTART_ORIGIN]}
     receipt = await _save(http, current)
     assert receipt["pending_restart"] == [restart_path]
+    configured_port = current["values"]["gateway"]["port"]
     probe.env.config_text = probe.env.config_path.read_text(encoding="utf-8")
     await probe.restart_gateway()
     http = probe.driver_required.http
     current = await _get(http)
     assert current["fingerprint"] == receipt["fingerprint"]
-    assert current["pending_restart"] == []
+    # ProbeEnv may relaunch with a different CLI port while preserving file bytes.
+    assert current["pending_restart"] == (
+        [] if probe.env.port == configured_port else ["gateway.port"]
+    )
     call, _ = await http.request_raw(
         "OPTIONS", "/api/settings/get", headers=preflight_headers
     )
@@ -333,6 +337,12 @@ async def test_unknown_removed_provider_key_cannot_become_a_gateway_setting(
     assert disk["_wing_orphaned_settings_"] == [
         {"parent": "providers[1]", "key": "gateway", "value": unknown}
     ]
+    assert "_wing_orphaned_settings_" not in current["values"]
+    assert (await _save(http, current))["written"] is True
+    assert (
+        yaml.safe_load(path.read_bytes())["_wing_orphaned_settings_"]
+        == disk["_wing_orphaned_settings_"]
+    )
 
 
 @pytest.mark.asyncio
@@ -412,15 +422,19 @@ async def test_file_loading_reports_failed_patterns_and_keeps_successful_command
     } == {"probe-good", "probe-repaired"}
 
 
+@pytest.mark.parametrize("override_listener", [False, True], ids=["file", "cli"])
 @pytest.mark.asyncio
-async def test_quoted_port_uses_the_validated_boot_value(
-    probe: Probe, tmp_path: Path
+async def test_pending_restart_compares_against_the_bound_listener(
+    probe: Probe, tmp_path: Path, override_listener: bool
 ) -> None:
-    home = tmp_path / "quoted-port"
+    home = tmp_path / "bound-listener"
     (home / "core").mkdir(parents=True)
     port = reserve_port()
     raw = yaml.safe_load(probe.env.config_path.read_bytes())
-    raw["gateway"]["port"] = str(port)
+    configured_port = probe.env.port if override_listener else port
+    assert configured_port is not None
+    configured_host = "localhost" if override_listener else "127.0.0.1"
+    raw["gateway"].update(host=configured_host, port=str(configured_port))
     config = home / "core" / "config.yaml"
     config.write_text(yaml.safe_dump(raw), encoding="utf-8")
     home_env = {
@@ -431,9 +445,12 @@ async def test_quoted_port_uses_the_validated_boot_value(
     url = f"http://127.0.0.1:{port}"
     http = DriverHttp(url)
     log = home / "gateway.log"
+    command = [str(resolve_gateway_bin())]
+    if override_listener:
+        command.extend(["--host", "127.0.0.1", "--port", str(port)])
     with log.open("wb") as output:
         process = subprocess.Popen(
-            [str(resolve_gateway_bin())],
+            command,
             cwd=home,
             env=home_env,
             stdout=output,
@@ -445,15 +462,28 @@ async def test_quoted_port_uses_the_validated_boot_value(
             )
             current = await _get(http)
             assert current["config_path"] == str(config)
-            assert current["values"]["gateway"]["port"] == str(port)
-            assert current["effective"]["values"]["gateway"]["port"] == port
-            assert current["pending_restart"] == []
+            assert current["values"]["gateway"]["port"] == str(configured_port)
+            assert current["effective"]["values"]["gateway"]["port"] == configured_port
+            assert current["effective"]["values"]["gateway"]["host"] == configured_host
+            expected = ["gateway.host", "gateway.port"] if override_listener else []
+            assert current["pending_restart"] == expected
+            repeated = await _save(http, current)
+            assert repeated["changed"] == repeated["restart_required"] == []
+            assert repeated["pending_restart"] == expected
+
+            current = await _get(http)
             current["values"]["gateway"]["port"] = reserve_port()
             assert current["values"]["gateway"]["port"] != port
-            assert (await _save(http, current))["pending_restart"] == ["gateway.port"]
+            expected = (
+                ["gateway.host", "gateway.port"]
+                if override_listener
+                else ["gateway.port"]
+            )
+            assert (await _save(http, current))["pending_restart"] == expected
             current = await _get(http)
-            current["values"]["gateway"]["port"] = port
+            current["values"]["gateway"].update(host="127.0.0.1", port=port)
             assert (await _save(http, current))["pending_restart"] == []
+            assert (await _get(http))["pending_restart"] == []
         finally:
             await http.close()
             if process.poll() is None:
