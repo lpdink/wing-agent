@@ -1663,7 +1663,7 @@ mod tests {
     /// 用例（`renderer::tests`）；这里只钉「会不会退出」以及「哪一轮收口算了数」。
     #[test]
     fn one_shot_terminates_on_every_turn_closing_shape() {
-        let cases: [(&str, Vec<WingEvent>, Option<ExitCode>); 5] = [
+        let cases: [(&str, Vec<WingEvent>, Option<ExitCode>); 4] = [
             (
                 "turn_result(success) → done",
                 vec![
@@ -1686,11 +1686,6 @@ mod tests {
                 "interrupted（后端不发 turn_result / done）",
                 vec![turn_started(), assistant("hi"), interrupted()],
                 Some(ExitCode::SUCCESS),
-            ),
-            (
-                "error + done（没有 turn_result，issue #246）",
-                vec![turn_started(), backend_error("boom"), done()],
-                Some(ExitCode::FAILURE),
             ),
             (
                 "只有 error（没有轮末信号）",

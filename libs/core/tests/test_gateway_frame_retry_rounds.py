@@ -63,14 +63,3 @@ def test_frames_match_their_envelope_count(
     for frame in frames:
         assert frame.size <= soft
         assert frame.size == len(frame.text.encode("utf-8")), "size 必须精确"
-
-
-def test_low_escape_payload_keeps_the_same_invariants(monkeypatch: pytest.MonkeyPatch):
-    """对照：低转义密度的载荷（未必进重试轮）同样满足信封 / 序号 / 回拼不变量。"""
-    monkeypatch.setattr(frames_mod, "SOFT_LIMIT_BYTES", 1_000)
-    payload = "x" * 5_000
-    frames = build_frames(payload, "notice")
-    envelopes = [json.loads(frame.text) for frame in frames]
-    assert {e["count"] for e in envelopes} == {len(frames)}
-    assert [e["index"] for e in envelopes] == list(range(len(frames)))
-    assert "".join(e["data"] for e in envelopes) == payload

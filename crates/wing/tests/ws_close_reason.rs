@@ -11,65 +11,48 @@
 use std::time::Duration;
 
 use futures_util::SinkExt;
-use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::WebSocketStream;
+use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use wing::gateway::{CloseReason, GatewayClient};
 
+#[allow(dead_code)]
+#[path = "common/e2e.rs"]
+mod e2e;
+
+use e2e::{start_ws_server, wait_for_ws_disconnect};
+
 /// The client's per-frame receive limit (tungstenite default).
 const FRAME_LIMIT: usize = 16 * 1024 * 1024;
 
-/// Send the handshake frame every client waits for after upgrading.
-async fn send_handshake(ws: &mut WebSocketStream<TcpStream>) {
-    ws.send(Message::Text(
-        r#"{"type":"connected","client_id":"test"}"#.into(),
-    ))
-    .await
-    .unwrap();
-}
-
-/// Bind a loopback listener and hand the accepted socket to `handler`.
-async fn spawn_server<F>(handler: F) -> String
-where
-    F: FnOnce(WebSocketStream<TcpStream>) -> futures_util::future::BoxFuture<'static, ()>
-        + Send
-        + 'static,
-{
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.unwrap();
-        let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
-        handler(ws).await;
-    });
-    format!("ws://{addr}/ws")
+async fn assert_stream_closed(client: &mut GatewayClient) {
+    let event = tokio::time::timeout(Duration::from_secs(5), client.recv_event())
+        .await
+        .expect("event stream must close promptly");
+    assert!(event.is_none(), "stream must be over");
 }
 
 #[tokio::test]
 async fn close_frame_is_reported_with_code_and_reason() {
-    let url = spawn_server(|mut ws| {
-        Box::pin(async move {
-            send_handshake(&mut ws).await;
-            ws.send(Message::Close(Some(CloseFrame {
-                code: CloseCode::Normal,
-                reason: "bye".into(),
-            })))
-            .await
-            .unwrap();
-            // Keep the socket alive long enough for the client to read it.
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        })
+    let (allow_close, can_close) = oneshot::channel();
+    let (url, _) = start_ws_server(|mut ws| async move {
+        can_close.await.unwrap();
+        ws.send(Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "bye".into(),
+        })))
+        .await
+        .unwrap();
+        wait_for_ws_disconnect(ws).await;
     })
     .await;
 
     let mut client = GatewayClient::connect(&url, None).await.unwrap();
-    // Connected: no reason yet.
     assert_eq!(client.close_reason(), None);
-
-    assert!(client.recv_event().await.is_none(), "stream must be over");
+    allow_close.send(()).unwrap();
+    assert_stream_closed(&mut client).await;
     match client.close_reason() {
         Some(CloseReason::CloseFrame { code, reason }) => {
             assert_eq!(*code, 1000);
@@ -83,23 +66,25 @@ async fn close_frame_is_reported_with_code_and_reason() {
 
 #[tokio::test]
 async fn oversized_frame_is_reported_as_frame_too_large() {
-    // One byte over the client's limit: the read task dies with
-    // `CapacityError::MessageTooLong` — exactly what a >16 MiB sync payload
-    // does to `wing wait` / the TUI.
-    let payload = "x".repeat(FRAME_LIMIT + 1);
+    let head = r#"{"type":"sync_session","session_id":"s1","status":"idle","created_at":"2026-09-13T00:00:00+00:00","request_id":"req-1","messages":[{"role":"assistant","content":""#;
+    let tail = r#""}]}"#;
+    let mut payload = String::with_capacity(FRAME_LIMIT + 1);
+    payload.push_str(head);
+    payload.extend(std::iter::repeat_n(
+        'x',
+        FRAME_LIMIT + 1 - head.len() - tail.len(),
+    ));
+    payload.push_str(tail);
 
-    let url = spawn_server(move |mut ws| {
-        Box::pin(async move {
-            send_handshake(&mut ws).await;
-            // The write side has no frame-size limit — this arrives as one frame.
-            let _ = ws.send(Message::Text(payload.into())).await;
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        })
+    let (url, _) = start_ws_server(move |mut ws| async move {
+        // The client may reject the frame as soon as it reads the length.
+        let _ = ws.send(Message::Text(payload.into())).await;
+        wait_for_ws_disconnect(ws).await;
     })
     .await;
 
     let mut client = GatewayClient::connect(&url, None).await.unwrap();
-    assert!(client.recv_event().await.is_none(), "stream must be over");
+    assert_stream_closed(&mut client).await;
     match client.close_reason() {
         Some(CloseReason::FrameTooLarge { size, max_size }) => {
             assert_eq!(*max_size, FRAME_LIMIT);
@@ -115,17 +100,11 @@ async fn oversized_frame_is_reported_as_frame_too_large() {
 
 #[tokio::test]
 async fn abrupt_disconnect_is_reported_as_read_error() {
-    let url = spawn_server(|mut ws| {
-        Box::pin(async move {
-            send_handshake(&mut ws).await;
-            // Drop the TCP connection without a close handshake.
-            drop(ws);
-        })
-    })
-    .await;
+    // Drop the TCP connection without a close handshake.
+    let (url, _) = start_ws_server(|_| async {}).await;
 
     let mut client = GatewayClient::connect(&url, None).await.unwrap();
-    assert!(client.recv_event().await.is_none(), "stream must be over");
+    assert_stream_closed(&mut client).await;
     match client.close_reason() {
         Some(CloseReason::ReadError { detail }) => {
             assert!(!detail.is_empty(), "read errors must not lose their detail");
@@ -139,18 +118,15 @@ async fn abrupt_disconnect_is_reported_as_read_error() {
 
 #[tokio::test]
 async fn healthy_connection_has_no_close_reason() {
-    let url = spawn_server(|mut ws| {
-        Box::pin(async move {
-            send_handshake(&mut ws).await;
-            // Stay open; nothing else happens.
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        })
-    })
-    .await;
+    let (url, _) = start_ws_server(wait_for_ws_disconnect).await;
 
-    let client = GatewayClient::connect(&url, None).await.unwrap();
-    // Give the read task a chance to end if it were going to.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    let mut client = GatewayClient::connect(&url, None).await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), client.recv_event())
+            .await
+            .is_err(),
+        "an idle connection must keep waiting for events"
+    );
     assert_eq!(
         client.close_reason(),
         None,

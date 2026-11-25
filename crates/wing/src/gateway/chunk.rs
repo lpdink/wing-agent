@@ -480,18 +480,38 @@ mod tests {
     }
 
     #[test]
-    fn chunked_payload_is_reassembled_into_one_complete_event() {
-        let payload = sync_payload(64);
-        let (first, last) = split_payload(&payload, "c1");
-        let mut r = Reassembler::default();
+    fn gateway_wire_fixture_reassembles_before_the_live_event() {
+        // The Python frame test owns and regenerates these gateway wire bytes.
+        let mut lines = include_str!("../../tests/fixtures/sync_session_chunked.jsonl").lines();
+        let payload = lines.next().unwrap();
+        let expected: WingEvent = serde_json::from_str(payload).unwrap();
+        assert_eq!(sync_content(&expected), Some(r#"中🙂 "quote" \ path"#));
 
-        assert!(is_pending(&r.on_text(&first)));
+        let first = lines.next().unwrap();
+        let last = lines.next_back().unwrap();
+        assert!(first.starts_with(CHUNK_PREFIX));
+        let mut r = Reassembler::default();
+        assert!(is_pending(&r.on_text(first)));
         assert!(r.is_assembling(), "首片之后必须处于重组窗口内");
         assert!(r.deadline().is_some());
+        assert!(is_pending(&r.on_text(&text_payload("next delta"))));
 
-        let events = delivered(r.on_text(&last));
-        assert_eq!(events.len(), 1, "应用层只见一个完整事件");
-        assert_eq!(sync_content(&events[0]), Some("x".repeat(64).as_str()));
+        for frame in lines {
+            assert!(is_pending(&r.on_text(frame)));
+        }
+        let events = delivered(r.on_text(last));
+        assert_eq!(
+            events.len(),
+            2,
+            "expected a snapshot followed by live text: {events:?}"
+        );
+        assert_eq!(events[0].session_id(), expected.session_id());
+        assert_eq!(sync_content(&events[0]), sync_content(&expected));
+        assert!(
+            matches!(&events[1], WingEvent::Text { content, .. } if content == "next delta"),
+            "expected buffered live text: {:?}",
+            events[1]
+        );
         assert!(!r.is_assembling());
     }
 

@@ -3,17 +3,28 @@
 //! 每个 `*_e2e.rs` 自己决定假网关怎么答（`handler` / 状态机），但「绑端口 → 写
 //! `core/config.yaml` → 起 accept 循环 → 用 `WING_HOME` 跑 `wing <subcmd>`」这套脚手架
 //! 只有一份：WING_HOME 隔离、超时、杀子进程这三件事各写一遍就只会修到一半。
+//!
+//! The WS-only tests import this module directly to avoid loading the render harness.
 
 use std::future::Future;
+use std::io::{Error, ErrorKind};
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use tokio::io::AsyncReadExt;
+use futures_util::{SinkExt, StreamExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
+use tokio_tungstenite::WebSocketStream;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
+use tokio_tungstenite::tungstenite::protocol::Role;
 
 /// 一次 CLI 调用的超时（超时即 panic：挂死与失败必须可区分）。
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub const WS_TEST_CLIENT_ID: &str = "test";
 
 /// 一枚测试独占的 `WING_HOME`（`prefix` 让失败时的临时目录名可辨认）。
 pub fn scratch_home(prefix: &str, tag: &str) -> PathBuf {
@@ -160,4 +171,83 @@ pub async fn read_head(stream: &mut TcpStream, buf: &mut Vec<u8>) -> Option<Stri
         }
         buf.extend_from_slice(&chunk[..n]);
     }
+}
+
+pub fn request_target(head: &str) -> &str {
+    head.lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("")
+}
+
+pub fn request_path(head: &str) -> &str {
+    request_target(head).split('?').next().unwrap_or("")
+}
+
+/// Header names are case-insensitive; values such as `Sec-WebSocket-Key` are not.
+pub fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+pub fn is_websocket_upgrade(head: &str) -> bool {
+    header_value(head, "upgrade").is_some_and(|value| value.eq_ignore_ascii_case("websocket"))
+}
+
+/// Upgrade after the HTTP handler has consumed the request head.
+pub async fn upgrade_websocket(
+    mut stream: TcpStream,
+    head: &str,
+) -> std::io::Result<WebSocketStream<TcpStream>> {
+    let key = header_value(head, "sec-websocket-key")
+        .ok_or_else(|| Error::new(ErrorKind::InvalidData, "missing Sec-WebSocket-Key"))?;
+    let response = format!(
+        "HTTP/1.1 101 Switching Protocols\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Accept: {}\r\n\r\n",
+        derive_accept_key(key.as_bytes())
+    );
+    stream.write_all(response.as_bytes()).await?;
+    Ok(WebSocketStream::from_raw_socket(stream, Role::Server, None).await)
+}
+
+pub async fn send_json(stream: &mut TcpStream, payload: &str) -> std::io::Result<()> {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: keep-alive\r\n\r\n{payload}",
+        payload.len(),
+    );
+    stream.write_all(response.as_bytes()).await
+}
+
+pub async fn send_connected(
+    ws: &mut WebSocketStream<TcpStream>,
+    client_id: &str,
+) -> Result<(), tokio_tungstenite::tungstenite::Error> {
+    let frame = serde_json::json!({"type": "connected", "client_id": client_id});
+    ws.send(Message::Text(frame.to_string().into())).await
+}
+
+/// A WS-only test server with a single client, already sent the connected frame.
+pub async fn start_ws_server<F, Fut>(handler: F) -> (String, JoinHandle<()>)
+where
+    F: FnOnce(WebSocketStream<TcpStream>) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        send_connected(&mut ws, WS_TEST_CLIENT_ID).await.unwrap();
+        handler(ws).await;
+    });
+    (format!("ws://{addr}/ws"), server)
+}
+
+pub async fn wait_for_ws_disconnect(mut ws: WebSocketStream<TcpStream>) {
+    while let Some(Ok(_)) = ws.next().await {}
 }
