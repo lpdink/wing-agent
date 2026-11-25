@@ -451,6 +451,7 @@ async def test_setup_does_not_claim_a_lazy_provider_was_applied(probe: Probe) ->
     try:
         document = _fixed_document(probe)
         document["providers"][0]["base_url"] = "http://127.0.0.1:invalid/v1"
+        document["user_agent"] = {"preset": "opencode"}
         saved = await http.request(
             "POST", "/api/settings/set", body={"document": document}
         )
@@ -461,6 +462,16 @@ async def test_setup_does_not_claim_a_lazy_provider_was_applied(probe: Probe) ->
             if effect["path"] == "providers[0].base_url"
         ) == {
             "path": "providers[0].base_url",
+            "scope": "hot",
+            "status": "unknown",
+            "steps": ["config.yaml", "runtime"],
+        }
+        assert next(
+            effect
+            for effect in saved["effects"]
+            if effect["path"] == "user_agent.preset"
+        ) == {
+            "path": "user_agent.preset",
             "scope": "hot",
             "status": "unknown",
             "steps": ["config.yaml", "runtime"],

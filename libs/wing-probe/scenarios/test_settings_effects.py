@@ -166,6 +166,79 @@ async def test_partial_reload_report_and_retry_preserve_the_committed_document(
     assert probe.context(EFFECT_MODEL, index=3).system == "Only new sessions see this."
 
 
+USER_AGENT_MODEL = "probe/settings-user-agent"
+
+
+@pytest.mark.probe_env(models=[USER_AGENT_MODEL])
+@pytest.mark.asyncio
+async def test_user_agent_effect_tracks_provider_rebuild_and_actual_headers(
+    probe: Probe,
+) -> None:
+    http = probe.driver_required.http
+    probe.register(
+        USER_AGENT_MODEL,
+        Turn.of(text="before"),
+        Turn.of(text="failed rebuild"),
+        Turn.of(text="repaired"),
+    )
+    session = await probe.session(model=USER_AGENT_MODEL)
+    assert (await session.chat("prime the provider pool")).data["subtype"] == "success"
+    before = probe.request(USER_AGENT_MODEL, 0).headers
+    assert before["user-agent"].startswith("QwenCode/")
+    assert before["x-dashscope-useragent"] == before["user-agent"]
+
+    current = await _get(http)
+    current["values"]["user_agent"] = {"preset": "opencode"}
+    current["values"]["providers"][0]["base_url"] = UNDISPATCHABLE_URL
+    failed = await _save(http, current)
+    assert failed["written"] is True
+    assert failed["reload"]["ok"] is False
+    assert [step["name"] for step in failed["reload"]["results"] if not step["ok"]] == [
+        "provider"
+    ]
+    assert next(
+        effect for effect in failed["effects"] if effect["path"] == "user_agent.preset"
+    ) == {
+        "path": "user_agent.preset",
+        "scope": "hot",
+        "status": "failed",
+        "steps": ["config.yaml", "provider"],
+    }
+    assert (await session.chat("use the existing provider")).data[
+        "subtype"
+    ] == "success"
+    after_failure = probe.request(USER_AGENT_MODEL, 1).headers
+    assert after_failure["user-agent"] == before["user-agent"]
+    assert after_failure["x-dashscope-useragent"] == before["x-dashscope-useragent"]
+
+    for _ in range(2):
+        current = await _get(http)
+        assert current["fingerprint"] == failed["fingerprint"]
+        assert current["effective"]["values"]["user_agent"]["preset"] == "opencode"
+        retry = await _save(http, current)
+        assert retry["written"] is True
+        assert retry["fingerprint"] == failed["fingerprint"]
+        assert retry["changed"] == []
+        assert [
+            step["name"] for step in retry["reload"]["results"] if not step["ok"]
+        ] == ["provider"]
+    manual = await http.request("POST", "/api/system/reload")
+    assert manual["ok"] is False
+    assert [step["name"] for step in manual["results"] if not step["ok"]] == [
+        "provider"
+    ]
+
+    current = await _get(http)
+    current["values"]["providers"][0]["base_url"] = probe.env.provider.base_url
+    repaired = await _save(http, current)
+    assert repaired["reload"]["ok"] is True
+    assert repaired["reload"]["failed_settings"] == []
+    assert (await session.chat("use the rebuilt provider")).data["subtype"] == "success"
+    after_repair = probe.request(USER_AGENT_MODEL, 2).headers
+    assert after_repair["user-agent"].startswith("opencode/")
+    assert "x-dashscope-useragent" not in after_repair
+
+
 RESTART_ORIGIN = "https://settings.probe.example"
 
 
@@ -294,11 +367,49 @@ async def test_file_loading_reports_failed_patterns_and_keeps_successful_command
         for command in commands["commands"]
         if command["name"].startswith("probe-")
     ] == ["probe-good"]
-    retry = await _save(http, await _get(http))
-    assert retry["effects"] == []
-    details = {step["name"]: step["detail"] for step in retry["reload"]["results"]}
-    assert "hooks[0]" in details["hooks"]
-    assert "commands.paths[1]" in details["prompt commands"]
+    failed_paths = ["commands.paths[1]", "hooks[0]"]
+    assert saved["reload"]["failed_settings"] == failed_paths
+    assert saved["reload"]["ok"] is True
+    for _ in range(2):
+        current = await _get(http)
+        assert current["fingerprint"] == saved["fingerprint"]
+        retry = await _save(http, current)
+        assert retry["written"] is True
+        assert retry["fingerprint"] == saved["fingerprint"]
+        assert retry["changed"] == retry["effects"] == []
+        assert retry["reload"]["failed_settings"] == failed_paths
+        assert retry["reload"]["ok"] is True
+        assert all(step["ok"] for step in retry["reload"]["results"])
+        details = {step["name"]: step["detail"] for step in retry["reload"]["results"]}
+        assert "hooks[0]" in details["hooks"]
+        assert "commands.paths[1]" in details["prompt commands"]
+
+    manual = await http.request("POST", "/api/system/reload")
+    assert manual["ok"] is True
+    assert manual["failed_settings"] == failed_paths
+    assert [step["name"] for step in manual["results"]] == [
+        step["name"] for step in saved["reload"]["results"]
+    ]
+    assert all(step["ok"] for step in manual["results"])
+
+    (root / "incomplete.md").write_text(
+        "---\nname: probe-repaired\n---\nRepaired command.\n", encoding="utf-8"
+    )
+    (root / "bad_hook.py").write_text("# Loadable hook module.\n", encoding="utf-8")
+    retried = await _save(http, await _get(http))
+    assert retried["fingerprint"] == saved["fingerprint"]
+    assert retried["changed"] == retried["effects"] == []
+    assert retried["reload"]["failed_settings"] == []
+    assert retried["reload"]["ok"] is True
+    manual = await http.request("POST", "/api/system/reload")
+    assert manual["failed_settings"] == []
+    assert manual["ok"] is True
+    commands = await http.request("GET", "/api/commands")
+    assert {
+        command["name"]
+        for command in commands["commands"]
+        if command["name"].startswith("probe-")
+    } == {"probe-good", "probe-repaired"}
 
 
 @pytest.mark.asyncio
