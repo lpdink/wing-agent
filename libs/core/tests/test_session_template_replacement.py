@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from collections import deque
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +14,8 @@ import yaml
 
 from wing.config import get_config_path, reset_config
 from wing.gateway.server import GatewayServer
-from wing_probe import FakeProvider, Script, Turn
+
+from _support import openai_sse
 
 
 @pytest.mark.asyncio
@@ -24,25 +27,42 @@ async def test_template_removal_during_shutdown_preserves_original_session(
 ) -> None:
     monkeypatch.setenv("WING_HOME", str(tmp_path))
     monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
     path = get_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    fake = await FakeProvider().start()
-    try:
-        fake.register(
-            "primary",
-            Script(
-                *([Turn.of(text="seed reply")] if materialized else []),
-                Turn.of(text="old agent still works"),
-            ),
+    upstream = "http://upstream.invalid/v1"
+    replies = {
+        "primary": deque(["seed reply"] if materialized else []),
+        "secondary": deque(["replacement works"]),
+    }
+    replies["primary"].append("old agent still works")
+
+    async def complete(
+        _transport: httpx.AsyncHTTPTransport, request: httpx.Request
+    ) -> httpx.Response:
+        assert request.method == "POST"
+        assert str(request.url) == f"{upstream}/chat/completions"
+        body = json.loads(await request.aread())
+        assert body["stream"] is True
+        content = replies[body["model"]].popleft()
+        lines = openai_sse(
+            [
+                {"choices": [{"delta": {"content": content}}]},
+                {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+            ]
         )
-        fake.register("secondary", Script(Turn.of(text="replacement works")))
+        return httpx.Response(
+            200,
+            text="\n".join(lines) + "\n",
+            headers={"content-type": "text/event-stream"},
+        )
+
+    with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", complete):
         original = {
             "providers": [
                 {
                     "name": name,
                     "api_key": "test",
-                    "base_url": fake.base_url,
+                    "base_url": upstream,
                     "models": [name],
                 }
                 for name in ("primary", "secondary")
@@ -198,7 +218,6 @@ async def test_template_removal_during_shutdown_preserves_original_session(
                 assert (
                     session.serialize_messages()[-1]["content"] == "replacement works"
                 )
+                assert not any(replies.values())
             finally:
                 await session.aclose()
-    finally:
-        await fake.stop()

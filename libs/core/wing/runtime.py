@@ -853,10 +853,10 @@ class WingRuntime:
                         f"template '{agent}' not found, available: {available}"
                     )
 
-            if require_idle:
-                assert template is not None
-                await session.switch_template(template, require_idle=True)
-            else:
+                if require_idle:
+                    await session.switch_template(template, require_idle=True)
+
+            if not require_idle:
                 await session.update_state(
                     model_id=model_id,
                     template=template,
