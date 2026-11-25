@@ -18,6 +18,7 @@ import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncIterator, Sequence, cast
 
 from wing.common.logger import log
@@ -176,15 +177,22 @@ class StreamAccumulator:
     """caller 持有的流累积状态容器（provider 协议中立的不透明壳）。
 
     provider.generate(..., accumulator=...) 在每次尝试开始时把内部流
-    状态装入 holder.state（重试重置——累积只反映当前尝试，与消费者看到
+    状态装入 holder.start_attempt（重试重置——累积只反映当前尝试，与消费者看到
     的重传内容一致）。caller 不解读 state，只原样传回
     provider.snapshot_blocks(accumulator)。
     """
 
-    __slots__ = ("state",)
+    __slots__ = ("state", "attempt", "finished_at")
 
     def __init__(self) -> None:
         self.state: object | None = None
+        self.attempt = 0
+        self.finished_at: datetime | None = None
+
+    def start_attempt(self, state: object) -> None:
+        self.state = state
+        self.attempt += 1
+        self.finished_at = None
 
 
 class ModelProvider(ABC):

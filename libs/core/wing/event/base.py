@@ -199,7 +199,18 @@ class WingEvent(ChainNode):
 # ============================================================
 
 
-class ErrorEvent(WingEvent):
+class HistoryNotice(WingEvent):
+    """事件的落点由活跃链投影，随 fork、rewind 和压缩重新计算。"""
+
+    after_message_id: str | None = None
+    disk_exclude: ClassVar[frozenset[str]] = frozenset({"after_message_id"})
+
+    @property
+    def has_history_position(self) -> bool:
+        return True
+
+
+class ErrorEvent(HistoryNotice):
     """错误事件，替代分散的 status_code 字段。
 
     成功事件不携带 status_code，失败事件走 ErrorEvent。

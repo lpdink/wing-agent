@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 from wing.common.logger import log
 from wing.event import (
+    AssistantMessageCommittedEvent,
     AssistantTurnEvent,
     ContextStatsEvent,
     DoneEvent,
@@ -56,6 +57,8 @@ from wing.event_bus import event_bus
 from wing.request_context import get_request_context
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from wing.event import PendingUserMessage, WingEvent
     from wing.schema import LLMUsage, MediaRef, Message, ToolCall
 
@@ -180,8 +183,14 @@ class AgentEventSink:
 
     # ── Turn 生命周期 ──
 
-    def turn_started(self) -> None:
-        self.emit(TurnStartedEvent(session_id=self._session_id))
+    def turn_started(self, turn_started_at: datetime | None = None) -> None:
+        self.emit(
+            TurnStartedEvent(
+                turn_started_at=turn_started_at.isoformat()
+                if turn_started_at
+                else None,
+            )
+        )
 
     def user_message_queued(self, pending: PendingUserMessage) -> None:
         self.emit(
@@ -199,6 +208,10 @@ class AgentEventSink:
         self.emit(
             UserMessageCommittedEvent(
                 message_uuid=message.uuid,
+                message_id=message.message_id,
+                message_at=message.message_at.isoformat()
+                if message.message_at
+                else None,
                 origin_request_ids=origin_request_ids,
                 content=message.content or "",
                 media=message.media or [],
@@ -254,6 +267,13 @@ class AgentEventSink:
     def assistant_turn(self, msg: Message, model: str) -> None:
         self.emit(AssistantTurnEvent.from_message(msg, model, self._session_id))
 
+    def assistant_message_committed(self, msg: Message, model: str) -> None:
+        event = AssistantMessageCommittedEvent.from_message(
+            msg, model, self._session_id
+        )
+        event.stop_reason = msg.stop_reason
+        self.emit(event)
+
     # ── Context stats ──
 
     def context_stats(
@@ -289,6 +309,7 @@ class AgentEventSink:
         model: str,
         media: list[MediaRef] | None = None,
         duration_ms: int | None = None,
+        message: Message | None = None,
     ) -> None:
         """一次调用发射 ToolCallResultEvent + ToolResultTurnEvent。
 
@@ -305,6 +326,7 @@ class AgentEventSink:
                 self._session_id,
                 media=media,
                 duration_ms=duration_ms,
+                message=message,
             )
         )
         self.emit(

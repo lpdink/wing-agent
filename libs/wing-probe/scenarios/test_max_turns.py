@@ -20,7 +20,7 @@ import time
 
 import pytest
 
-from wing_probe import Probe, Session, ToolCall, Turn
+from wing_probe import Driver, Probe, Session, ToolCall, Turn
 
 #: 场景私有 model 名（剧本按 model 名路由，场景之间零共享）。
 MAX_TURNS_MODEL = "probe/max-turns"
@@ -116,6 +116,32 @@ async def test_max_turns_reports_error_and_keeps_chain_paired(probe: Probe) -> N
     view.assert_chain_invariants()
     view.assert_no_transient_records()
 
+    history = await session.driver.http.request(
+        "GET", "/api/session/get", params={"session_id": session.session_id}
+    )
+    assert [event["type"] for event in history["events"]] == [
+        "diff_content",
+        "diff_content",
+        "history_notice",
+    ]
+    notice = history["events"][-1]
+    assert notice == {
+        "type": "history_notice",
+        **{
+            key: result.data[key]
+            for key in (
+                "uuid",
+                "created_at",
+                "session_id",
+                "request_id",
+                "subtype",
+                "errors",
+                "after_message_id",
+            )
+        },
+    }
+    assert result.data["after_message_id"] == history["messages"][-2]["message_id"]
+
     # ── workspace：两轮工具都真跑过 ──
     probe.files.assert_content(FIRST_FILE, equals="first")
     probe.files.assert_content(SECOND_FILE, equals="second")
@@ -128,3 +154,13 @@ async def test_max_turns_reports_error_and_keeps_chain_paired(probe: Probe) -> N
     assert probe.requests.count(MAX_TURNS_MODEL) == MAX_TURNS + 1, (
         probe.requests.summary()
     )
+
+    fresh = await Driver.connect(probe.env)
+    try:
+        resumed = await fresh.attach(session.session_id)
+        snapshot = (await resumed.watch.expect("sync_session")).data
+        assert snapshot["events"] == history["events"]
+        assert snapshot["messages"][-1]["content"] == "after max turns"
+        assert all(event["type"] != "turn_result" for event in snapshot["events"])
+    finally:
+        await fresh.close()

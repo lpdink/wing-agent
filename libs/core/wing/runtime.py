@@ -666,7 +666,7 @@ class WingRuntime:
             "template_name": session.template_name,
             "workspace": session.session_workspace,
             "status": session.status,
-            "messages": session.serialize_messages(),
+            **dict(session.history_snapshot()),
             "agent": session.to_agent_info(),
         }
 
@@ -708,6 +708,7 @@ class WingRuntime:
                 original_tokens=original,
                 compressed_tokens=compressed,
                 model=session.agent.model,
+                summary=next(iter(session.serialize_messages()), None),
             ),
             session=session,
         )

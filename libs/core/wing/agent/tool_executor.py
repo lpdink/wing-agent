@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from wing.config import get_config, get_wing_home
 from wing.event import ToolExecutionTiming
 from wing.hooks import hooks
 from wing.schema import MediaRef, Message, Tool, ToolCall, ToolError, ToolOutput
+from wing.schema.message import ToolResultStatus
 
 from .event_sink import AgentEventSink
 from .tool_context import _tool_execution_measurement
@@ -89,6 +91,19 @@ class InterruptedToolResults(Exception):
         super().__init__("tool execution interrupted")
 
 
+def interrupted_tool_result(call: ToolCall, tool_args: dict | None = None) -> Message:
+    message = Message(
+        role="tool",
+        tool_call_id=call.id,
+        content=INTERRUPTED_RESULT,
+        tool_status="interrupted",
+        tool_args=tool_args,
+        message_at=datetime.now(UTC),
+    )
+    message.assign_identity()
+    return message
+
+
 class ToolExecutor:
     """工具并发执行器。"""
 
@@ -96,11 +111,15 @@ class ToolExecutor:
         self._sink = sink
         self._tools: dict[str, Tool] = {}
         self._tool_clocks: dict[str, _ToolExecutionClock] = {}
+        self._tool_results: dict[str, Message] = {}
 
     def tool_execution_timings(self) -> dict[str, ToolExecutionTiming]:
         return {
             call_id: clock.snapshot() for call_id, clock in self._tool_clocks.items()
         }
+
+    def uncommitted_tool_results(self) -> list[Message]:
+        return list(self._tool_results.values())
 
     @contextmanager
     def _measure_tool_execution(
@@ -147,35 +166,36 @@ class ToolExecutor:
         # Batch-local ownership keeps late cancellation cleanup off the next batch's map.
         clocks: dict[str, _ToolExecutionClock] = {}
         self._tool_clocks = clocks
+        rewritten: dict[str, dict] = {}
+        completed: dict[str, Message] = {}
+        self._tool_results = completed
 
         async def _exec_one(tc: ToolCall) -> Message:
             call_id = tc.id
             log.info(f"exec_tool_calls: executing tool '{tc.name}' with id={call_id}")
             token = _current_tool_call_id.set(call_id)
             try:
-                result = await self._execute_one(tc, model, clocks)
-                if isinstance(result, ToolOutput):
-                    # 截断只作用文本信封——media 是引用元数据（字节在存储层），
-                    # 截断它没有任何意义。
-                    content = _maybe_truncate(result.content)
-                    media = result.media
-                else:
-                    content = _maybe_truncate(result)
-                    media = []
+                result = await self._execute_one(tc, model, clocks, rewritten)
             except Exception as e:
                 log.error(f"exec_tool_calls: unexpected error in tool '{tc.name}': {e}")
                 content = f"Error executing tool '{tc.name}': {e}"
-                media = []
+                result = Message(
+                    role="tool",
+                    tool_call_id=call_id,
+                    content=content,
+                    tool_status="error",
+                    tool_args=rewritten.get(call_id),
+                    message_at=datetime.now(UTC),
+                )
+                result.assign_identity()
+                self._sink.tool_finished(
+                    tc, content, success=False, model=model, message=result
+                )
             finally:
                 clocks.pop(call_id, None)
                 _current_tool_call_id.reset(token)
-            # media 为空时置 None：无媒体消息的落盘记录与引入 media 之前完全一致。
-            return Message(
-                role="tool",
-                tool_call_id=tc.id,
-                content=content,
-                media=media or None,
-            )
+            completed[call_id] = result
+            return result
 
         tasks = [asyncio.create_task(_exec_one(tc)) for tc in pending_tool_calls]
         try:
@@ -210,11 +230,10 @@ class ToolExecutor:
                 if isinstance(item, Message):
                     results.append(item)
                     continue
-                results.append(
-                    Message(role="tool", tool_call_id=tc.id, content=INTERRUPTED_RESULT)
-                )
+                result = interrupted_tool_result(tc, rewritten.get(tc.id))
+                results.append(result)
                 self._sink.tool_finished(
-                    tc, INTERRUPTED_RESULT, success=False, model=model
+                    tc, INTERRUPTED_RESULT, success=False, model=model, message=result
                 )
 
             synthesized = sum(1 for item in raw if not isinstance(item, Message))
@@ -224,16 +243,19 @@ class ToolExecutor:
             clocks.clear()
             if self._tool_clocks is clocks:
                 self._tool_clocks = {}
+                self._tool_results = {}
 
     async def _execute_one(
-        self, tc: ToolCall, model: str, clocks: dict[str, _ToolExecutionClock]
-    ) -> str | ToolOutput:
+        self,
+        tc: ToolCall,
+        model: str,
+        clocks: dict[str, _ToolExecutionClock],
+        rewritten: dict[str, dict],
+    ) -> Message:
         """执行单个工具调用：非法参数短路 → hook → 参数过滤 → 调用。
 
         工具可返回 ``str``（存量，零改动）或 ``ToolOutput``（文本 + 媒体
         引用）。``after_tool_call`` hook 只接收/改写文本，media 原样透传。
-        返回约定：带 media 时返回 ``ToolOutput``，否则返回 ``str``。
-
         每个终态都把实测时长（毫秒）交给 tool_finished——会话用量账本据此
         累计工具总时长；**没有真正执行**的两条短路（参数非法 / 未知工具）
         交 ``duration_ms=None``（账本按「不是一次执行」处理），中断合成的
@@ -242,24 +264,38 @@ class ToolExecutor:
         call_id = tc.id
         self._sink.tool_started(tc)
         started = time.monotonic()
+        arguments = tc.arguments
 
         def finish(
             content: str,
             *,
-            success: bool,
+            status: ToolResultStatus,
             media: list[MediaRef] | None = None,
             executed: bool = True,
-        ) -> None:
+        ) -> Message:
+            measured_at = datetime.now(UTC)
+            duration_ms = int((time.monotonic() - started) * 1000) if executed else None
+            message = Message(
+                role="tool",
+                tool_call_id=call_id,
+                content=_maybe_truncate(content),
+                media=media or None,
+                tool_status=status,
+                duration_ms=duration_ms,
+                message_at=measured_at,
+                tool_args=rewritten.get(call_id),
+            )
+            message.assign_identity()
             self._sink.tool_finished(
                 tc,
                 content,
-                success=success,
+                success=status == "success",
                 model=model,
                 media=media,
-                duration_ms=(
-                    int((time.monotonic() - started) * 1000) if executed else None
-                ),
+                duration_ms=duration_ms,
+                message=message,
             )
+            return message
 
         # 参数 JSON 解析失败（provider 已容错并置 arguments_error）：不执行
         # 工具，把错误现场作为结果回灌给模型自纠——与 unknown-tool 同级的
@@ -271,8 +307,7 @@ class ToolExecutor:
                 f"you generated are invalid.\n{tc.arguments_error}\n"
                 f"Please re-issue the tool call with corrected arguments."
             )
-            finish(result, success=False, executed=False)
-            return result
+            return finish(result, status="error", executed=False)
 
         tool = self._tools.get(tc.name)
         if not tool:
@@ -280,13 +315,16 @@ class ToolExecutor:
                 f"Error: unknown tool: {tc.name}, "
                 f"or you don't have permission to use it."
             )
-            finish(result, success=False, executed=False)
-            return result
+            return finish(result, status="error", executed=False)
 
         try:
-            modified_tc = await hooks.invoke_async("before_tool_call", tc)
+            modified_tc = await hooks.invoke_async(
+                "before_tool_call", tc.model_copy(deep=True)
+            )
             if modified_tc is not None:
-                tc = modified_tc
+                arguments = modified_tc.arguments
+                if arguments != tc.arguments:
+                    rewritten[call_id] = arguments
 
             # 参数过滤：远程工具（VAR_KEYWORD）全量透传
             sig = inspect.signature(tool.function)
@@ -294,12 +332,10 @@ class ToolExecutor:
                 p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
             )
             if has_var_keyword:
-                call_args = dict(tc.arguments)
+                call_args = dict(arguments)
             else:
                 actual_params = set(sig.parameters.keys())
-                call_args = {
-                    k: v for k, v in tc.arguments.items() if k in actual_params
-                }
+                call_args = {k: v for k, v in arguments.items() if k in actual_params}
 
             measurement_token = _tool_execution_measurement.set(
                 partial(self._measure_tool_execution, clocks, call_id)
@@ -324,22 +360,17 @@ class ToolExecutor:
                 "after_tool_call",
                 content,
                 tool_name=tc.name,
-                tool_args=tc.arguments,
+                tool_args=arguments,
                 tool_call_id=tc.id,
             )
             if modified_result is not None:
                 content = modified_result
 
-            finish(content, success=True, media=media)
-            return ToolOutput(content=content, media=media) if media else content
         except ToolError as e:
-            result = str(e)
-            finish(result, success=False)
-            return result
+            return finish(str(e), status="error")
         except Exception as e:
-            result = f"Error executing tool '{tc.name}': {e}"
-            finish(result, success=False)
-            return result
+            return finish(f"Error executing tool '{tc.name}': {e}", status="error")
+        return finish(content, status="success", media=media)
 
 
 def _maybe_truncate(result: str) -> str:
