@@ -290,6 +290,8 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 
 `sync_session.messages`、`session_history_refreshed.messages` 和 `GET /api/session/get` 的消息可携带历史日志中的 ISO 8601 `ts`。`user_message_committed` 与 `assistant_turn` 携带对应消息的同一 `ts`，`created_at` 仍是事件时间。缺少时间的存量记录和未提交的内容省略 `ts`。
 
+同一消息投影中的可选 `turn_result` 包含 `is_error` 和 `duration_ms`。它从活跃历史链上的轮次结果派生，附在结果之前最近的助手或用户消息上。它供回放显示轮次状态和耗时。
+
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
 
 > **`sync_session.usage`（用量基线）**：与 `status` / `turn_started_at` 同刻的会话用量账本快照（形状同 `/api/session/info.usage`），是前端累计的**唯一**基线来源——快照与快照之后的 live 事件走同一条有序 WS 通道，"基线 = 快照值、增量 = 其后 `llm_call_metrics` 之和"精确成立。**不要**拿 HTTP `/api/session/info.usage` 做基线：两个通道无跨通道定序，快照可能已包含尚在途的事件（重复计数）或在它之后才到（丢增量）。旧网关不带这个字段——按零基线显示（只累计订阅后的增量）；前端也可退化为**只读快照口径**：轮末回拉 `/api/session/info.usage` 仅作展示、零累加，不得与 WS 增量混算（混算即前述重复计数/丢增量）。两种口径都合法，二选一即可（wing-app 的旧网关路径采用后者）。

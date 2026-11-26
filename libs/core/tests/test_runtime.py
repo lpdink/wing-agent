@@ -384,6 +384,38 @@ class TestSessionSerialization:
         assert len(user_msgs) >= 1
         assert user_msgs[0]["content"] == "hello"
 
+    @pytest.mark.asyncio
+    async def test_serialize_messages_projects_turn_results(self, runtime: Any):
+        from wing.event import InterruptedEvent, TurnResultEvent
+        from wing.schema import Message
+
+        session = materialize(runtime.create_session())
+        cm = session.agent.context_manager
+        cm.add_messages(
+            [
+                Message(role="user", content="initial input"),
+                Message(role="assistant", content="working on it"),
+                Message(role="user", content="steer input"),
+                Message(role="assistant", content="final answer"),
+            ]
+        )
+        cm.append_event(TurnResultEvent(duration_ms=1234))
+        cm.add_message(Message(role="user", content="failed input"))
+        cm.append_event(TurnResultEvent(duration_ms=0, is_error=True))
+        cm.add_message(Message(role="user", content="interrupted input"))
+        cm.append_event(InterruptedEvent())
+        cm.append_event(TurnResultEvent(duration_ms=100, is_error=True))
+
+        messages = session.serialize_messages()
+        assert [
+            (message["content"], message["turn_result"])
+            for message in messages
+            if "turn_result" in message
+        ] == [
+            ("final answer", {"is_error": False, "duration_ms": 1234}),
+            ("failed input", {"is_error": True, "duration_ms": 0}),
+        ]
+
 
 # ============================================================
 
