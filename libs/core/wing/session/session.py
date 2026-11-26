@@ -29,6 +29,7 @@ from wing.config import get_config
 from wing.context import ContextManager
 from wing.event import (
     EventTarget,
+    InterruptedEvent,
     LLMCallMetricsEvent,
     SessionHistoryRefreshedEvent,
     SyncSessionEvent,
@@ -709,9 +710,25 @@ class Session:
         )
 
     def serialize_messages(self) -> list[dict]:
-        """序列化 context window 中的消息为 dict 列表。"""
-        cm = self._context_manager
-        return [serialize_message(msg) for msg in cm.get_context_window()]
+        """投影活跃链消息，在最后一段上附加其轮次结果。"""
+        messages: list[dict] = []
+        anchor: dict | None = None
+        for node in self._messages:
+            if isinstance(node, Message):
+                message = serialize_message(node)
+                messages.append(message)
+                if node.role in ("user", "assistant"):
+                    anchor = message
+            elif isinstance(node, TurnResultEvent):
+                if anchor is not None:
+                    anchor["turn_result"] = {
+                        "is_error": node.is_error,
+                        "duration_ms": node.duration_ms,
+                    }
+                anchor = None
+            elif isinstance(node, InterruptedEvent):
+                anchor = None
+        return messages
 
     def sync_event(
         self,
