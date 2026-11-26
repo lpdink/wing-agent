@@ -211,6 +211,7 @@ class UserMessageCommittedEvent(WingEvent):
     type: Literal["user_message_committed"] = "user_message_committed"
     persist: ClassVar[bool] = False
     message_uuid: str
+    ts: str | None = None
     origin_request_ids: list[str]
     content: str
     media: list[MediaRef]
@@ -313,6 +314,7 @@ class AssistantTurnEvent(WingEvent):
     persist: ClassVar[bool] = False
     uuid: str = Field(default_factory=lambda: _uuid.uuid4().hex)
     content_blocks: list[dict]
+    ts: str | None = None
     model: str = ""
     stop_reason: str | None = None
     usage: dict | None = None
@@ -340,6 +342,7 @@ class AssistantTurnEvent(WingEvent):
         return cls(
             session_id=session_id,
             content_blocks=content_blocks,
+            ts=msg.ts,
             model=model,
             stop_reason=_claude_stop_reason(msg),
             usage=usage_wire(msg.usage),

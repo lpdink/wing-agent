@@ -334,6 +334,7 @@ class ReActLoop:
 
         assistant_msg = await self._call_llm_validated(ctx, model=model)
 
+        assistant_msg.stamp()
         self._sink.assistant_turn(assistant_msg, model)
 
         ctx.record_usage(assistant_msg.usage)

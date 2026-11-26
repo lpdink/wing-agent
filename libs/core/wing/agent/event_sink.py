@@ -199,6 +199,7 @@ class AgentEventSink:
         self.emit(
             UserMessageCommittedEvent(
                 message_uuid=message.uuid,
+                ts=message.ts,
                 origin_request_ids=origin_request_ids,
                 content=message.content or "",
                 media=message.media or [],

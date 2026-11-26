@@ -79,6 +79,8 @@ def serialize_message(msg: Message) -> dict:
         "content": msg.content or "",
         "uuid": msg.uuid,
     }
+    if msg.ts is not None:
+        d["ts"] = msg.ts
     if msg.reasoning_content:
         d["reasoning_content"] = msg.reasoning_content
     if msg.tool_calls:
