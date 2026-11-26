@@ -281,12 +281,14 @@ failed`，后三个都是终态（不再武装、不再重试，且 `next_fire_a
 | 事件 | 字段 | 发射时机 |
 | --- | --- | --- |
 | `user_message_queued` | `origin_request_id`, `content`, `media` | 通过入口校验和命令展开并进入 inbox 后。命中 Ask waiter 的定向答复仍走工具结果路径 |
-| `user_message_committed` | `message_uuid`, `origin_request_ids`, `content`, `media` | hook 处理后的 user Message 入链后，每批一次。新 turn 在 `turn_started` 前，steer 在全部工具结果之后、下一次模型调用前 |
+| `user_message_committed` | `message_uuid`, `origin_request_ids`, `content`, `media`, `ts` | hook 处理后的 user Message 入链后，每批一次。新 turn 在 `turn_started` 前，steer 在全部工具结果之后、下一次模型调用前 |
 | `user_messages_dropped` | `origin_request_ids` | 准备提交的批次因失败或取消被丢弃。中断或模板替换时，`interrupted.dropped_request_ids` 提供全部已确认丢弃的 ID，包含队列项和兼容旧客户端需要的准备批次 ID |
 
 `origin_request_id` 对应发送端的 `request_id`。`media` 使用 `MediaRef[]`，无附件为 `[]`。三个事件仅广播。订阅快照的 `messages` 承载已提交记录，`pending_user_messages` 按顺序提供 `{origin_request_id, content, media}`，包括正在等待 hook 的批次。字段存在（含 `[]`）表示支持这些事件。
 
 收到提交时按 `origin_request_ids` 清理待处理项，以 `message_uuid` 去重并放入历史。`user_message_accepted` 仍按原始输入逐条发射，供旧客户端与用量记账使用。主动历史刷新使用 `session_history_refreshed`，字段和 `sync_session` 相同。自动压缩换链后用它发送有效 UUID，也用于历史写入结果不明后的队列对账。旧客户端忽略新类型，继续按 `user_message_accepted` 处理原有队列。新订阅、补快照及回退继续收到 `sync_session`。
+
+`sync_session.messages`、`session_history_refreshed.messages` 和 `GET /api/session/get` 的消息可携带历史日志中的 ISO 8601 `ts`。`user_message_committed` 与 `assistant_turn` 携带对应消息的同一 `ts`，`created_at` 仍是事件时间。缺少时间的存量记录和未提交的内容省略 `ts`。
 
 **状态事件**（`event/state_change.py`）：`session_init` · `sync_session`（订阅时重放历史）· `session_state_changed`（update / think / yolo 后统一发出）· `interrupted` · `compact_done`。
 

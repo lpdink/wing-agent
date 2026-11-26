@@ -9,7 +9,7 @@ TrackedList — 链拓扑引擎，UUID + parentUuid 链模型。
 - 链节点是 ChainNode 家族：Message（LLM 上下文投影）与 WingEvent（事件
   记录，role="event"）混合成链——history.jsonl 单一日志承载两种记录，
   记录级判别靠 role 字段。加载时按 role 分发（事件走 EVENT_TYPES 注册表）。
-- 始终以类型化对象工作，存储层传输 raw dict（ts 由本类注入）
+- 始终以类型化对象工作，存储层传输 raw dict
 - 内存中维护 full chain map（_all_items），find/trace_chain 从内存读取
 - 写端由会话串行调用。自动压缩通过 extend_detached 批量追加摘要和重链接节点，
   写入成功后才更新内存并切换 tip。文件后端的回截与冷读契约见 FileMessageLog。
@@ -114,13 +114,17 @@ class TrackedList(Generic[T]):
             for key in disk_exclude:
                 entry.pop(key, None)
         entry = canonical_record(entry)
-        entry["ts"] = datetime.now().isoformat()
+        if "ts" not in entry:
+            entry["ts"] = datetime.now().isoformat()
         return entry
 
     # ── 内部：I/O 委托 ────────────────────────
 
     def _persist_append(self, items: list[T]) -> None:
-        """追加记录到 MessageLog。log=None 时 NOP。"""
+        """为新消息赋时并追加到已绑定的日志。"""
+        for item in items:
+            if isinstance(item, Message):
+                item.stamp()
         if self._log is not None:
             self._log.append([self._to_record(it) for it in items])
 

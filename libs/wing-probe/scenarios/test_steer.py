@@ -264,6 +264,7 @@ async def test_steer_syncs_batched_input_after_every_tool_result(
                     "uuid": commit.data["message_uuid"],
                     "role": "user",
                     "content": commit.data["content"],
+                    "ts": commit.data["ts"],
                     "media": commit.data["media"],
                 }
             ]

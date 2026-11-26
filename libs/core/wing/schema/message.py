@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Annotated, Any, Callable, Literal, Union
 
 from pydantic import (
@@ -135,6 +136,8 @@ class MediaRef(BaseModel):
 
 class Message(ChainNode):
     role: Literal["system", "user", "assistant", "tool"]
+    ts: str | None = None
+    """消息的历史时间戳。存量没有该字段时保持未知。"""
     content_blocks: list[ContentBlock] | None = None
     """assistant 消息的有序 content block 数组——assistant 的唯一存储。
     顺序即数组下标。非 assistant 消息不携带。"""
@@ -174,6 +177,15 @@ class Message(ChainNode):
 
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
+    @field_validator("ts", mode="before")
+    @classmethod
+    def _read_timestamp(cls, value: Any) -> str | None:
+        return value if isinstance(value, str) and value.strip() else None
+
+    def stamp(self) -> None:
+        if self.ts is None:
+            self.ts = datetime.now().isoformat()
+
     @field_validator("media", mode="before")
     @classmethod
     def _empty_media_normalized_to_none(cls, v: Any) -> Any:
@@ -199,6 +211,7 @@ class Message(ChainNode):
         usage: LLMUsage | None = None,
         stop_reason: str | None = None,
         uuid: str | None = None,
+        ts: str | None = None,
         parent_uuid: str | None = None,
         unzip_last_uuid: str | None = None,
         usage_boundary_uuid: str | None = None,
@@ -206,7 +219,7 @@ class Message(ChainNode):
     ) -> None:
         """显式签名供类型检查器识别扁平入参；路由逻辑在 `_route_flat`
         wrap validator（构造与 model_validate 加载共用）。**extra 透传
-        未知键（如 MessageLog 附加的 ts），由 extra="ignore" 丢弃。"""
+        未知键，由 extra="ignore" 丢弃。"""
         data: dict[str, Any] = {
             "role": role,
             "content": content,
@@ -218,6 +231,7 @@ class Message(ChainNode):
             "usage": usage,
             "stop_reason": stop_reason,
             "uuid": uuid,
+            "ts": ts,
             "parent_uuid": parent_uuid,
             "unzip_last_uuid": unzip_last_uuid,
             "usage_boundary_uuid": usage_boundary_uuid,
