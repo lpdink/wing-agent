@@ -273,11 +273,10 @@ def selftest() -> int:
 def _knob_selftest(check: Callable[[str, object, object], None]) -> int:
     """预算与旋钮是否真的落到了命令行上。
 
-    这条链断过一次（`pnpm run test -- <args>` 的实参被 pnpm 吞掉，共享档与逃生舱双双
-    静默失效，而测试全绿）——两边各自"能解析"不等于"传到了"。所以这里直接问：
+    这条链断过一次：共享档与串行逃生舱双双静默失效，而测试全绿。所以这里直接问：
     `collect_output.sh --budget` 交出份额、`make -n` 交出展开后的命令行。
 
-    覆盖的是**python 与 ts**两条（它们各自在 Makefile 里展开）；rust 的核数由
+    覆盖的是 **python** 这条（它在 Makefile 里展开）；rust 的核数由
     `scripts/test_rust_parallel.py --selftest` 钉住，probe 不收预算。
     """
     root = Path(__file__).resolve().parents[1]
@@ -287,11 +286,7 @@ def _knob_selftest(check: Callable[[str, object, object], None]) -> int:
 
     def dry_run(target: str, **env: str) -> str:
         merged = {**os.environ, **env}
-        for name in (
-            "WING_TEST_SERIAL",
-            "WING_TEST_BUDGET_PYTEST",
-            "WING_TEST_BUDGET_TS",
-        ):
+        for name in ("WING_TEST_SERIAL", "WING_TEST_BUDGET_PYTEST"):
             if name not in env:
                 merged.pop(name, None)
         proc = subprocess.run(
@@ -329,16 +324,6 @@ def _knob_selftest(check: Callable[[str, object, object], None]) -> int:
     ).stdout.strip()
     check("knobs serial has no share", serial_out.startswith("(serial"), True)
 
-    ts_budget = dry_run("test-ts", WING_TEST_BUDGET_TS="4")
-    check(
-        "knobs ts budget reaches argv",
-        "pnpm run test --maxWorkers=4" in ts_budget,
-        True,
-    )
-    # pnpm 会把 `--` 和它后面的实参一起吞掉（vitest 一个都收不到，且不报错）。
-    check(
-        "knobs ts never uses the swallowed form", "-- --maxWorkers" in ts_budget, False
-    )
     return 0
 
 

@@ -16,7 +16,7 @@
 | `make test-probe PROBE_WORKERS=1` | 串行跑（与 `-n 1` 不同：不经过 xdist，输出与失败语义都是原样的） |
 | `uv run pytest libs/wing-probe/tests/` | 只跑基础设施自测（绝大多数不起网关，秒级；就绪握手的反例要真网关，见 `test_env_readiness.py`） |
 | `uv run pytest libs/wing-probe/scenarios/test_rewind.py::test_rewind_skips_event_ancestors -v --timeout=120` | 单个场景 |
-| `make test` | 四组（python / probe / rust / ts）**并行**跑完，末尾统一给结论（失败详情在结论之前）——见 `scripts/collect_output.sh` |
+| `make test` | 三组（python / probe / rust）**并行**跑完，末尾统一给结论（失败详情在结论之前）——见 `scripts/collect_output.sh` |
 | CI | `probe-check` job（与 `python-check` / `rust-check` 并列） |
 
 前提：仓库根跑过 `uv sync`（产出 `.venv/bin/wing-gateway`）；全程离线、无外部 API key、不读写 `~/.wing`。
@@ -39,7 +39,7 @@
 
 **③ 跨文件状态**：`loadfile` 会让同一个 worker **连续**跑多个文件，所以「用例之间零共享」必须真的成立（而不是靠"每条用例都可能落到不同 worker"）。约束是本包的设计本身：每个用例自带 tmp `WING_HOME` + 网关子进程 + 假 Provider，没有任何用例改 `os.environ` / `cwd` / 模块级全局（改了也走 `monkeypatch` 自动还原）。实测两遍：串行 589 例（**一个进程**跑完全部文件）全绿；**逆序文件顺序**（改变所有"前一个文件"的配对）全绿。
 
-**编队内为什么不收**：`make test` 里另外三组按共享档收到约 1/3 核数，probe 保持 1.5× 核数——
+**编队内为什么不收**：`make test` 里另外两组按共享档收到约 1/3 核数，probe 保持 1.5× 核数——
 它等的是网关子进程而不是算力，少给 worker 只会更慢。12 核上的合计与取舍见
 [test-speed.md](test-speed.md) §1。并行下 fixture 跑在 worker 进程里，artifacts 台账（转储路径 / 逃生舱理由）经 `pytest_sessionfinish` / `pytest_testnodedown` 汇回 controller，终端汇总与串行时一致。
 

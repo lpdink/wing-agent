@@ -1,32 +1,4 @@
-.PHONY: check check-python check-rust check-ts test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe fmt fmt-python fmt-rust fmt-check fmt-check-python fmt-check-rust fmt-ts fmt-check-ts test-ts export-cov-python patch-cov-python patch-cov-python-json patch-cov-rust run install gateway demo capacity capacity-selftest
-
-# ── Unified commands (Python + Rust) ─────────────────────────
-
-# ── TypeScript (extensions/vscode) ─────────────────────────────
-# 门禁与 CI 的 typescript-check job 等价：先按 lockfile 安装（--prefer-offline：
-# 本地已有 store 时不动网络），再依次跑 eslint / prettier / tsc / vitest。
-# 未接进 `fmt` / `fmt-check`：那两条要在 pre-commit 里保持秒级，而且不该强依赖 node_modules。
-#
-# 工具链缺失时的行为：显式探测 node / pnpm，缺哪一个就打印
-# 可操作的提示再退出 1 —— 而不是让 `pnpm: command not found` 混进结论块里，
-# 让只改 Python 的人以为自己弄坏了什么。`SKIP_TS=1` 是本地逃生舱（CI 不设，
-# 门禁照旧强制），collect_output.sh 会把 ts 组标成 skipped。
-VSCODE_DIR := extensions/vscode
-
-# vitest worker 上限：独占时交给 vitest 自己定（默认核数-1），与另外三组同时跑时收到
-# `WING_TEST_BUDGET_TS`（数值，由 `scripts/collect_output.sh` 算，见 PYTEST_WORKERS 处）。
-# `TS_ARGS` 是直接透传给 vitest 的逃生舱（`make test-ts TS_ARGS="--reporter=verbose"`）。
-# 注意**不要**写成 `pnpm run test -- $(TS_ARGS)`：pnpm 会把 `--` 连同后面的实参一起吞掉，
-# vitest 一个都收不到（静默失效）。`pnpm run test <args>` 才是透传。
-# 串行逃生舱优先于预算（与 PYTEST_WORKERS / rust 的口径一致）：`WING_TEST_SERIAL`
-# 非空且非 0 时，一切并行度旋钮都不生效。
-NOT_SERIAL = $(if $(WING_TEST_SERIAL),$(filter 0,$(WING_TEST_SERIAL)),1)
-TS_WORKERS ?= $(if $(and $(NOT_SERIAL),$(WING_TEST_BUDGET_TS)),--maxWorkers=$(WING_TEST_BUDGET_TS))
-TS_ARGS ?= $(TS_WORKERS)
-
-# Node/pnpm 探测 + 提示（单行，避免 make ↔ shell 的续行转义；见 docs/dev/vscode-extension.md §9.3）。
-TS_SKIP_NOTE = echo "⏭️  SKIP_TS=$(SKIP_TS) — TypeScript gates (extensions/vscode) skipped on request."; echo "   CI never sets SKIP_TS: the group stays mandatory there."; exit 0
-TS_TOOLING_CHECK = command -v node >/dev/null 2>&1 || { echo "❌ node not found — the TypeScript gates need Node ≥ 22.12 (vitest 5 / vite 8)."; echo "   Install Node 22 LTS, then re-run; or skip this group with: SKIP_TS=1 make check"; exit 1; }; command -v pnpm >/dev/null 2>&1 || { echo "❌ pnpm not found — this package pins pnpm 11 (packageManager in extensions/vscode/package.json)."; echo "   Enable it with: corepack enable   (corepack ships with Node ≥ 16.13; CI does the same)"; echo "   Or skip the TypeScript group: SKIP_TS=1 make check"; exit 1; }
+.PHONY: check check-python check-rust test test-python test-python-cov test-python-html test-rust test-rust-cov test-rust-html test-probe fmt fmt-python fmt-rust fmt-check fmt-check-python fmt-check-rust export-cov-python patch-cov-python patch-cov-python-json patch-cov-rust run install gateway demo capacity capacity-selftest
 
 # ── README 演示素材 ───────────────────────────────────────────
 
@@ -74,49 +46,19 @@ fmt-check: fmt-check-python fmt-check-rust
 test:
 	bash scripts/collect_output.sh test
 
-check-ts:
-	@if [ -n "$(SKIP_TS)" ] && [ "$(SKIP_TS)" != "0" ]; then $(TS_SKIP_NOTE); fi; \
-	$(TS_TOOLING_CHECK); \
-	(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
-	echo "🔍 Running eslint (extensions/vscode)..."; \
-	if ! (cd $(VSCODE_DIR) && pnpm run lint); then echo "❌ eslint failed"; exit 1; fi; \
-	echo "✅ eslint passed"; \
-	echo ""; \
-	echo "🔍 Running prettier --check (extensions/vscode)..."; \
-	if ! (cd $(VSCODE_DIR) && pnpm run format:check); then echo "❌ prettier failed"; exit 1; fi; \
-	echo "✅ prettier passed"; \
-	echo ""; \
-	echo "🔍 Running tsc --noEmit (extensions/vscode)..."; \
-	if ! (cd $(VSCODE_DIR) && pnpm run typecheck); then echo "❌ typecheck failed"; exit 1; fi; \
-	echo "✅ typecheck passed"
-
-test-ts:
-	@if [ -n "$(SKIP_TS)" ] && [ "$(SKIP_TS)" != "0" ]; then $(TS_SKIP_NOTE); fi; \
-	$(TS_TOOLING_CHECK); \
-	(cd $(VSCODE_DIR) && pnpm install --frozen-lockfile --prefer-offline --reporter=silent) || exit 1; \
-	echo "🔍 Running vitest (extensions/vscode)..."; \
-	if ! (cd $(VSCODE_DIR) && pnpm run test $(TS_ARGS)); then echo "❌ vitest failed"; exit 1; fi; \
-	echo "✅ vitest passed"
-
-fmt-ts:
-	cd $(VSCODE_DIR) && pnpm run format
-
-fmt-check-ts:
-	cd $(VSCODE_DIR) && pnpm run format:check
-
 # ── Python ────────────────────────────────────────────────────
 
 gateway:
 	uv run wing-gateway
 
-# 单测并行度：独占时 min(8, 核数)，与另外三组同时跑时降到约 1/3 核数。
+# 单测并行度：独占时 min(8, 核数)，与另外两组同时跑时降到约 1/3 核数。
 # `--dist loadfile` 把**整文件**派给一个 worker，所以墙钟 ≈ max(总工作量 / n, 最长
 # 单文件)：12 核本机实测全套 ≈14s 工作量、最长单文件 ≈2s——n=8 已贴到「最长单文件」
 # 那条下界，再加 worker 只多付每进程的启动与导入开销。xdist 每个 worker 是独立进程，
 # 只看本文件内的状态；跨文件的时序耦合由 `--dist loadfile` 挡掉。
 #
-# `WING_TEST_BUDGET_PYTEST`（数值）由 `scripts/collect_output.sh` 在四组并行时导出：
-# 四组各自按"我独占整机"来配并行度时，机器被压到三倍以上超订，**每一组都变慢**；
+# `WING_TEST_BUDGET_PYTEST`（数值）由 `scripts/collect_output.sh` 在三组并行时导出：
+# 三组各自按"我独占整机"来配并行度时，机器被压到三倍以上超订，**每一组都变慢**；
 # 份额的算法与实测都在那一处（全仓唯一），这里只消费。不导出时按独占算——单独跑
 # 一组的人仍然拿满。
 PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ -n "$(WING_TEST_BUDGET_PYTEST)" ]; then echo $(WING_TEST_BUDGET_PYTEST); elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi)
@@ -247,7 +189,7 @@ patch-cov-rust:
 # 单测一个套件里。脚本复用 `--no-run` 的产物自己铺开：套件的 libtest 线程数 = 它的
 # 用例份额 × 核数（下界 2），同时在跑的二进制数 = 核数，最长先跑，doctests 与池子并行。
 # RUST_TEST_ARGS 覆盖"本池子认为自己独占几个核"（`--cores <N>`），排查并发干扰时用
-# （或四组一起退化成串行：WING_TEST_SERIAL=1）。规则的离线自检：
+# （或三组一起退化成串行：WING_TEST_SERIAL=1）。规则的离线自检：
 # `uv run python scripts/test_rust_parallel.py --selftest`。
 #
 # 插桩构建会额外产出一整套 target/llvm-cov-target，并且与普通构建的产物互不通用

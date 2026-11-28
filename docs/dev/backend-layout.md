@@ -191,8 +191,7 @@
   同性质：由 review 兜底。
 - **与本节的分工**：本页管 **Python 包之间**的依赖方向（AST，按包族判 R1–R6）；
   `layer_guard.rs` 管 **Rust 模块之间**的依赖方向（文本，按层判禁止名单）。两侧互不覆盖，
-  改任何一侧都不影响另一侧。`extensions/vscode/tests/layers/layers.test.ts` 是第三份
-  （TypeScript 的 `LAYERS` / `RULES` 矩阵，跑在 vitest 里）。
+  改任何一侧都不影响另一侧。
 - 另有 `crates/wing/tests/session_guard.rs` 钉终端的**时序**不变量（不是分层），语义见
   [`tui-input.md`](tui-input.md)；两者的扫描原语共用
   `crates/wing/tests/common/guard.rs`。

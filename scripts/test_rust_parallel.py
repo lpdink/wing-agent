@@ -45,10 +45,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 
-#: 与 ``scripts/collect_output.sh`` 的逃生舱同名：排查并发干扰时四组一起退化成串行。
+#: 与 ``scripts/collect_output.sh`` 的逃生舱同名：排查并发干扰时三组一起退化成串行。
 SERIAL_ENV = "WING_TEST_SERIAL"
 
-#: 四组并行时这一组分到的核数（由 `scripts/collect_output.sh` 导出）。与 `SERIAL_ENV`
+#: 三组并行时这一组分到的核数（由 `scripts/collect_output.sh` 导出）。与 `SERIAL_ENV`
 #: 正交——串行逃生舱优先级更高。
 BUDGET_ENV = "WING_TEST_BUDGET_RUST"
 
@@ -101,7 +101,7 @@ def _serial() -> bool:
 def _default_cores() -> int:
     """这个池子认为自己独占几个核（串行逃生舱下为 1）。``--cores`` 覆盖它。
 
-    ``WING_TEST_BUDGET_RUST`` 是 ``scripts/collect_output.sh`` 在四组并行时发的份额
+    ``WING_TEST_BUDGET_RUST`` 是 ``scripts/collect_output.sh`` 在三组并行时发的份额
     （数值，那一处是全仓唯一算它的地方：同一条公式写三遍必然分叉）。没有它就按独占算——
     单独跑 ``make test-rust`` 的人应该拿满机器。
     """
