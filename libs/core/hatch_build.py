@@ -2,12 +2,18 @@
 
 """构建/安装时写入 ``wing/_build_info.py``（版本 + commit hash）。
 
-commit 解析顺序（与 Rust ``crates/wing/build.rs`` 同一约定）：
+commit 解析顺序：
 
 1. ``WING_COMMIT_HASH`` 环境变量（CI 传入 ``github.sha``，截短到 7 位）；
 2. 构建期执行 ``git rev-parse HEAD``——仅构建期，运行期不做任何 git 调用；
 3. 解析不到时保留生成文件里的旧值（从 sdist 构建 wheel 可保住上游构建
    注入的 commit），没有旧值才写 ``None``。
+
+与 Rust 侧 ``crates/wing/build_meta.rs`` 的差异（两处不一致，别照着抄）：
+CLI 在 env 与 git 之间多一档 ``crates/wing/build_commit`` 文件（manylinux 的
+构建在 Docker 里跑，env 与 git 都不可用），且全断时写 ``unknown`` 而不是
+保留旧值。两处都需要「构建期注入一个可自报的 commit」，但产物与失败语义
+不同，详见 ``docs/dev/architecture.md``「构建信息注入」。
 
 仓库归属校验：``git rev-parse`` 会向上找到任意祖先仓库，vendored 拷贝或
 sdist 解包目录落在无关仓库内时会采信错误的 commit（比 ``unknown`` 更
