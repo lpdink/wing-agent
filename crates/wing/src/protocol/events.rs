@@ -1745,6 +1745,19 @@ mod tests {
     }
 
     #[test]
+    fn session_status_list_spellings_match_snapshot_serialization() {
+        for status in [
+            SessionStatus::Inactive,
+            SessionStatus::Idle,
+            SessionStatus::Working,
+            SessionStatus::Waiting,
+        ] {
+            assert_eq!(SessionStatus::parse(status.as_str()), Some(status));
+            assert_eq!(serde_json::to_value(status).unwrap(), status.as_str());
+        }
+    }
+
+    #[test]
     fn deserialize_sync_session_status() {
         // The working-state carrier: every status decodes to its variant and
         // answers `turn_in_flight` (working / waiting are a turn in flight).

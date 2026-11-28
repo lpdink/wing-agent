@@ -355,35 +355,56 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
 
 #[test]
 fn test_at_most_one_owner_claims_any_position() {
-    // The invariant behind "the order only decides ties": on the frame that
-    // holds every region at once, no position is claimed twice. If a future
-    // claim starts overlapping another (say the chat band claiming the gutter),
-    // this test goes red and the declaration order becomes load-bearing — which
-    // is exactly what it is declared for.
-    let mut app = app_with_bar_and_draft();
-    let mut terminal = test_terminal(80, 24);
-    draw(&mut app, &mut terminal);
-    assert!(
-        app.scrollbar_geometry().is_some(),
-        "the bar must exist for its claim to take part"
-    );
+    use crate::config::SidebarSide;
 
-    let mut claimed = 0usize;
-    for row in 0..24 {
-        for column in 0..80 {
-            let owners: Vec<PointerOwner> = app.pointer_chain(column, row).collect();
-            assert!(
-                owners.len() <= 1,
-                "({column},{row}) is claimed by {owners:?} — the priority order \
-                 would have to decide, and the chain is documented as disjoint"
-            );
-            claimed += owners.len();
+    for (width, side, popup) in [
+        (80, None, false),
+        (111, Some(SidebarSide::Left), false),
+        (111, Some(SidebarSide::Right), false),
+        (111, Some(SidebarSide::Left), true),
+        (111, Some(SidebarSide::Right), true),
+    ] {
+        let mut app = app_with_bar_and_draft();
+        let mut terminal = test_terminal(width, 24);
+        draw(&mut app, &mut terminal);
+        if let Some(side) = side {
+            app.config.layout.session_sidebar.side = side;
+            app.toggle_session_sidebar();
         }
+        if popup {
+            open_session_popup(&mut app, 3);
+        }
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.popup.height() > 0, popup);
+        let mut seen = Vec::new();
+        for row in 0..24 {
+            for column in 0..width {
+                let mut owners = app.pointer_chain(column, row);
+                let owner = owners.next();
+                assert!(
+                    owners.next().is_none(),
+                    "{side:?}, popup={popup}: multiple owners at ({column},{row})"
+                );
+                if let Some(owner) = owner
+                    && !seen.contains(&owner)
+                {
+                    seen.push(owner);
+                }
+            }
+        }
+        for owner in [
+            PointerOwner::Scrollbar,
+            PointerOwner::Chat,
+            PointerOwner::StatusBar,
+        ] {
+            assert!(
+                seen.contains(&owner),
+                "{side:?}, popup={popup}: missing {owner:?}"
+            );
+        }
+        assert_eq!(seen.contains(&PointerOwner::SessionSidebar), side.is_some());
+        assert_eq!(seen.contains(&PointerOwner::Composer), !popup);
     }
-    assert!(
-        claimed >= 4,
-        "the frame must claim something (band, bar and composer rows), got {claimed}"
-    );
 }
 
 #[test]

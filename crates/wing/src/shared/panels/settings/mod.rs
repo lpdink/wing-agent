@@ -2161,6 +2161,7 @@ fn discard_lines(intent: DiscardIntent) -> Vec<String> {
 fn apply_note(apply: &ApplyScope) -> String {
     match apply {
         ApplyScope::NextSession => "生效：新会话（进行中的会话保持现状）".into(),
+        ApplyScope::NextTuiStart => "下次启动 TUI 时生效".into(),
         ApplyScope::Restart => "生效：需重启网关（Ctrl+R）".into(),
         ApplyScope::Readonly => "只读".into(),
         _ => "保存即生效".into(),

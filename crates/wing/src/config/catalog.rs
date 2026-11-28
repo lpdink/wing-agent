@@ -97,7 +97,6 @@ const LAYOUT_SECTION_DOC: &str = "布局：会话侧栏与输入区 / 弹窗 / �
 const LAYOUT_DOC: &str = "Layout configuration section.";
 const SIDEBAR_DOC: &str = "Session sidebar visibility and position.";
 const SIDEBAR_DEFAULT_OPEN_DOC: &str = "Show the session sidebar when the TUI starts.";
-const SIDEBAR_DEFAULT_OPEN_NOTE: &str = "下次启动 Wing TUI 时生效。";
 const SIDEBAR_SIDE_DOC: &str =
     "Place the session sidebar to the left or right of the conversation.";
 
@@ -223,7 +222,7 @@ pub fn interface_catalog() -> SettingNode {
     );
     default_open.default = Some(Value::from(layout_defaults.session_sidebar.default_open));
     default_open.has_default = true;
-    default_open.notes = vec![SIDEBAR_DEFAULT_OPEN_NOTE.to_owned()];
+    default_open.apply = ApplyScope::NextTuiStart;
     let mut side = node(
         "side",
         "layout.session_sidebar.side",
@@ -1468,6 +1467,25 @@ mod tests {
     }
 
     #[test]
+    fn the_sidebar_fields_apply_at_their_advertised_times() {
+        let catalog = interface_catalog();
+        assert_eq!(
+            catalog
+                .node_at("layout.session_sidebar.default_open")
+                .unwrap()
+                .apply,
+            ApplyScope::NextTuiStart
+        );
+        assert_eq!(
+            catalog
+                .node_at("layout.session_sidebar.side")
+                .unwrap()
+                .apply,
+            ApplyScope::Hot
+        );
+    }
+
+    #[test]
     fn the_catalog_has_the_expected_shape() {
         let catalog = interface_catalog();
         let leaves: Vec<&SettingNode> = catalog.leaves().collect();
@@ -1484,7 +1502,11 @@ mod tests {
         );
         assert_eq!(count(&leaves, |node| node.required), 0);
         assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Restart), 1);
-        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 32);
+        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 31);
+        assert_eq!(
+            count(&leaves, |node| node.apply == ApplyScope::NextTuiStart),
+            1
+        );
         assert!(leaves.iter().all(|node| node.editable));
     }
 

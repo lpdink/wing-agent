@@ -33,7 +33,7 @@ pub(crate) enum RowAction {
 struct RowHit {
     area: Rect,
     session_id: String,
-    disclosure: Option<Position>,
+    disclosure: Option<Rect>,
 }
 
 #[derive(Default)]
@@ -45,7 +45,7 @@ pub(crate) struct SidebarFrame {
 impl SidebarFrame {
     pub fn hit(&self, position: Position) -> Option<(&str, RowAction)> {
         let hit = self.rows.iter().find(|hit| hit.area.contains(position))?;
-        let action = if hit.disclosure == Some(position) {
+        let action = if hit.disclosure.is_some_and(|area| area.contains(position)) {
             RowAction::ToggleChildren
         } else {
             RowAction::Open
@@ -183,7 +183,7 @@ fn render_row(
     RowHit {
         area,
         session_id: candidate.id.clone(),
-        disclosure: expandable.then(|| Position::new(area.x + indent as u16, area.y)),
+        disclosure: expandable.then(|| Rect::new(area.x + indent as u16, area.y, 2, 1)),
     }
 }
 
@@ -239,6 +239,14 @@ mod tests {
         assert_eq!(
             frame.hit(Position::new(88, 2)),
             Some(("long-session", RowAction::ToggleChildren))
+        );
+        assert_eq!(
+            frame.hit(Position::new(89, 2)),
+            Some(("long-session", RowAction::ToggleChildren))
+        );
+        assert_eq!(
+            frame.hit(Position::new(90, 2)),
+            Some(("long-session", RowAction::Open))
         );
         assert_eq!(
             frame.hit(Position::new(88, 3)),

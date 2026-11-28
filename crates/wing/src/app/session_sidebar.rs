@@ -210,6 +210,8 @@ impl SessionSidebar {
         }
         if let Some(current) = &self.current {
             if let Some(row) = self.candidates.iter_mut().find(|row| row.id == current.id) {
+                // An interactive ask can be visible in the list before its panel arrives.
+                // Keep that more specific state while the local turn is still in flight.
                 match (current.parsed_status(), row.parsed_status()) {
                     (None, _) | (Some(SessionStatus::Working), Some(SessionStatus::Waiting)) => {}
                     (Some(_), _) => row.status.clone_from(&current.status),
@@ -350,6 +352,13 @@ impl App {
             },
             ui::capacity(area),
         );
+        let capacity = ui::capacity(area);
+        let total = sidebar.rows.len();
+        let range = (total > capacity && capacity > 0).then(|| {
+            let first = sidebar.offset + 1;
+            let last = (sidebar.offset + capacity).min(total);
+            format!("{first}–{last}/{total}")
+        });
         let message = if !self.connected {
             Some("离线")
         } else if sidebar.consecutive_failures > 0 {
@@ -357,7 +366,7 @@ impl App {
         } else if sidebar.snapshot.is_none() {
             Some("加载中…")
         } else {
-            None
+            range.as_deref()
         };
         sidebar.frame = ui::render(
             area,
@@ -407,6 +416,7 @@ impl App {
 
     pub(super) fn finish_session_list(&mut self, result: Result<SessionListResponse, String>) {
         let Some(request) = self.session_sidebar.fetch.take() else {
+            tracing::debug!("ignoring session list result without an in-flight request");
             return;
         };
         let popup = request.popup_session.as_deref() == Some(self.session_id.as_str())

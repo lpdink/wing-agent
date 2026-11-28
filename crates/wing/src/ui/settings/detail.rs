@@ -158,6 +158,7 @@ pub(crate) fn apply_label(apply: &ApplyScope) -> String {
     match apply {
         ApplyScope::Hot => "热重载".to_string(),
         ApplyScope::NextSession => "新会话".to_string(),
+        ApplyScope::NextTuiStart => "下次启动 TUI".to_string(),
         ApplyScope::Restart => "需重启网关".to_string(),
         ApplyScope::Readonly => "只读".to_string(),
         ApplyScope::Unknown(raw) => raw.clone(),
@@ -421,6 +422,7 @@ mod tests {
     fn apply_labels_are_chinese_and_cover_unknown() {
         assert_eq!(apply_label(&ApplyScope::Hot), "热重载");
         assert_eq!(apply_label(&ApplyScope::NextSession), "新会话");
+        assert_eq!(apply_label(&ApplyScope::NextTuiStart), "下次启动 TUI");
         assert_eq!(apply_label(&ApplyScope::Restart), "需重启网关");
         assert_eq!(apply_label(&ApplyScope::Unknown("odd".into())), "odd");
     }

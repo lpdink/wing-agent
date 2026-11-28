@@ -1229,12 +1229,14 @@ wire_enum! {
 }
 
 wire_enum! {
-    /// 生效域：改了这个键，什么时候生效（镜像 Python `ApplyScope`）。
+    /// 生效域。网关值镜像 Python `ApplyScope`，TUI 自身的配置另有启动生效域。
     pub enum ApplyScope {
         /// 保存即热重载生效
         Hot => "hot",
         /// 新建会话生效；进行中的会话保持自己的状态
         NextSession => "next_session",
+        /// 下次启动 TUI 时生效（本地 Interface 配置）。
+        NextTuiStart => "next_tui_start",
         /// 进程级，必须重启网关
         Restart => "restart",
         /// 派生值 / env 覆盖 / 只读事实，面板不可编辑
@@ -2589,6 +2591,11 @@ mod settings_tests {
         assert_eq!(SettingKind::from_wire("secret"), SettingKind::Secret);
         assert_eq!(SettingKind::from_wire("enum"), SettingKind::Enum);
         assert_eq!(ApplyScope::from_wire("hot"), ApplyScope::Hot);
+        assert_eq!(
+            ApplyScope::from_wire("next_tui_start"),
+            ApplyScope::NextTuiStart
+        );
+        assert_eq!(ApplyScope::NextTuiStart.as_str(), "next_tui_start");
         assert_eq!(ApplyScope::from_wire("readonly"), ApplyScope::Readonly);
         assert_eq!(SecretPresence::from_wire("absent"), SecretPresence::Absent);
         assert_eq!(SecretPresence::from_wire("empty"), SecretPresence::Empty);

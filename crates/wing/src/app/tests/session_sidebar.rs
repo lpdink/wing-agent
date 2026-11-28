@@ -204,6 +204,7 @@ fn wheel_routing_and_press_identity_survive_refreshes() {
     sessions.push(row("test-session", None, "idle", "2026-01-01T10:00:00"));
     refresh(&mut app, sessions.clone());
     draw(&mut app, &mut terminal);
+    assert!(frame_text(terminal.backend().buffer()).contains("1–6/21"));
     let chat = app.chat.scroll_position();
     let mut wheel = wheel_up();
     wheel.column = 60;
@@ -218,6 +219,7 @@ fn wheel_routing_and_press_identity_survive_refreshes() {
     draw(&mut app, &mut terminal);
     assert_eq!(app.chat.scroll_position(), chat);
     assert_eq!(visible_hit(&app, "row-02", RowAction::Open).unwrap().1, 2);
+    assert!(frame_text(terminal.backend().buffer()).contains("4–9/21"));
     let pressed = visible_hit(&app, "row-03", RowAction::Open).unwrap();
     app.handle_mouse(press(pressed));
     let mut reordered = sessions;
@@ -357,4 +359,34 @@ fn a_sidebar_switch_closes_the_old_picker_and_keeps_the_draft() {
     app.handle_event(event);
     assert_eq!(app.popup.height(), 0);
     assert_eq!(app.input.text(), "/ss");
+}
+
+#[test]
+fn the_current_row_uses_the_list_until_sync_and_shows_live_asks() {
+    let mut app = app_with_message();
+    let mut terminal = test_terminal(104, 22);
+    draw(&mut app, &mut terminal);
+    app.toggle_session_sidebar();
+    app.await_session_snapshot("test-session".into());
+    finish(
+        &mut app,
+        "test-session",
+        Ok(vec![row("unexpected", None, "idle", "")]),
+    );
+    draw(&mut app, &mut terminal);
+    assert!(visible_hit(&app, "unexpected", RowAction::Open).is_none());
+
+    refresh(&mut app, vec![row("test-session", None, "working", "")]);
+    draw(&mut app, &mut terminal);
+    let (x, y) = visible_hit(&app, "test-session", RowAction::Open).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[(x + 3, y)].fg,
+        app.palette().warning
+    );
+
+    app.handle_event(sync_event(vec![], None, vec![], vec![], None));
+    app.register_ask_panel(required_choice_panel("ask", &["yes", "no"]));
+    draw(&mut app, &mut terminal);
+    let (x, y) = visible_hit(&app, "test-session", RowAction::Open).unwrap();
+    assert_eq!(terminal.backend().buffer()[(x + 3, y)].symbol(), "?");
 }

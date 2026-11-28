@@ -438,6 +438,8 @@ Interface 是**最后一个锚点**（不再有 v1 的"切根"概念，两个根
 回执合并成一条 notice（`✓ Interface …` / `✓ Gateway …` / `⚠ gateway.port 需重启网关才生效 — Ctrl+R 立即重启`）。
 只有真的改了的那一边才会发请求 / 写文件（`gateway_dirty` / `interface_dirty`）。
 
+Interface 的 `next_tui_start` 生效域标记下次启动 TUI 才读取的设置。会话侧栏的默认展开状态使用此生效域，左右位置支持即时预览。
+
 键位表（`shared/panels/settings/mod.rs` 是唯一实现，`ui/settings/**` 只渲染）：
 
 | 键 | 左栏（分组） | 右栏（设置项） | 编辑器激活 | 问题清单 | 选择项展开 |
