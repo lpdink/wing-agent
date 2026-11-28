@@ -166,6 +166,7 @@ impl App {
                 ..
             } => {
                 self.user_input_sync = true;
+                self.session_sidebar.request_refresh();
                 self.chat.remove_pending(&origin_request_ids);
                 self.chat.push_committed_user_message(
                     Some(message_uuid),
@@ -640,6 +641,7 @@ impl App {
             return false;
         }
         self.session_id = session_id;
+        self.popup.close_active();
         self.draft_recovery_epoch = self.draft_recovery_epoch.wrapping_add(1);
         self.status.pinned = false;
         self.push_intent(AppIntent::FetchInfo);
@@ -773,6 +775,8 @@ impl App {
                 display_name: agent_info.model_display_name.clone(),
             });
             self.status.workdir = agent_info.workspace.clone();
+        } else if switched {
+            self.status.workdir = None;
         }
 
         // 用量基线：快照与快照之后的 live 增量同一条有序 WS 通道——这里的
@@ -903,9 +907,8 @@ impl App {
             self.input.set_text(&draft_text);
         }
 
-        // Update session name if provided.
-        if let Some(session_name) = name {
-            self.status.session_name = Some(session_name);
+        if switched || name.is_some() {
+            self.status.session_name = name;
         }
 
         // Model / provider / workdir came with the snapshot (restored at the

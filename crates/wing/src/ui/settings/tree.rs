@@ -374,6 +374,7 @@ pub(crate) fn apply_tag(apply: &ApplyScope) -> Option<String> {
     match apply {
         ApplyScope::Hot => None,
         ApplyScope::NextSession => Some("session".to_string()),
+        ApplyScope::NextTuiStart => Some("startup".to_string()),
         ApplyScope::Restart => Some("restart".to_string()),
         ApplyScope::Readonly => Some("readonly".to_string()),
         ApplyScope::Unknown(raw) => Some(raw.clone()),
@@ -542,6 +543,10 @@ mod tests {
             Some("session")
         );
         assert_eq!(apply_tag(&ApplyScope::Restart).as_deref(), Some("restart"));
+        assert_eq!(
+            apply_tag(&ApplyScope::NextTuiStart).as_deref(),
+            Some("startup")
+        );
         assert_eq!(
             apply_tag(&ApplyScope::Unknown("weird".into())).as_deref(),
             Some("weird")

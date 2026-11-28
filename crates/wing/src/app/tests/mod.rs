@@ -17,6 +17,7 @@ mod projection;
 mod scrollbar;
 mod selection;
 mod send;
+mod session_sidebar;
 mod settings;
 mod splash_frame;
 mod support;

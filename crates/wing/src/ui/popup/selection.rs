@@ -25,38 +25,14 @@ use crate::render::markdown::elide_to_display_width;
 use crate::render::markdown::truncate_left_to_display_width;
 use crate::render::markdown::truncate_to_display_width;
 use crate::shared::session_tree::Crew;
+pub use crate::ui::session_row::format_last_active;
+use crate::ui::session_row::{PIN_MARK, PIN_WIDTH, UNTITLED, crew_badges};
 
 /// Maximum rows to show before scrolling (single-line popups).
 const MAX_VISIBLE_ROWS: usize = 8;
 
 /// Maximum rich (double-line) rows to show before scrolling (session popup).
 const MAX_VISIBLE_RICH_ROWS: usize = 6;
-
-/// Presentation of [`SessionStatus`] in the session picker (the vocabulary
-/// itself lives in the protocol layer — one definition, shared with the event
-/// projections).
-impl SessionStatus {
-    /// 状态图标：inactive/idle/working 为实心圆点，waiting 为非 emoji 的 `?`。
-    pub fn icon(self) -> &'static str {
-        match self {
-            Self::Waiting => "?",
-            _ => "●",
-        }
-    }
-
-    /// 状态图标颜色（走调色板槽位，不引命名 ANSI 色：主题改一次，这里跟着变）。
-    ///
-    /// Working = `warning`（忙），Waiting = `accent`（轮到你了），Idle = `text`，
-    /// Inactive = `dim`（被逐出内存的会话）。
-    pub fn color(self, palette: &ThemePalette) -> Color {
-        match self {
-            Self::Working => palette.warning,
-            Self::Waiting => palette.accent,
-            Self::Idle => palette.text,
-            Self::Inactive => palette.dim,
-        }
-    }
-}
 
 /// 左槽的「你在这里」标记（当前会话的祖先链，含自己）。
 ///
@@ -125,29 +101,6 @@ impl LevelHeader {
     pub fn height(&self) -> u16 {
         u16::from(self.title.is_some())
     }
-}
-
-/// Format an ISO 8601 timestamp (e.g. `2025-07-22T21:41:28.123`) into a compact
-/// display string `07-22 21:41`. Returns empty string for unparseable input.
-pub fn format_last_active(iso: &str) -> String {
-    // Expect "YYYY-MM-DDTHH:MM:SS..." — extract MM-DD HH:MM.
-    let s = iso.trim();
-    if s.len() < 16 {
-        return String::new();
-    }
-    let bytes = s.as_bytes();
-    // Validate minimal structure: digits and separators at expected positions.
-    if bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' || bytes[13] != b':' {
-        return String::new();
-    }
-    // 前面四个分隔符检查顺带保证了 5/8/11/14 都是字符边界，16 没有：一个横跨
-    // 14..16 的非 ASCII 字符（手改 metadata / 第三方网关写脏的 last_interaction）
-    // 会让字节切片 panic，而这里的契约是「看不懂就给空串」。
-    let Some(minute) = s.get(14..16) else {
-        return String::new();
-    };
-    // "MM-DD HH:MM"
-    format!("{}-{} {}:{}", &s[5..7], &s[8..10], &s[11..13], minute)
 }
 
 /// A single row in a selection popup.
@@ -411,43 +364,6 @@ struct RowStyle {
     selected: bool,
 }
 
-/// crew 徽章：`▸N`（dim，全部后代）/ `?k`（accent，后代在等你）/ `●k`（warning，后代在
-/// 干活）。三个计数为 0 的标记**不出现**——0 是常态，画出来只会把每一行都塞满。
-///
-/// `budget` 是徽章块可用的列（调用方已扣掉后面那格空气）：极窄面板上按声明序**截尾**
-/// （先丢 `●`、再丢 `?`），绝不把星标或时间标签顶出行外。返回（span 列表，显示宽度）。
-fn crew_badges(
-    crew: Crew,
-    palette: &ThemePalette,
-    base: Style,
-    budget: usize,
-) -> (Vec<Span<'static>>, usize) {
-    let items = [
-        (crew.descendants, "▸", palette.dim),
-        (crew.waiting, "?", palette.accent),
-        (crew.working, "●", palette.warning),
-    ];
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut width = 0usize;
-    for (count, glyph, ink) in items {
-        if count == 0 {
-            continue;
-        }
-        let text = format!("{glyph}{count}");
-        let item_w = UnicodeWidthStr::width(text.as_str());
-        let sep_w = usize::from(!spans.is_empty());
-        if width + sep_w + item_w > budget {
-            break;
-        }
-        if sep_w == 1 {
-            spans.push(Span::styled(" ", base));
-        }
-        width += sep_w + item_w;
-        spans.push(Span::styled(text, Style::default().fg(ink).patch(base)));
-    }
-    (spans, width)
-}
-
 /// 一行标题：事实在前、键位提示在后，整行 dim（它不是内容，是路标）。
 ///
 /// 提示永远不会被名字吃掉：宽度不够时先截事实（补 `…`）；连提示自己都放不下时，
@@ -602,13 +518,12 @@ impl<'a> SelectionPopup<'a> {
         // **只读标记**（没有命中区，不认领指针），画宽一格只会让弹窗的这一行多溢
         // 出一列 —— 与状态栏那个「点不准」的问题不同性质，所以暂不换（状态栏的
         // pin 用了 Neutral 的 `✦` / `✧`，见 `ui::status_bar` 的模块头）。
-        const STAR_W: usize = 2; // " ★"
         let time_tag = if rich.last_active.is_empty() {
             String::new()
         } else {
             format!(" [{}]", rich.last_active)
         };
-        let star_w = if rich.pinned { STAR_W } else { 0 };
+        let star_w = if rich.pinned { PIN_WIDTH } else { 0 };
         let gutter_w = if rich.level.is_some() { GUTTER_W } else { 0 };
         let time_w = UnicodeWidthStr::width(time_tag.as_str());
         // " <icon> " 占 3 列；星标与时间标签先保，剩下的才分给徽章与 workspace。
@@ -682,7 +597,7 @@ impl<'a> SelectionPopup<'a> {
             // 星标只标"已 pin"（未 pin 不占位）：展示面在 pin 与否之间只差
             // 这一个字形，行宽不因 pin 变化而抖动。
             line1.push(Span::styled(
-                " ★",
+                PIN_MARK,
                 Style::default().fg(self.palette.warning).patch(base_style),
             ));
         }
@@ -698,7 +613,7 @@ impl<'a> SelectionPopup<'a> {
         line2.push(Span::styled(" ".repeat(gutter_w + 4), base_style));
         let title_w = width.saturating_sub(gutter_w + 5);
         let title = if rich.title.is_empty() {
-            "(untitled)".to_string()
+            UNTITLED.to_string()
         } else if UnicodeWidthStr::width(rich.title.as_str()) > title_w {
             truncate_to_display_width(&rich.title, title_w)
         } else {

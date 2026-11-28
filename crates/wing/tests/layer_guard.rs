@@ -150,7 +150,13 @@ const SHARED_FORBIDDEN_CRATES: &[&str] = &["ratatui"];
 /// Anchor files the guard must actually see (`assert_scanned` panics when one is
 /// missing): every layer directory registers a few of its files here, so a walk
 /// that stopped early cannot let the rules pass vacuously.
-const UI_ANCHORS: &[&str] = &["ui/panel.rs", "ui/chat_view/cell.rs", "ui/cells/ask_msg.rs"];
+const UI_ANCHORS: &[&str] = &[
+    "ui/panel.rs",
+    "ui/chat_view/cell.rs",
+    "ui/cells/ask_msg.rs",
+    "ui/session_row.rs",
+    "ui/session_sidebar.rs",
+];
 
 /// The neutral layer's anchors — same contract; every panel package registers
 /// its files here (the settings package included).
@@ -159,6 +165,7 @@ const SHARED_ANCHORS: &[&str] = &[
     "shared/constants.rs",
     "shared/tips.rs",
     "shared/doc_edit.rs",
+    "shared/session_list.rs",
     "shared/session_tree.rs",
     "shared/panels/mod.rs",
     "shared/panels/ask.rs",

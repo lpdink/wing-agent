@@ -275,7 +275,7 @@ pub(super) fn reversed_cells(
 /// 打开 `/ss` 的会话候选面板，灌入 `count` 条双行（rich）候选 —— 策略窗口
 /// 6 条 = 12 行，比任何「输入卡下面只剩几行」的版式都高。
 pub(super) fn open_session_popup(app: &mut App, count: usize) {
-    use crate::ui::popup::command::SessionCandidate;
+    use crate::shared::session_list::SessionCandidate;
     app.popup.cache.sessions = (0..count)
         .map(|i| SessionCandidate {
             id: format!("sess-{i:02}"),

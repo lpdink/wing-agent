@@ -86,8 +86,8 @@ pub(super) enum SelectionGuard {
         cells: usize,
         /// Number of pending (sent, not yet accepted) messages.
         pending: usize,
-        /// Terminal width the anchor's columns were measured against.
-        width: u16,
+        /// Screen X and width of the conversation column.
+        columns: (u16, u16),
         /// Content rebuild counter (`ChatView::structure_epoch`) — catches
         /// session switches / compaction / rewind even when the rebuilt
         /// content ends up with the same cell count.
@@ -98,8 +98,8 @@ pub(super) enum SelectionGuard {
     Composer {
         /// Current draft text as the guard reads it (`InputArea::guard_text`).
         text: String,
-        /// Terminal width the visual rows were computed against.
-        width: u16,
+        /// Screen X and width of the conversation column.
+        columns: (u16, u16),
     },
 }
 
@@ -519,12 +519,12 @@ impl App {
                 // animated (spinner / progress) and must not read as a content
                 // change — see `InputArea::guard_text`.
                 text: self.input.guard_text(),
-                width: self.geometry.width(),
+                columns: self.geometry.main_x_and_width(),
             },
             SelectionRegion::Chat => SelectionGuard::Chat {
                 cells: self.chat.len(),
                 pending: self.chat.pending_len(),
-                width: self.geometry.width(),
+                columns: self.geometry.main_x_and_width(),
                 rebuilds: self.chat.structure_epoch(),
                 pending_revision: self.chat.pending_revision(),
             },

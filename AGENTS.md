@@ -231,14 +231,15 @@ crates/wing/src/
 │   ├── doc_edit.rs                  稀疏配置文档的路径代数与编辑原语（唯一实现；`wing config` 与设置面板各按自己的策略消费）
 │   ├── text_edit.rs                 单行文本编辑原语（char↔byte 换算 + `EditOp`；设置/ask 面板与 composer 共用）
 │   ├── tips.rs                      开屏提示池（欢迎屏轮换一条 + /tips 面板全量）
-│   ├── session_tree.rs              会话血缘森林：扁平会话行 → 树序 + 连接前缀 + crew 聚合 + 层投影（TUI 面板 / `wing ps` / `wing usage --tree` 共用）
+│   ├── session_list.rs              会话列表摘要与会话树输入（`/ss` 与侧栏共用）
+│   ├── session_tree.rs              会话血缘森林：扁平会话行 → 树序 + 连接前缀 + crew 聚合 + 层投影（TUI 面板与侧栏 / `wing ps` / `wing usage --tree` 共用）
 │   └── constants.rs                 协议常量（本地命令、工具名等 magic string）
 ├── app/                             App 状态机 + 事件循环
 │   ├── mod.rs                       run_app() 主循环 + handle_event()
 │   ├── runner.rs                    执行 AppIntent（HTTP/WS 副作用）
 │   ├── intent.rs / transport.rs     AppIntent 枚举 + 传输抽象（WS+HTTP+client_id 原子单元，含重连退避）
 │   ├── commands.rs / modal.rs       斜杠命令路由表 / 模态所有权与 Esc 阶梯（谁拥有键盘，唯一声明）
-│   ├── mouse.rs / selection_session.rs   指针所有权与优先级（滚动条 → composer → chat 带 → 状态栏）/ 选择手势生命周期（区域指纹失效 · 按下时的链接）
+│   ├── mouse.rs / selection_session.rs   指针所有权与优先级（滚动条 → 会话侧栏 → composer → chat 带 → 状态栏）/ 选择手势生命周期（区域指纹失效 · 按下时的链接）
 │   ├── frame.rs / projection.rs     上一帧几何记录（输入路径共读的契约）/ WingEvent → chat·turn·status 投影（唯一 match 事件变体处）
 │   ├── clipboard.rs                 粘贴通道边界（文本 → composer / 图片 → 单并发压缩流水线 → chip）
 │   ├── images/                     图片 lane：mod（能力/配置门 · ImageStore 持有 · 元数据表 · 帧末绘制（遮挡与选择门）· 新鲜度检查（1s 节流 · 可注入时钟））· media（媒体图的字节侧：屏幕目标集 · 抓取账本 · 字节 LRU）
@@ -246,10 +247,13 @@ crates/wing/src/
 │   ├── turn_state.rs / render_context.rs   轮次耗时 / 流式目标 cell 跟踪
 │   ├── popup_state.rs               Popup + 候选缓存 + 去重 + 层视图状态（从根层逐层进入的路径）
 │   ├── preview.rs                   整屏帧取样器（创作期工具的库侧：真 App::draw → Buffer → 文本 / ANSI / HTML）
+│   ├── session_sidebar.rs           会话侧栏状态、点击与列表刷新调度
 │   ├── settings.rs                  设置面板接线（开合生命周期 · Interface 实时预览 · 保存回执 · Ctrl+R 重启网关）
-│   └── tests/                       模块内单测（mod + 18 个主题文件：core / send / wire / frame / interaction / modal / composer / commands / projection / selection / scrollbar / settings / images / clipboard / usage / welcome / splash_frame / program_status + support）
+│   └── tests/                       模块内单测（mod + 19 个主题文件：core / send / wire / frame / interaction / modal / composer / commands / projection / selection / scrollbar / settings / images / clipboard / usage / welcome / splash_frame / program_status / session_sidebar + support）
 ├── ui/                              UI 组件
 │   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染 + pending 条目）· model（内容模型）· media（消息里的图片：正文 + 引用 → 图块 / 标签行）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）· image（图片放置表与候选路径）
+│   ├── session_row.rs               会话列表共享的状态字形、徽章和时间格式
+│   ├── session_sidebar.rs           会话侧栏双行条目与实际帧的命中区域
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）
 │   ├── cached_cell.rs               ChatCell 包装：渲染结果 + 高度按 generation 缓存 + CellFrame 投影（链接 / 图片锚点侧信道）
@@ -330,6 +334,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/wake.md`](docs/dev/wake.md) | 会话唤醒：语义表（收口/提问/失败/归档联动）、`done` 的静息判据与「押住」（不投递不扣配额）、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |
 | [`docs/dev/session-lineage.md`](docs/dev/session-lineage.md) | 会话血缘：父子关联字段语义、采集机制（CLI / TUI / 外部前端）、树序与 pin 规则的产品语义参照点 |
 | [`docs/dev/tui-input.md`](docs/dev/tui-input.md) | TUI 输入通道：鼠标上报的 DECSET 配对与生命周期对称、滚轮 / 键盘 / 选择的路由（新增鼠标能力前先读） |
+| [`docs/dev/tui-session-sidebar.md`](docs/dev/tui-session-sidebar.md) | 会话侧栏交互、配置、实时状态与帧坐标 |
 | [`docs/dev/tui-signals.md`](docs/dev/tui-signals.md) | TUI 终端状态信号：OSC 0（标题）/ OSC 9（桌面通知）/ OSC 7501（程序状态）的读者与语义、光标转义的变化语义 |
 | [`docs/dev/coverage.md`](docs/dev/coverage.md) | 覆盖率门禁：增量（patch）覆盖率作为 PR 门禁、sticky 评论形状、不判定区与本地跑法 |
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 观测与断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 / 停机两路径（快 `stop()` vs 优雅 `shutdown()`） |

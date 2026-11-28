@@ -457,8 +457,8 @@ mod tests {
     use crate::protocol::CommandInfo;
 
     /// Build a SessionCandidate for tests.
-    fn sess(id: &str, title: &str) -> command::SessionCandidate {
-        command::SessionCandidate {
+    fn sess(id: &str, title: &str) -> crate::shared::session_list::SessionCandidate {
+        crate::shared::session_list::SessionCandidate {
             id: id.into(),
             parent: None,
             title: title.into(),

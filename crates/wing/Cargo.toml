@@ -23,6 +23,7 @@ futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+yaml-edit = { version = "0.3.6", default-features = false }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 ratatui-image = { workspace = true }

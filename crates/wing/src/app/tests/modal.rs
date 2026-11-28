@@ -16,9 +16,9 @@ use crate::protocol::WingEvent;
 use crate::shared::panels::ask::ASK_CANCEL_CONTENT;
 use crate::shared::panels::ask::AskPanel;
 use crate::shared::panels::ask::PanelFinish;
+use crate::shared::session_list::SessionCandidate;
 use crate::ui::cells::ask_msg::AskMessage;
 use crate::ui::chat_view::ChatCell;
-use crate::ui::popup::command::SessionCandidate;
 
 #[test]
 fn test_ask_panel_key_flow_submits_header_answer() {

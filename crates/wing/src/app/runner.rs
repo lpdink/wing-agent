@@ -153,6 +153,7 @@ pub async fn execute_intent(
                     Ok(resp) => {
                         // 以服务端回读为准（而不是点击时的乐观值）。
                         app.status.pinned = is_pinned(&resp.tags);
+                        app.session_sidebar.request_refresh();
                         tracing::debug!(pinned = app.status.pinned, "session pin toggled");
                     }
                     Err(e) => {
@@ -351,14 +352,15 @@ pub async fn execute_intent(
                 }
             }
         }
-        AppIntent::FetchSessionList => spawn_fetch(
-            transport.as_ref(),
-            app.session_id.clone(),
+        AppIntent::FetchSessionList | AppIntent::RefreshSessionSidebar => dispatch_session_list(
+            app,
+            transport.as_ref().map(|t| &t.http),
             fetch_tx,
-            "list sessions",
-            |http| async move { http.list_sessions().await },
-            FetchPayload::SessionList,
+            matches!(intent, AppIntent::FetchSessionList),
         ),
+        AppIntent::SaveSidebarWidth { width } => {
+            app.finish_sidebar_width_save(save_sidebar_width(width));
+        }
         AppIntent::CompactSession { instruction } => {
             dispatch_compact(
                 transport.as_ref().map(|t| t.http.clone()),
@@ -678,10 +680,46 @@ pub(super) struct OutgoingMessage {
     pub(super) images: Vec<CompressedImage>,
 }
 
-/// 一个"取一次、投回事件循环"的后台请求——六个 fetch 意图共用的模板。
-///
-/// 模板只负责"拿 http → spawn → 把结果（或失败日志）投回去"；`label` 是失败日志的
-/// 动作名（`<label> failed: <e>`），`wrap` 把响应收进 [`FetchPayload`]。
+fn save_sidebar_width(width: u16) -> Result<(), crate::config::store::StoreError> {
+    use crate::config::SessionSidebarConfig;
+    use crate::shared::doc_edit::{Policy, set_path};
+    let width = width.clamp(
+        SessionSidebarConfig::MIN_WIDTH,
+        SessionSidebarConfig::MAX_WIDTH,
+    );
+    let key = "layout.session_sidebar.width";
+    let steps = wing_api_client::models::parse_path(key).expect("sidebar width has a fixed path");
+    crate::config::store::update_interface_int(key, width, |doc| {
+        set_path(doc, &steps, serde_json::Value::from(width), Policy::Strict)
+    })
+}
+
+fn dispatch_session_list(
+    app: &mut App,
+    http: Option<&wing_api_client::GatewayClient>,
+    fetch_tx: &mpsc::Sender<FetchResult>,
+    from_popup: bool,
+) {
+    let Some(http) = http.filter(|_| from_popup || app.connected) else {
+        return;
+    };
+    let popup_session = from_popup.then_some(app.session_id.as_str());
+    if app.session_sidebar.begin_fetch(popup_session) {
+        spawn_fetch_result(
+            http.clone(),
+            app.session_id.clone(),
+            fetch_tx,
+            |http| async move { http.list_sessions().await },
+            |result| {
+                Some(FetchPayload::SessionList(
+                    result.map_err(|error| error.to_string()),
+                ))
+            },
+        );
+    }
+}
+
+/// Run a background query and send its success to the event loop.
 fn spawn_fetch<T, F, Fut>(
     transport: Option<&Transport>,
     session_id: String,
@@ -694,22 +732,38 @@ fn spawn_fetch<T, F, Fut>(
     F: FnOnce(wing_api_client::GatewayClient) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<T, wing_api_client::ApiClientError>> + Send + 'static,
 {
-    let Some(t) = transport else {
-        return;
-    };
-    let http = t.http.clone();
+    if let Some(t) = transport {
+        spawn_fetch_result(t.http.clone(), session_id, fetch_tx, call, move |result| {
+            result
+                .inspect_err(|error| tracing::warn!("{label} failed: {error}"))
+                .ok()
+                .map(wrap)
+        });
+    }
+}
+
+fn spawn_fetch_result<T, F, Fut>(
+    http: wing_api_client::GatewayClient,
+    session_id: String,
+    fetch_tx: &mpsc::Sender<FetchResult>,
+    call: F,
+    wrap: impl FnOnce(Result<T, wing_api_client::ApiClientError>) -> Option<FetchPayload>
+    + Send
+    + 'static,
+) where
+    T: Send + 'static,
+    F: FnOnce(wing_api_client::GatewayClient) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, wing_api_client::ApiClientError>> + Send + 'static,
+{
     let tx = fetch_tx.clone();
     tokio::spawn(async move {
-        match call(http).await {
-            Ok(value) => {
-                let _ = tx
-                    .send(FetchResult {
-                        session_id,
-                        payload: wrap(value),
-                    })
-                    .await;
-            }
-            Err(e) => tracing::warn!("{label} failed: {e}"),
+        if let Some(payload) = wrap(call(http).await) {
+            let _ = tx
+                .send(FetchResult {
+                    session_id,
+                    payload,
+                })
+                .await;
         }
     });
 }
@@ -1124,7 +1178,67 @@ fn apply_update_session(app: &mut App, update: SessionUpdate) {
 mod tests {
     use super::*;
     use crate::config::AppConfig;
-    use crate::ui::popup::command::SessionCandidate;
+    use crate::shared::session_list::SessionCandidate;
+
+    #[tokio::test]
+    async fn session_list_dispatch_shares_the_http_result_with_the_picker() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let http = wing_api_client::GatewayClient::new(
+            format!("http://{}", listener.local_addr().unwrap()),
+            None,
+        )
+        .unwrap();
+        let server = tokio::spawn(async move {
+            for (status, body) in [
+                (
+                    "200 OK",
+                    r#"{"sessions":[{"id":"from-http","status":"idle"}]}"#,
+                ),
+                ("503 Service Unavailable", r#"{"detail":"offline"}"#),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut input = BufReader::new(&mut stream);
+                let mut line = String::new();
+                input.read_line(&mut line).await.unwrap();
+                assert_eq!(line, "GET /api/session/list HTTP/1.1\r\n");
+                loop {
+                    line.clear();
+                    if input.read_line(&mut line).await.unwrap() == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let mut app = App::new("test-session".into(), AppConfig::default(), None);
+        let (tx, mut results) = mpsc::channel(2);
+        dispatch_session_list(&mut app, Some(&http), &tx, false);
+        dispatch_session_list(&mut app, Some(&http), &tx, true);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result.payload, FetchPayload::SessionList(Ok(_))));
+        app.handle_fetch_result(result);
+        assert_eq!(app.popup.cache.sessions[0].id, "from-http");
+        dispatch_session_list(&mut app, Some(&http), &tx, false);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), results.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&result.payload, FetchPayload::SessionList(Err(message)) if message.contains("503"))
+        );
+        app.handle_fetch_result(result);
+        assert_eq!(app.popup.cache.sessions[0].id, "from-http");
+        server.await.unwrap();
+    }
 
     fn app_with_cached_sessions() -> App {
         let mut app = App::new("test-session".into(), AppConfig::default(), None);

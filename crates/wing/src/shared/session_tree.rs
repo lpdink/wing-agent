@@ -5,7 +5,7 @@
 //! （[`Crew`]）、以及「给定 scope 取一层」的投影（[`Forest::level`]）。三个消费面
 //! 共用这一份实现（TUI 的会话面板、`wing ps`（`--tree` 与层视图）、`wing usage
 //! --tree`）；外部的 web / 桌面前端按同一份契约在 TS 侧另实现
-//! （见 docs/dev/session-lineage.md）。
+//! （见 docs/dev/session-lineage.md）。TUI 侧栏按活动日展示整棵树，组内保留森林顺序。
 //!
 //! 排序契约（产品语义的参照点）：
 //!

@@ -791,9 +791,10 @@ mod session_list {
 
     fn feed(app: &mut App, sessions: Vec<SessionInfo>) {
         let session_id = app.session_id.clone();
+        assert!(app.session_sidebar.begin_fetch(Some(&session_id)));
         app.handle_fetch_result(FetchResult {
             session_id,
-            payload: FetchPayload::SessionList(SessionListResponse { sessions }),
+            payload: FetchPayload::SessionList(Ok(SessionListResponse { sessions })),
         });
     }
 
@@ -1748,7 +1749,7 @@ mod session_list {
 #[test]
 fn test_opening_the_session_panel_refreshes_the_cached_list_once() {
     use crate::app::intent::AppIntent;
-    use crate::ui::popup::command::SessionCandidate;
+    use crate::shared::session_list::SessionCandidate;
 
     let mut app = test_app();
     app.popup.cache.sessions = vec![SessionCandidate {
@@ -1798,7 +1799,7 @@ fn test_opening_the_session_panel_refreshes_the_cached_list_once() {
 
 #[test]
 fn test_the_refresh_response_does_not_trigger_another_request() {
-    use crate::ui::popup::command::SessionCandidate;
+    use crate::shared::session_list::SessionCandidate;
     use wing_api_client::models::SessionListResponse;
 
     let mut app = test_app();
@@ -1819,11 +1820,12 @@ fn test_the_refresh_response_does_not_trigger_another_request() {
 
     // 响应路径（update_popup，非输入路径）原地换行：不得再发一次请求。
     let session_id = app.session_id.clone();
+    assert!(app.session_sidebar.begin_fetch(Some(&session_id)));
     app.handle_fetch_result(crate::app::intent::FetchResult {
         session_id,
-        payload: crate::app::intent::FetchPayload::SessionList(SessionListResponse {
+        payload: crate::app::intent::FetchPayload::SessionList(Ok(SessionListResponse {
             sessions: vec![],
-        }),
+        })),
     });
     assert!(
         app.drain_intents().is_empty(),
@@ -1849,11 +1851,12 @@ fn test_opening_the_panel_with_an_empty_cache_requests_the_list_once() {
 
     // 列表到达 → 原地建面板；响应路径不得再次请求。
     let session_id = app.session_id.clone();
+    assert!(app.session_sidebar.begin_fetch(Some(&session_id)));
     app.handle_fetch_result(crate::app::intent::FetchResult {
         session_id,
-        payload: crate::app::intent::FetchPayload::SessionList(SessionListResponse {
+        payload: crate::app::intent::FetchPayload::SessionList(Ok(SessionListResponse {
             sessions: vec![],
-        }),
+        })),
     });
     let intents = app.drain_intents();
     assert!(intents.is_empty(), "unexpected intents: {intents:?}");
@@ -1913,8 +1916,8 @@ fn test_a_panels_first_fetch_survives_a_running_turn() {
 fn test_a_panel_refresh_still_waits_for_an_idle_agent() {
     // 反向锚定：有缓存时面板照常渲染旧行，但"打开即刷新"（#147）不在
     // turn 进行中发请求——刷新**不排队**（不补发），下次打开面板自然会再刷。
+    use crate::shared::session_list::SessionCandidate;
     use crate::ui::popup::ActivePopup;
-    use crate::ui::popup::command::SessionCandidate;
 
     let mut app = test_app();
     app.popup.cache.sessions = vec![SessionCandidate {

@@ -28,6 +28,7 @@
 └── tui/
     ├── config.yaml     TUI 配置（colors / layout / rendering / api_key；`wing tui --dump-config` 输出它的规范形，密文默认掩码）
     ├── config.yaml.bak 最近一次保存前的原文（同上）
+    ├── .config.yaml.lock TUI 配置写入共用的锁文件
     └── logs/           TUI 日志：wing_YYYY-MM-DD.log（命名同后端，无符号链接）
 ```
 
@@ -107,7 +108,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 
 ## TUI 配置（`~/.wing/tui/config.yaml`）
 
-`colors`（`preset` = `auto` | `dark` | `light` 选底色：`auto`（默认）在启动时探测终端背景，亮底用 `light`、暗底用 `dark`、探测不到用 `dark`；`dark` 是给暗底终端设计的一套 hex 灰阶 + cyan accent（旧名 `wing` 仍可读）；`light` 是同一套色相按白底校准；逐槽覆盖不改变 `appearance`；其余每个槽位键**覆盖该槽**：灰阶 `text` / `thinking` / `thinking_label`（思考块标题行）/ `tool_result` / `dim`，品牌与交互 `accent`，状态 `success` / `warning` / `danger`，markdown 角色 `heading`（标题）/ `strong`（加粗）/ `inline_code`（行内代码与未高亮代码块）/ `marker`（列表符、表头文字）/ `quote`（引文）/ `math`（公式），`surface`（用户消息底）与 diff 行背景 tint（`diff_add_bg` / `diff_del_bg` 及词级强调 `diff_*_bg_strong`），命名色或 24-bit hex 都行，非法值 warn 后回落该预设槽位；`heading_bright` 是唯一的**派生值**——跟着 `heading` 提亮（亮底终端反向压深），不是 YAML 键）、`layout`（输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`api_key`（网关鉴权，空则不发送；**密文**——面板只写不回显、`--dump-config` 默认掩码，见下）。调色 / 对色用 `cargo run -p wing --example theme_preview`（整条 transcript 的真 cell 画廊，`--preset` 切预设、`--html` 导出）。
+`colors`（`preset` = `auto` | `dark` | `light` 选底色：`auto`（默认）在启动时探测终端背景，亮底用 `light`、暗底用 `dark`、探测不到用 `dark`；`dark` 是给暗底终端设计的一套 hex 灰阶 + cyan accent（旧名 `wing` 仍可读）；`light` 是同一套色相按白底校准；逐槽覆盖不改变 `appearance`；其余每个槽位键**覆盖该槽**：灰阶 `text` / `thinking` / `thinking_label`（思考块标题行）/ `tool_result` / `dim`，品牌与交互 `accent`，状态 `success` / `warning` / `danger`，markdown 角色 `heading`（标题）/ `strong`（加粗）/ `inline_code`（行内代码与未高亮代码块）/ `marker`（列表符、表头文字）/ `quote`（引文）/ `math`（公式），`surface`（用户消息底）与 diff 行背景 tint（`diff_add_bg` / `diff_del_bg` 及词级强调 `diff_*_bg_strong`），命名色或 24-bit hex 都行，非法值 warn 后回落该预设槽位；`heading_bright` 是唯一的**派生值**——跟着 `heading` 提亮（亮底终端反向压深），不是 YAML 键）、`layout`（会话侧栏与输入区 / 弹窗 / 工具输出的行数上限）、`rendering`、`api_key`（网关鉴权，空则不发送；**密文**——面板只写不回显、`--dump-config` 默认掩码，见下）。调色 / 对色用 `cargo run -p wing --example theme_preview`（整条 transcript 的真 cell 画廊，`--preset` 切预设、`--html` 导出）。
 
 `rendering` 的键：
 
@@ -125,7 +126,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 同一套 tmp + rename，不再用会留下截断副本的 `fs::copy`）。**读失败不吞**：文件坏掉时报错，
 不静默回落默认值（否则一次保存就会覆盖掉用户手写的文件）。
 
-编辑入口有三个，共用同一份声明（`config/catalog.rs::interface_catalog()`）：
+TUI 配置使用 `config/catalog.rs::interface_catalog()` 声明。配置入口包括：
 
 - **TUI `/settings` 面板的 Interface 根**：实时预览（改颜色当场变色，`Esc` 回退）+ `s` 保存；
 - **`wing tui --dump-config`**：读**当前文件**、输出它的规范形（只有分隔行与注释掉的默认值）；
@@ -141,16 +142,17 @@ schema 之外的未知键**保留并写回**（前向兼容）。
     真值只以末 4 位 hint 出现），而 stdout 会被 shell 重定向、被日志与 CI 捕获；真值只在显式要时才给。
     代价是**不带 `--show-secrets` 的 dump 不是 round-trip artifact**（`api_key` 变成 `null`），
     这一点是刻意的。
-  - **保存路径不受掩码影响**：`store::write_interface_doc`（面板 `s` / setup 向导 / `app/runner.rs`
-    共用的唯一写盘实现）用的是同一个 emitter 的 **Raw** 模式——写掩码 = 把用户密钥换成掩码字符串
-    = **数据损坏**。两处别"顺手统一"。
+  - 设置面板与 setup 向导以 **Raw** 模式写入规范形并保存密文真值。
   - `--show-secrets` 的输出是真值：`> 已存在的文件` 前先备份（shell 会在程序启动前先截断目标）；
 - **手写文件**（仍然支持）：外部改动在面板 `R` 重新载入时读入。
+- **拖动会话侧栏分隔线**在松手时更新一个宽度值，保留文件中的注释和其他键。配置保存使用 `.config.yaml.lock` 串行化协作写入，检测到冲突时提示重试。
 
 > 颜色槽「注释掉的默认值」是 `preset: wing` 下的值；改 `preset` 后它们仅供参考（不随预设重算）。
 > 取消注释 = 一份合法值：嵌套块（`colors:` / `paste:` 等）也是整块注释的，取消整块即可。
 
 > `gateway.host/port` 只影响独立启动 `wing-gateway` 的场景；Rust TUI 读的是 backend config，不会读 TUI config 里的网关地址。
+
+启动时的侧栏状态、左右位置和宽度可通过 `layout.session_sidebar` 设置。拖动侧栏分隔线只保存宽度值。键名和取值见 [会话侧栏](tui-session-sidebar.md)。
 
 ## 日志策略（前后端统一）
 

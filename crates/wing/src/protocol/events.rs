@@ -93,6 +93,15 @@ impl SessionStatus {
         }
     }
 
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+        }
+    }
+
     /// Whether a turn is in flight — the only question a mid-join subscriber
     /// asks of the snapshot. `waiting` counts: the turn runs, blocked on a
     /// pending ask (the live path keeps the spinner up for it too).
@@ -1733,6 +1742,19 @@ mod tests {
         }"#;
         let event: WingEvent = serde_json::from_str(bare).unwrap();
         assert_eq!(event.session_id(), None);
+    }
+
+    #[test]
+    fn session_status_list_spellings_match_snapshot_serialization() {
+        for status in [
+            SessionStatus::Inactive,
+            SessionStatus::Idle,
+            SessionStatus::Working,
+            SessionStatus::Waiting,
+        ] {
+            assert_eq!(SessionStatus::parse(status.as_str()), Some(status));
+            assert_eq!(serde_json::to_value(status).unwrap(), status.as_str());
+        }
     }
 
     #[test]
