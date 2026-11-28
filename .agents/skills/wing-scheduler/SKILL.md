@@ -176,8 +176,8 @@ git -C "$WT" rev-parse HEAD                             # ← 记进 scheduler_l
 - 分支命名：`<task>/l1`、`<task>/l2`…，最终合入 `<task>/integration`（§10）；
 - **worktree 放哪**：默认集中放 `$WING_HOME/worktrees/<repo>-<task>-l<N>`（`<repo>` 取仓库目录名）——与任务文档同源，交付后一处就能清理干净，也不污染目标仓库的目录树；**如果目标仓库已有既定的 worktree 约定**（仓库文档里写了 / 旁边已有专门的存放目录），沿用它，不要另起炉灶；
 - **绝对路径必须记进 scheduler_log**（子 agent 全靠它）：worktree 里的相对路径对子 agent 毫无意义；
-- 存放目录要与仓库同卷、且留足空间：Rust / Node 这类构建产物动辄 GB 级（起几个 lane 就能吃掉十几 G）；
-- **交付后清理**：`git worktree remove --force <路径>`（连构建产物一起带走）+ `git worktree prune`，别让 target / node_modules 在磁盘上过夜；
+- 存放目录要与仓库同卷、且留足空间：Rust 的 `target` 与 Python 的 `.venv` 动辄 GB 级（起几个 lane 就能吃掉十几 G）；
+- **交付后清理**：`git worktree remove --force <路径>`（连构建产物一起带走）+ `git worktree prune`，别让 `target` / `.venv` 在磁盘上过夜；
 
 ### 5.4 写步骤任务书（每步一份）
 
