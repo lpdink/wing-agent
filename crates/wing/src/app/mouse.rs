@@ -1,13 +1,11 @@
 //! Mouse routing — one declaration of who owns a pointer gesture.
 //!
-//! The pointer has five channels, and each of them is declared here:
+//! Each pointer channel is declared here:
 //!
 //! * [`App::pointer_owner`] walks [`POINTER_PRIORITY`] — the **one** place where the order (scrollbar
-//!   → composer → chat band → status bar) is written down. A press is offered to each owner in turn
+//!   → sidebar → composer → chat band → status bar) is written down. A press is offered to each owner in turn
 //!   and the first claim wins;
-//! * the wheel is a channel of its own: it always scrolls the chat view and is never claimed by a
-//!   panel or a popup, so the history stays reachable while an ask panel / the model picker / the
-//!   command popup is up;
+//! * the wheel scrolls the sidebar under the pointer and the chat view elsewhere;
 //! * hover belongs to the overlay scrollbar alone (it is the only thing that reacts to motion);
 //! * a drag / release does **not** re-pick an owner: it goes back to the region the press started in
 //!   (see [`super::selection_session`]), so a pointer that wanders out of the region keeps producing
@@ -24,6 +22,8 @@
 use crate::ui::scrollbar;
 use crate::ui::scrollbar::ScrollbarGeometry;
 use crate::ui::selection::SelectionRegion;
+
+use ratatui::layout::Position;
 
 use super::App;
 
@@ -53,6 +53,7 @@ pub(super) enum PointerOwner {
     /// The overlay scrollbar: it overprints the chat band's last column, so it
     /// has to see the event before the band does.
     Scrollbar,
+    SessionSidebar,
     /// The composer block: the only region that reacts to a plain click (it
     /// places the cursor), guarded by the modal lane's pointer guard.
     Composer,
@@ -69,8 +70,9 @@ pub(super) enum PointerOwner {
 /// place where it is written down, and [`App::pointer_owner`] is its only
 /// reader. Moving a line here moves the priority for presses; nothing else in
 /// the app encodes it.
-pub(super) const POINTER_PRIORITY: [PointerOwner; 4] = [
+pub(super) const POINTER_PRIORITY: [PointerOwner; 5] = [
     PointerOwner::Scrollbar,
+    PointerOwner::SessionSidebar,
     PointerOwner::Composer,
     PointerOwner::Chat,
     // 状态栏只占自己的一行（不与上面三者重叠），位置只在该行被别的认领
@@ -86,12 +88,17 @@ impl PointerOwner {
     /// does that once, after the chain has picked a winner.
     fn claims(self, app: &App, column: u16, row: u16) -> bool {
         // 设置面板是**浮层模态**：卡片四周的聊天还看得见，但它不是可交互的表面
-        // （见 [`App::background_pointer_blocked`]）。四个背景认领一律先过这道门。
+        // （见 [`App::background_pointer_blocked`]）。背景认领一律先过这道门。
         if app.background_pointer_blocked() {
             return false;
         }
         match self {
             PointerOwner::Scrollbar => app.scrollbar_at(column, row).is_some(),
+            PointerOwner::SessionSidebar => app
+                .session_sidebar
+                .frame
+                .area
+                .contains(Position::new(column, row)),
             // The composer sits below the chat band, and it is claimed only
             // while no modal owns the keyboard: the ask panel / model picker /
             // visible popup are typing into the draft, and placing a cursor or
@@ -151,13 +158,26 @@ impl App {
         use crossterm::event::MouseEventKind;
 
         match mouse.kind {
-            MouseEventKind::ScrollUp => {
-                self.chat.scroll_up(super::WHEEL_SCROLL_LINES);
-                MouseOutcome::Immediate
-            }
-            MouseEventKind::ScrollDown => {
-                self.chat
-                    .scroll_down(super::WHEEL_SCROLL_LINES, self.geometry.chat_height());
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                self.session_sidebar.cancel_press();
+                let down = mouse.kind == MouseEventKind::ScrollDown;
+                if self
+                    .session_sidebar
+                    .frame
+                    .area
+                    .contains(Position::new(mouse.column, mouse.row))
+                {
+                    if self.background_pointer_blocked() {
+                        return MouseOutcome::Ignored;
+                    }
+                    return self.session_sidebar.scroll(down);
+                }
+                if down {
+                    self.chat
+                        .scroll_down(super::WHEEL_SCROLL_LINES, self.geometry.chat_height());
+                } else {
+                    self.chat.scroll_up(super::WHEEL_SCROLL_LINES);
+                }
                 MouseOutcome::Immediate
             }
             // Hover belongs to the overlay scrollbar alone — it is the only
@@ -165,6 +185,7 @@ impl App {
             MouseEventKind::Moved => self.hover_scrollbar(mouse.column, mouse.row),
             MouseEventKind::Down(MouseButton::Left) => self.mouse_press(mouse.column, mouse.row),
             MouseEventKind::Drag(MouseButton::Left) => {
+                self.session_sidebar.cancel_press();
                 // An in-flight bar drag owns the motion; everything else is
                 // the selection's flood — a drag, so coalesced by the gate.
                 if self.scrollbar.dragging {
@@ -180,7 +201,8 @@ impl App {
                 if self.scrollbar.dragging {
                     return self.release_scrollbar(mouse.column, mouse.row);
                 }
-                self.mouse_release(mouse.column, mouse.row)
+                self.sidebar_release(Position::new(mouse.column, mouse.row))
+                    .unwrap_or_else(|| self.mouse_release(mouse.column, mouse.row))
             }
             _ => MouseOutcome::Ignored,
         }
@@ -194,6 +216,7 @@ impl App {
     /// region's alone: the repaint the bar asks for wins over the selection's
     /// "nothing to see" verdict.
     fn mouse_press(&mut self, column: u16, row: u16) -> MouseOutcome {
+        self.session_sidebar.cancel_press();
         let owner = self.pointer_owner(column, row);
         // The bar first: its column overprints the chat band, so grabbing the
         // grip under the pointer is the only way to drag it. The claim is
@@ -212,6 +235,7 @@ impl App {
         // selection's "nothing to see" verdict.
         let bar_repaint = self.clear_scrollbar_interaction();
         let outcome = match owner {
+            Some(PointerOwner::SessionSidebar) => self.sidebar_press(Position::new(column, row)),
             Some(PointerOwner::Composer) => self.composer_press(column, row),
             Some(PointerOwner::Chat) => self.chat_selection_press(column, row),
             Some(PointerOwner::StatusBar) => self.status_bar_press(column, row),

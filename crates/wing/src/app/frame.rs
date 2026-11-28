@@ -50,6 +50,8 @@ const UNFRAMED_WIDTH: u16 = crate::ui::input_area::chrome::UNFRAMED_WIDTH;
 pub(super) struct FrameGeometry {
     /// The whole terminal area of the last frame.
     area: Rect,
+    /// The conversation column, including its status-bar row.
+    main: Rect,
     /// The chat band of the last frame — the viewport **including** the
     /// scrollbar gutter (the bar paints and hit-tests over this rect; the chat
     /// widget itself renders into the band minus the gutter).
@@ -79,6 +81,7 @@ impl Default for FrameGeometry {
     fn default() -> Self {
         Self {
             area: Rect::new(0, 0, UNFRAMED_WIDTH, 0),
+            main: Rect::new(0, 0, UNFRAMED_WIDTH, 0),
             chat_band: Rect::default(),
             composer: Rect::default(),
             status: crate::ui::status_bar::StatusBarRegions::default(),
@@ -92,8 +95,17 @@ impl FrameGeometry {
     /// Called at the top of the draw pass, before anything reads the width —
     /// the selection-invalidation check compares the anchor's width against
     /// **this** frame's, not the previous one's.
-    pub(super) fn record_area(&mut self, area: Rect) {
+    pub(super) fn record_area(&mut self, area: Rect, main: Rect) {
         self.area = area;
+        self.main = main;
+    }
+
+    pub(super) fn area(&self) -> Rect {
+        self.area
+    }
+
+    pub(super) fn main_columns(&self) -> (u16, u16) {
+        (self.main.x, self.main.width)
     }
 
     /// Record the chat band this frame laid out.

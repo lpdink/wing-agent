@@ -156,6 +156,7 @@ impl App {
         };
         self.settings_panel = Some(SettingsPanel::new(schema, state, interface, View::Tree));
         self.settings_pending = false;
+        self.session_sidebar.cancel_press();
         // 选区锚在内容坐标：overlay 期间的帧几何与内容都变了，留着只会指向别的文本。
         self.cancel_selection();
         // v2 的卡片是**浮层**：四周露出聊天背景，于是"卡片底下那张图"成了新问题——

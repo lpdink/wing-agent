@@ -256,6 +256,7 @@ fn test_pointer_priority_is_declared_once_and_in_order() {
         POINTER_PRIORITY,
         [
             PointerOwner::Scrollbar,
+            PointerOwner::SessionSidebar,
             PointerOwner::Composer,
             PointerOwner::Chat,
             PointerOwner::StatusBar

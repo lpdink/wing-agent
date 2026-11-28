@@ -17,8 +17,9 @@ use super::selection::format_last_active;
 use super::selection::plain_row;
 use crate::protocol::CommandInfo;
 use crate::protocol::SessionStatus;
+pub use crate::shared::session_list::SessionCandidate;
+use crate::shared::session_list::session_forest;
 use crate::shared::session_tree::Forest;
-use crate::shared::session_tree::TreeRow;
 
 /// Action to take when popup candidates need to be fetched.
 ///
@@ -424,9 +425,9 @@ pub fn session_panel(
 ///
 /// 森林在这里重建一次（候选 → `TreeRow`）：层投影、crew 聚合与祖先链都是 `Forest`
 /// 的只读视图，自己按 `parent` 过滤会在幽灵父 / 环上与内核分叉。
-/// [`tree_rows`] 是**保序保长**的一一映射，故森林的下标空间 ≡ `candidates` 的下标。
+/// [`session_forest`] 是**保序保长**的一一映射，故森林的下标空间 ≡ `candidates` 的下标。
 fn level_panel(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> SessionPanel {
-    let forest = Forest::build(&tree_rows(candidates));
+    let forest = session_forest(candidates);
     let level = forest.level(query.scope);
 
     // LAST 列 = 子树最大活跃（内核聚合）。行 1 要的是与今天同格式的文本，所以取内核指出
@@ -505,22 +506,6 @@ fn level_header(candidates: &[SessionCandidate], query: SessionQuery<'_>) -> Lev
     LevelHeader { title }
 }
 
-/// 候选 → 内核的输入切片（层投影的唯一入口）。保序保长：森林吐出的下标即候选下标。
-fn tree_rows(candidates: &[SessionCandidate]) -> Vec<TreeRow<'_>> {
-    candidates
-        .iter()
-        .map(|c| TreeRow {
-            id: &c.id,
-            parent: c.parent.as_deref(),
-            pinned: c.pinned,
-            pin_added_at: c.pin_added_at.as_deref(),
-            // 空串 = 没有时间（内核解析不了、`format_last_active` 给空串，同一条降级）。
-            last_interaction: Some(c.last_interaction.as_str()),
-            status: SessionStatus::parse(&c.status),
-        })
-        .collect()
-}
-
 /// Returns `true` if `args` exactly matches a session candidate id (case-insensitive).
 pub fn is_exact_session_match(candidates: &[SessionCandidate], args: &str) -> bool {
     let args_lower = args.to_lowercase();
@@ -533,34 +518,6 @@ pub fn is_exact_session_match(candidates: &[SessionCandidate], args: &str) -> bo
 /// last active time on line 1, title on line 2) plus the `id` used as the
 /// completion value. `workspace` doubles as a search field.
 ///
-/// 候选取自**全部**会话，但抓取序只决定搜索态的行序：层视图每次投影都用下面这些字段
-/// **重建森林**（内核不看输入顺序），所以 `parent` / `pinned` / `pin_added_at` /
-/// `last_interaction` / `status` 都是**数据**，不是装饰——少任何一个，层内的行序与
-/// 子树活跃都会静默偏离[排序契约](crate::shared::session_tree)。
-#[derive(Debug, Clone)]
-pub struct SessionCandidate {
-    /// Session id — inserted on completion (not displayed verbatim).
-    pub id: String,
-    /// 创建者会话 id（`parent_session_id`；根 = `None`）。
-    pub parent: Option<String>,
-    /// Session title (line 2).
-    pub title: String,
-    /// Session workspace — displayed on line 1 and searched by `args`.
-    pub workspace: String,
-    /// Runtime status string from the backend (inactive|idle|working|waiting)：
-    /// 行 1 的状态图标，也是层视图重建森林时的输入（注意力 / crew 计数 / 存活）。
-    pub status: String,
-    /// Last interaction timestamp (ISO 8601)：**这一行自己的**最后交互，也是重建森林时的
-    /// 定序输入。层视图里行 1 显示的可能是子树里**来源行**的原文（见 `level_panel`），
-    /// 但本字段始终是它自己的值。
-    pub last_interaction: String,
-    /// 是否被 pin（`pin` 标签；前端约定，见 [`crate::shared::pinning`]）：行末的星标
-    /// + 重建森林时的第一把排序键。
-    pub pinned: bool,
-    /// pin 时间（`tag_meta.pin.added_at`）：层投影重建森林时的排序键之一。
-    pub pin_added_at: Option<String>,
-}
-
 /// Cached sub-command candidate data and dynamic command list.
 ///
 /// Most candidate lists use `(id, description)` tuples. The `id` is the value

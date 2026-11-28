@@ -27,6 +27,7 @@ use crate::shared::constants::COPY_COMMAND;
 use crate::shared::constants::NEW_COMMAND;
 use crate::shared::constants::TIPS_COMMAND;
 use crate::shared::panels::picker::ModelPanel;
+use crate::shared::session_list::{SessionCandidate, session_forest};
 use crate::shared::tips::full_text as tips_full_text;
 use crate::ui::cells::tool_call::truncate_by_chars;
 use crate::ui::chat_view::ChatCell;
@@ -576,6 +577,24 @@ impl App {
     /// 重新抓（见 `CandidateCache::sessions_fetched`）。
     pub(super) fn invalidate_session_cache(&mut self) {
         self.popup.cache.invalidate_sessions();
+        self.session_sidebar.invalidate_list();
+    }
+
+    pub(super) fn apply_popup_sessions(&mut self, candidates: &[SessionCandidate]) {
+        let anchor = self.popup.active.selected_name().map(str::to_owned);
+        self.popup
+            .level_view
+            .retain_existing(|id| candidates.iter().any(|row| row.id == id));
+        self.popup.cache.sessions = session_forest(candidates)
+            .tree()
+            .iter()
+            .map(|entry| candidates[entry.index].clone())
+            .collect();
+        self.popup.cache.sessions_fetched = true;
+        self.update_popup();
+        if let Some(anchor) = anchor {
+            self.popup.active.reselect(&anchor);
+        }
     }
 
     /// Apply a background fetch result to app state.
@@ -647,6 +666,11 @@ impl App {
                     std::time::Duration::from_secs(3),
                 ));
             }
+            return;
+        }
+
+        if let FetchPayload::SessionList(result) = payload {
+            self.finish_session_list(result);
             return;
         }
 
@@ -756,72 +780,6 @@ impl App {
                     .collect();
                 self.update_popup();
             }
-            FetchPayload::SessionList(resp) => {
-                use crate::protocol::SessionStatus;
-                use crate::shared::pinning::{is_pinned, pin_added_at};
-                use crate::shared::session_tree::{Forest, TreeRow};
-                use crate::ui::popup::command::SessionCandidate;
-
-                // 面板的展示序 = **树序**（`shared::session_tree`，与 `wing ps
-                // --tree` 共用同一份实现，见 docs/dev/session-lineage.md §4）：
-                // pin 的根连同子树整块上浮，子节点的 pin 只在兄弟组内说话。后端下发的
-                // 基准序不再是面板的定序输入——树序的每个排序键都是自足的（pin 时间 /
-                // 子树注意力 / 子树活跃 / id），workspace 只做展示与搜索。
-                let anchor = self.popup.active.selected_name().map(str::to_string);
-                // pin 事实（标签 + 时间）算一次喂两处：树的排序键与候选行的星标
-                // 谓词——两者共用同一份投影，不会各算各的。
-                let pins: Vec<(bool, Option<&str>)> = resp
-                    .sessions
-                    .iter()
-                    .map(|s| (is_pinned(&s.tags), pin_added_at(&s.tag_meta)))
-                    .collect();
-                let rows: Vec<TreeRow<'_>> = resp
-                    .sessions
-                    .iter()
-                    .zip(&pins)
-                    .map(|(s, &(pinned, pin_at))| TreeRow {
-                        id: &s.id,
-                        parent: s.parent_session_id.as_deref(),
-                        pinned,
-                        pin_added_at: pin_at,
-                        last_interaction: s.last_interaction.as_deref(),
-                        status: SessionStatus::parse(&s.status),
-                    })
-                    .collect();
-                let candidates: Vec<SessionCandidate> = Forest::build(&rows)
-                    .tree()
-                    .iter()
-                    .map(|entry| {
-                        let s = &resp.sessions[entry.index];
-                        SessionCandidate {
-                            id: s.id.clone(),
-                            // 层投影按 `parent` 复原森林：树序是排好的结果，拓扑只能
-                            // 从原始字段重建。
-                            parent: s.parent_session_id.clone(),
-                            title: s.name.clone().unwrap_or_default(),
-                            workspace: s.workspace.clone().unwrap_or_default(),
-                            status: s.status.clone(),
-                            last_interaction: s.last_interaction.clone().unwrap_or_default(),
-                            pinned: pins[entry.index].0,
-                            pin_added_at: pins[entry.index].1.map(str::to_string),
-                        }
-                    })
-                    .collect();
-
-                // 面板开着的层可能刚被归档 / 删除：路径失效即回根层（不报错）。
-                self.popup
-                    .level_view
-                    .retain_existing(|id| candidates.iter().any(|c| c.id == id));
-
-                self.popup.cache.sessions = candidates;
-                self.popup.cache.sessions_fetched = true;
-                self.update_popup();
-                // 刷新后光标按 session id 回到原选中行（行序可能因 pin 变化，
-                // 选区不该跟着跳走）。
-                if let Some(anchor) = anchor {
-                    self.popup.active.reselect(&anchor);
-                }
-            }
             FetchPayload::ContextInfo(text) => {
                 self.chat.push(ChatCell::SystemMessage(text));
             }
@@ -854,7 +812,8 @@ impl App {
             | FetchPayload::SendFinished { .. }
             | FetchPayload::CompactDone { .. }
             | FetchPayload::CompactFailed { .. }
-            | FetchPayload::MediaBytes { .. } => {}
+            | FetchPayload::MediaBytes { .. }
+            | FetchPayload::SessionList(_) => {}
         }
     }
 }

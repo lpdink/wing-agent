@@ -311,6 +311,7 @@ pub struct LayoutConfig {
     pub max_popup_rows: usize,
     /// Maximum tool result output lines.
     pub tool_output_max: usize,
+    pub session_sidebar: SessionSidebarConfig,
 }
 
 impl Default for LayoutConfig {
@@ -319,6 +320,33 @@ impl Default for LayoutConfig {
             max_input_lines: 10,
             max_popup_rows: 8,
             tool_output_max: 10,
+            session_sidebar: SessionSidebarConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionSidebarConfig {
+    /// Show the session sidebar when the TUI starts.
+    pub default_open: bool,
+    /// Place the session sidebar to the left or right of the conversation.
+    pub side: SidebarSide,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SidebarSide {
+    #[default]
+    Left,
+    Right,
+}
+
+impl SidebarSide {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
         }
     }
 }

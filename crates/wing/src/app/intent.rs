@@ -36,7 +36,7 @@ pub enum FetchPayload {
     /// Available agent templates.
     Agents(AgentsResponse),
     /// Session list.
-    SessionList(SessionListResponse),
+    SessionList(Result<SessionListResponse, String>),
     /// Context stats display text.
     ContextInfo(String),
     /// Skills info display text.
@@ -179,6 +179,9 @@ pub enum AppIntent {
 
     /// Fetch session list via HTTP API for popup candidates.
     FetchSessionList,
+
+    /// Refresh the visible session sidebar.
+    RefreshSessionSidebar,
 
     /// Fetch session runtime info (model, tokens, thinking, yolo) via HTTP API.
     FetchInfo,

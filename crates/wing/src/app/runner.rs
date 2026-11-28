@@ -153,6 +153,7 @@ pub async fn execute_intent(
                     Ok(resp) => {
                         // 以服务端回读为准（而不是点击时的乐观值）。
                         app.status.pinned = is_pinned(&resp.tags);
+                        app.session_sidebar.request_refresh();
                         tracing::debug!(pinned = app.status.pinned, "session pin toggled");
                     }
                     Err(e) => {
@@ -351,14 +352,29 @@ pub async fn execute_intent(
                 }
             }
         }
-        AppIntent::FetchSessionList => spawn_fetch(
-            transport.as_ref(),
-            app.session_id.clone(),
-            fetch_tx,
-            "list sessions",
-            |http| async move { http.list_sessions().await },
-            FetchPayload::SessionList,
-        ),
+        AppIntent::FetchSessionList | AppIntent::RefreshSessionSidebar => {
+            let popup_session =
+                matches!(intent, AppIntent::FetchSessionList).then_some(app.session_id.as_str());
+            if let Some(t) = transport.as_ref().filter(|_| app.connected)
+                && app.session_sidebar.begin_fetch(popup_session)
+            {
+                let http = t.http.clone();
+                let session_id = app.session_id.clone();
+                let tx = fetch_tx.clone();
+                tokio::spawn(async move {
+                    let result = http
+                        .list_sessions()
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = tx
+                        .send(FetchResult {
+                            session_id,
+                            payload: FetchPayload::SessionList(result),
+                        })
+                        .await;
+                });
+            }
+        }
         AppIntent::CompactSession { instruction } => {
             dispatch_compact(
                 transport.as_ref().map(|t| t.http.clone()),

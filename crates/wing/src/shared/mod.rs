@@ -38,6 +38,7 @@ pub mod constants;
 pub mod doc_edit;
 pub mod panels;
 pub mod pinning;
+pub mod session_list;
 pub mod session_tree;
 pub(crate) mod text_edit;
 pub mod tips;

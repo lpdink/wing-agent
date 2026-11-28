@@ -152,6 +152,8 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 
 > `gateway.host/port` 只影响独立启动 `wing-gateway` 的场景；Rust TUI 读的是 backend config，不会读 TUI config 里的网关地址。
 
+会话侧栏设在 `layout.session_sidebar` 下。`default_open` 默认为 `false`，决定下次启动时是否展开。`side` 默认为 `left`，可设为 `right`。运行中按 `F2` 切换展开状态，`/settings` 可预览左右位置。 [会话侧栏](tui-session-sidebar.md)
+
 ## 日志策略（前后端统一）
 
 - 双方都按**本地日期**一天一个文件：`wing_YYYY-MM-DD.log`，append 模式打开——网关 / TUI 重启绝不截断或分裂日志；启动与每次轮转时 prune 7 天前的文件（含遗留命名）。

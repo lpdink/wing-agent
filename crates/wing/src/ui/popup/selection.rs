@@ -416,7 +416,7 @@ struct RowStyle {
 ///
 /// `budget` 是徽章块可用的列（调用方已扣掉后面那格空气）：极窄面板上按声明序**截尾**
 /// （先丢 `●`、再丢 `?`），绝不把星标或时间标签顶出行外。返回（span 列表，显示宽度）。
-fn crew_badges(
+pub(in crate::ui) fn crew_badges(
     crew: Crew,
     palette: &ThemePalette,
     base: Style,

@@ -791,9 +791,10 @@ mod session_list {
 
     fn feed(app: &mut App, sessions: Vec<SessionInfo>) {
         let session_id = app.session_id.clone();
+        assert!(app.session_sidebar.begin_fetch(Some(&session_id)));
         app.handle_fetch_result(FetchResult {
             session_id,
-            payload: FetchPayload::SessionList(SessionListResponse { sessions }),
+            payload: FetchPayload::SessionList(Ok(SessionListResponse { sessions })),
         });
     }
 
@@ -1819,11 +1820,12 @@ fn test_the_refresh_response_does_not_trigger_another_request() {
 
     // 响应路径（update_popup，非输入路径）原地换行：不得再发一次请求。
     let session_id = app.session_id.clone();
+    assert!(app.session_sidebar.begin_fetch(Some(&session_id)));
     app.handle_fetch_result(crate::app::intent::FetchResult {
         session_id,
-        payload: crate::app::intent::FetchPayload::SessionList(SessionListResponse {
+        payload: crate::app::intent::FetchPayload::SessionList(Ok(SessionListResponse {
             sessions: vec![],
-        }),
+        })),
     });
     assert!(
         app.drain_intents().is_empty(),
@@ -1849,11 +1851,12 @@ fn test_opening_the_panel_with_an_empty_cache_requests_the_list_once() {
 
     // 列表到达 → 原地建面板；响应路径不得再次请求。
     let session_id = app.session_id.clone();
+    assert!(app.session_sidebar.begin_fetch(Some(&session_id)));
     app.handle_fetch_result(crate::app::intent::FetchResult {
         session_id,
-        payload: crate::app::intent::FetchPayload::SessionList(SessionListResponse {
+        payload: crate::app::intent::FetchPayload::SessionList(Ok(SessionListResponse {
             sessions: vec![],
-        }),
+        })),
     });
     let intents = app.drain_intents();
     assert!(intents.is_empty(), "unexpected intents: {intents:?}");

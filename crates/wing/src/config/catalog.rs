@@ -31,9 +31,9 @@ use wing_api_client::models::SettingGroup;
 use wing_api_client::models::SettingKind;
 use wing_api_client::models::SettingNode;
 
-use crate::config::LayoutConfig;
 use crate::config::ThemePalette;
 use crate::config::paste::PasteImageConfig;
+use crate::config::{LayoutConfig, SidebarSide};
 
 // ── 声明 ────────────────────────────────────────────────────────
 
@@ -122,7 +122,7 @@ const API_KEY_EXAMPLE: &str = "sk-xxx";
 /// Interface 根的设置目录（TUI 自己的配置）。
 ///
 /// 结构与后端 catalog 同构：同一个 [`SettingNode`] 类型。覆盖 `AppConfig` 的**全部** YAML 键
-/// （`colors.*` 15 + `layout.*` 3 + `rendering.*` 3 + `paste.image.*` 3 + `api_key`）。
+/// （`colors.*` 21 + `layout.*` 5 + `rendering.*` 3 + `paste.image.*` 3 + `api_key`）。
 ///
 /// 根节点的 `key` / `path` 是 `"interface"`（与后端根的 `"config"` 对称）；
 /// 子节点的 `path` **不带根前缀**——它们就是稀疏文档（`settings/get` 的 `values`）里的真实键路径，
@@ -197,6 +197,45 @@ pub fn interface_catalog() -> SettingNode {
         child
     })
     .collect();
+
+    let mut sidebar = node(
+        "session_sidebar",
+        "layout.session_sidebar",
+        SettingKind::Object,
+        "Session sidebar visibility and position.",
+        3,
+        "Layout",
+        LAYOUT_SECTION_DOC,
+    );
+    let mut default_open = node(
+        "default_open",
+        "layout.session_sidebar.default_open",
+        SettingKind::Bool,
+        "Show the session sidebar when the TUI starts.",
+        0,
+        "Layout",
+        LAYOUT_SECTION_DOC,
+    );
+    default_open.default = Some(Value::from(layout_defaults.session_sidebar.default_open));
+    default_open.has_default = true;
+    default_open.notes = vec!["下次启动 Wing TUI 时生效。".to_owned()];
+    let mut side = node(
+        "side",
+        "layout.session_sidebar.side",
+        SettingKind::Enum,
+        "Place the session sidebar to the left or right of the conversation.",
+        1,
+        "Layout",
+        LAYOUT_SECTION_DOC,
+    );
+    side.choices = vec![
+        choice(SidebarSide::Left.as_str(), "聊天区左侧"),
+        choice(SidebarSide::Right.as_str(), "聊天区右侧"),
+    ];
+    side.default = Some(Value::from(layout_defaults.session_sidebar.side.as_str()));
+    side.has_default = true;
+    sidebar.children = vec![default_open, side];
+    layout.children.push(sidebar);
 
     let mut rendering = node(
         "rendering",
@@ -1140,6 +1179,10 @@ mod tests {
                 max_input_lines: 21,
                 max_popup_rows: 9,
                 tool_output_max: 42,
+                session_sidebar: crate::config::SessionSidebarConfig {
+                    default_open: true,
+                    side: SidebarSide::Right,
+                },
             },
             rendering: RenderingConfig {
                 thinking: ThinkingMode::Hidden,
@@ -1423,11 +1466,11 @@ mod tests {
         let catalog = interface_catalog();
         let leaves: Vec<&SettingNode> = catalog.leaves().collect();
         let paths: Vec<&str> = leaves.iter().map(|node| node.path.as_str()).collect();
-        assert_eq!(leaves.len(), 31, "{paths:?}");
+        assert_eq!(leaves.len(), 33, "{paths:?}");
         fn count(leaves: &[&SettingNode], predicate: impl Fn(&SettingNode) -> bool) -> usize {
             leaves.iter().filter(|node| predicate(node)).count()
         }
-        assert_eq!(count(&leaves, |node| node.kind == SettingKind::Enum), 4);
+        assert_eq!(count(&leaves, |node| node.kind == SettingKind::Enum), 5);
         assert_eq!(count(&leaves, |node| node.secret), 1);
         assert_eq!(
             count(&leaves, |node| node.value_hint.as_deref() == Some("color")),
@@ -1435,7 +1478,7 @@ mod tests {
         );
         assert_eq!(count(&leaves, |node| node.required), 0);
         assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Restart), 1);
-        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 30);
+        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 32);
         assert!(leaves.iter().all(|node| node.editable));
     }
 

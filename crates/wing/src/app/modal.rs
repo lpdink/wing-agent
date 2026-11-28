@@ -81,6 +81,8 @@ pub(super) enum KeyRoute {
     Quit,
     /// Ctrl+O — 展开 / 收起思考块（**全局**：所有轮一起切；应用保留键，面板之下也可用）。
     ToggleReasoning,
+    /// F2 — show or hide the session sidebar.
+    ToggleSessionSidebar,
     /// `Ctrl+V` / `super+v` — 读系统剪贴板（L1，见 `util::clipboard_paste`）。
     ///
     /// 应用保留键（与 Ctrl+O 同档）：读取在后台任务上跑，**落点**才做门控 —
@@ -311,6 +313,12 @@ impl App {
         if is_toggle_reasoning_key(key) {
             return KeyRoute::ToggleReasoning;
         }
+        if key.code == crossterm::event::KeyCode::F(2)
+            && key.modifiers.is_empty()
+            && key.kind == crossterm::event::KeyEventKind::Press
+        {
+            return KeyRoute::ToggleSessionSidebar;
+        }
         // Ctrl+V / super+v 同样是应用保留键（设置浮层除外，早期分支已接管，与 Ctrl+O
         // 同档）：粘贴手势在其余面板之下也要接住（落点再做挡板），且必须赶在 composer
         // 之前 —— 否则 super+v 会被当字面 `v` 输入（Ghostty 图片剪贴板回传 super+v
@@ -438,6 +446,10 @@ impl App {
             KeyRoute::ToggleReasoning => {
                 self.reset_quit_counter();
                 self.toggle_reasoning_expansion();
+            }
+            KeyRoute::ToggleSessionSidebar => {
+                self.reset_quit_counter();
+                self.toggle_session_sidebar();
             }
             KeyRoute::PasteClipboard => {
                 self.reset_quit_counter();

@@ -32,6 +32,7 @@ mod modal;
 mod mouse;
 mod projection;
 mod selection_session;
+mod session_sidebar;
 mod settings;
 
 pub use intent::AppIntent;
@@ -132,6 +133,7 @@ pub struct App {
     pub chat: ChatView,
     pub input: InputArea,
     pub session_id: String,
+    session_sidebar: session_sidebar::SessionSidebar,
     user_input_sync: bool,
     /// The subscribed session whose view has yet to be applied.
     pending_session_snapshot: Option<PendingSessionSnapshot>,
@@ -318,6 +320,9 @@ impl App {
             chat,
             input: InputArea::with_max_lines("今天构建什么？".into(), max_input_lines),
             session_id,
+            session_sidebar: session_sidebar::SessionSidebar::new(
+                config.layout.session_sidebar.default_open,
+            ),
             user_input_sync: false,
             pending_session_snapshot: None,
             history_incomplete: false,
@@ -722,6 +727,9 @@ impl App {
 
     /// Update the gateway connection state.
     pub fn set_connected(&mut self, connected: bool) {
+        if self.connected != connected {
+            self.session_sidebar.connection_changed(connected);
+        }
         if !connected {
             self.mark_send_stream_lost(None);
             self.chat.remove_optimistic_pending();
@@ -772,7 +780,12 @@ impl App {
         // the screen goes through the wire pass — see [`crate::ui::emoji_width`].
         crate::tui::draw_frame(terminal, |frame| {
             let area = frame.area();
-            self.geometry.record_area(area);
+            let (main, sidebar_area) = session_sidebar::split(
+                area,
+                self.session_sidebar.open,
+                layout.session_sidebar.side,
+            );
+            self.geometry.record_area(area, main);
 
             // A selection is anchored to *content* coordinates, which only
             // survive while the content is stable: adding / removing /
@@ -798,17 +811,17 @@ impl App {
             // 空会话 = 开屏：牌子先建一次（宽度 = 终端整宽，开屏没有滚动条），
             // 排版才知道它多高 —— 整块与输入卡要一起算光学中心。
             let now = std::time::Instant::now();
-            let full_card_w = crate::ui::input_area::chrome::card_area(area).width;
+            let full_card_w = crate::ui::input_area::chrome::card_area(main).width;
             let mut composer_rows = VisualRows::default();
             let splash_plan =
-                self.splash_plan(&palette, area, full_card_w, now, &mut composer_rows);
+                self.splash_plan(&palette, main, full_card_w, now, &mut composer_rows);
             let (splash, hero_rows) = match splash_plan {
                 Some((hero_rows, _)) => (true, hero_rows),
                 None => (false, 0),
             };
             let composer_w = splash_plan.map_or(full_card_w, |(_, width)| width);
             let composer_h = self.input.height_with_rows(composer_w, &mut composer_rows);
-            let bands = frame_layout(area, splash, hero_rows, composer_h, self.popup.height());
+            let bands = frame_layout(main, splash, hero_rows, composer_h, self.popup.height());
 
             // Status bar (model top-left, cumulative usage, connection) — plus
             // the session identity tail (id + pin star), the two pointer
@@ -824,7 +837,11 @@ impl App {
                     &palette,
                     &mut status_regions,
                 ),
-                bands.status,
+                Rect {
+                    width: area.width,
+                    x: area.x,
+                    ..bands.status
+                },
             );
             self.geometry.record_status_regions(status_regions);
 
@@ -914,7 +931,7 @@ impl App {
                 crate::ui::input_area::chrome::card_area(bands.composer)
             };
             let popup_rect = if splash {
-                splash_popup(input_rect, self.popup.height(), area)
+                splash_popup(input_rect, self.popup.height(), main)
             } else {
                 bands.popup
             };
@@ -963,6 +980,8 @@ impl App {
                 frame.set_cursor_position((cursor_x, cursor_y));
             }
 
+            self.draw_session_sidebar(sidebar_area, frame.buffer_mut());
+
             // 设置面板：居中**浮层卡片**（v2），垫在 toast *之前*（保存回执的 toast 要压在
             // 它上面）。卡片自己 `Clear` 自己那块——四周的聊天背景因此还在（v1 是全屏
             // overlay，这里额外全屏 `Clear` 一次；浮层不再需要，也不该抹掉背景）。
@@ -1006,7 +1025,7 @@ impl App {
             if let Some(ref toast) = self.toast
                 && !toast.is_expired()
             {
-                toast_area = render_toast(toast, area, frame.buffer_mut(), &palette);
+                toast_area = render_toast(toast, main, frame.buffer_mut(), &palette);
                 // The toast paints over the chat band (top-right, below the
                 // status bar): its cells are gone, so the link hit boxes under
                 // it must go too.
@@ -1415,6 +1434,7 @@ pub async fn run_app(
         };
 
         let snapshot_deadline = app.snapshot_deadline();
+        let sidebar_deadline = app.session_sidebar.deadline(app.connected);
 
         // Select from term events and gateway events.
         tokio::select! {
@@ -1457,6 +1477,7 @@ pub async fn run_app(
                         }
                     }
                     TermEvent::Resize(_, _) => {
+                        app.session_sidebar.cancel_press();
                         // ratatui auto-resizes its buffers on the next draw;
                         // force a full repaint so the resized screen is fully
                         // resynced with the terminal.
@@ -1470,6 +1491,7 @@ pub async fn run_app(
                         // highlight (and no frozen follow state) is left
                         // behind.
                         if !focused {
+                            app.session_sidebar.cancel_press();
                             app.cancel_selection();
                         }
                         // On focus regain, restore the correct title.
@@ -1679,6 +1701,13 @@ pub async fn run_app(
                 if app.chat.tick_active_thinking(std::time::Instant::now()) {
                     app.chat_dirty = true;
                 }
+            }
+            _ = async {
+                if let Some(deadline) = sidebar_deadline {
+                    tokio::time::sleep_until(deadline).await;
+                }
+            }, if sidebar_deadline.is_some() => {
+                app.push_intent(AppIntent::RefreshSessionSidebar);
             }
             // Background fetch results (non-blocking HTTP queries).
             Some(result) = fetch_rx.recv() => {

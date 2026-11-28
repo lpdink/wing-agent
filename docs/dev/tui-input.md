@@ -500,6 +500,10 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 
 鼠标上报接管后，终端不再把拖拽交给自身的文本选择——**不按 Shift（macOS 用 Option）的拖选不再选中文本**。这是回退 #28 的已知代价：应用内自研选择（`tui-text-selection` + `tui-composer-pointer`）已恢复 **chat 区域与 composer** 的免修饰键体验，同时保留 Shift/Option 原生拖选作为兜底（状态栏与弹层区域仍只能用原生方式）。
 
+## F2 与会话侧栏
+
+`F2` 是应用保留键，设置浮层拥有自己的输入。侧栏内滚轮滚动会话列表，主栏的滚轮继续滚动聊天。会话条目的点击由最近一帧记录的会话 ID 和折叠热区判定，鼠标按下与松开须落在同一会话和同一操作。 [会话侧栏](tui-session-sidebar.md)
+
 ## Ctrl+O：思考的详细 / 简略切换（全局）
 
 `Ctrl+O` 翻转思考块的展开（[`app/modal.rs`](../../crates/wing/src/app/modal.rs) 的 `is_toggle_reasoning_key` → `KeyRoute::ToggleReasoning`）：
@@ -511,6 +515,6 @@ markdown 链接渲染为 OSC8 超链接，单击（无拖动）打开。模块�
 
 ## 键位路由：弹层各占一段（`app/modal.rs` 的 `route_key`）
 
-键盘归属在一处决定（设置面板 → 应用保留键 `Esc`/`Ctrl+O`/`Ctrl+V` → ask 面板 → `/model` picker → **会话面板的层视图** → Esc 阶梯 → 命令 popup → chat 滚动 → composer），每一段只拿自己的键，其余让给下一段。
+键盘归属在一处决定（设置面板 → 应用保留键 `Esc`/`Ctrl+O`/`Ctrl+V`/`F2` → ask 面板 → `/model` picker → **会话面板的层视图** → Esc 阶梯 → 命令 popup → chat 滚动 → composer），每一段只拿自己的键，其余让给下一段。
 
 **会话面板（`/ss`，参数为空时的层视图）** 是其中一段：`→` 进一层 / `←` 与层 ≥ 1 的 `Esc` 退一层 / `Ctrl+D`、`Ctrl+U` 翻页，**空过滤词时一个可打印字符直接开启搜索**（等价于先敲空格再敲它：草稿 `/ss` → `/ss k`）。口径（含「进 / 退层不重取数据」「打字即搜索」的承诺）写在 [session-lineage.md](session-lineage.md) §4.1——改这一段键位前先读那张表，否则会被相邻的 rung 截走。

@@ -85,6 +85,10 @@ pub const TIPS: &[Tip] = &[
         group: TipGroup::Keys,
         text: "Ctrl+O 切换思考的详细/简略显示",
     },
+    Tip {
+        group: TipGroup::Keys,
+        text: "F2 展开或隐藏会话侧栏",
+    },
     // ── 命令 ─────────────────────────────────────────────────
     Tip {
         group: TipGroup::Commands,
