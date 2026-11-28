@@ -272,6 +272,10 @@ def test_header_is_one_line_without_timestamp(template: str) -> None:
 
 def test_absent_default_is_commented_out(provider_text: str, template: str) -> None:
     assert "# timeout_first_chunk: 300.0" in provider_text
+    # 连接池默认值（2000）要出现在模板里：它是「第 101 个并发调用会卡满首块超时」那个
+    # 坑的唯一可见提示（docs/dev/capacity.md §3.1）。
+    assert "# max_connections: 2000" in provider_text
+    assert not re.search(r"(?m)^\s*max_connections:", provider_text)
     assert not re.search(r"(?m)^\s*timeout_first_chunk:", provider_text)
     assert "# yolo: false" in template
     assert "# safe_command_patterns: []" in template

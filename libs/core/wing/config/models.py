@@ -251,13 +251,16 @@ class ProviderConfig(BaseModel):
     max_connections: int | None = S(
         doc="单 provider 的并发连接上限",
         notes=(
-            "null = 沿用 httpx 默认连接池（当前 max_connections=100 / keepalive=20）。\n"
+            "null = 沿用 httpx 默认连接池（max_connections=100 / keepalive=20）。\n"
             "设置后 keepalive 上限取 min(该值, 20)。\n"
             "SSE 是长连接：并发调用超过上限时，多出的请求在本地连接池排队，表现为首帧延迟；"
-            "排队时长计入 timeout_first_chunk（它包住整个响应头请求），超过即按首块超时失败并重试。"
+            "排队时长计入 timeout_first_chunk（它包住整个响应头请求），超过即按首块超时失败并重试。\n"
+            "默认 2000：1000 会话同时生成时池不再是限制，过载留给 CPU（p99 变长）而不是在池里"
+            "排队后按首块超时失败——httpx 的 100 会让第 101 个并发调用卡满 timeout_first_chunk。"
+            "实测见 docs/dev/capacity.md §3.1。"
         ),
         apply=ApplyScope.HOT,
-        default=None,
+        default=2000,
         gt=0,
     )
     max_retries: int = S(
