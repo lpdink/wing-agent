@@ -60,7 +60,7 @@ gateway:
 # 只看本文件内的状态；跨文件的时序耦合由 `--dist loadfile` 挡掉。
 #
 # `WING_TEST_BUDGET_PYTEST`（数值）由 `scripts/collect_output.sh` 在三组并行时导出：
-# 三组各自按"我独占整机"来配并行度时，机器被压到三倍以上超订，**每一组都变慢**；
+# 三组各自按"我独占整机"来配并行度时，机器被压到两倍以上超订，**每一组都变慢**；
 # 份额的算法与实测都在那一处（全仓唯一），这里只消费。不导出时按独占算——单独跑
 # 一组的人仍然拿满。
 PYTEST_WORKERS ?= $(shell n=$$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4); if [ -n "$(WING_TEST_SERIAL)" ] && [ "$(WING_TEST_SERIAL)" != "0" ]; then echo 1; elif [ -n "$(WING_TEST_BUDGET_PYTEST)" ]; then echo $(WING_TEST_BUDGET_PYTEST); elif [ "$$n" -gt 8 ]; then echo 8; else echo $$n; fi)
