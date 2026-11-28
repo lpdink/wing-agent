@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from wing.provider.base import mark_last_cache_control
 from wing.provider.media import (
@@ -43,11 +43,11 @@ class _SerializeMixin:
 
     _config: ProviderConfig
 
-    probe_part: Callable[..., "CachePart | None"]
+    probe_part: Callable[[str, Any], "CachePart | None"]
     """由 ``ModelProvider`` 提供（分段构造的永不抛边界，见 base）。
 
-    参数放宽成 `...`：`Callable[[str, Any], ...]` 生成的是位置-only 签名，与
-    `ModelProvider.probe_part(label, obj)` 的命名参数在 ty 眼里不兼容。
+    位置-only 的 `Callable`：`ModelProvider.probe_part` 的签名同样是位置-only
+    （`label, obj, /`），两处必须一起改。
     """
 
     def _serialize_messages(

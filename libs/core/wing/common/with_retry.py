@@ -2,11 +2,10 @@ import asyncio
 import inspect
 from collections.abc import AsyncIterator, Callable
 from functools import wraps
-from typing import Any, TypeVar
+from typing import Any
 
 from .logger import log
 
-T = TypeVar("T")
 
 # 默认最大重试次数（config 未提供时兜底）。
 DEFAULT_MAX_RETRIES = 10

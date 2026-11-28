@@ -3037,3 +3037,11 @@ class TestSendRouteErrorMapping:
             "/api/session/send", json={"session_id": "sid-1", "content": "hi"}
         )
         assert resp.status_code == 404, resp.text
+
+
+def test_the_test_client_runs_on_httpx2() -> None:
+    # starlette 1.10 的 TestClient 首选 httpx2；缺它就跑在已弃用的 httpx 路径上，
+    # 每轮一条 StarletteDeprecationWarning（dev 组显式装了 httpx2）。
+    import starlette.testclient
+
+    assert starlette.testclient.httpx.__name__ == "httpx2"

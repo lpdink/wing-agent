@@ -510,7 +510,9 @@ class TestForkDoesNotInheritTags:
         seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
-        child, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[not-iterable]
+        forked = file_sm.fork_session(source.session_id, last_uuid)
+        assert forked is not None
+        child, _ = forked
 
         assert child.tags == []
         assert source.tags == ["favorite", "task=x"]

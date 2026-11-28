@@ -919,4 +919,33 @@ mod tests {
             "resolve() 折进了载体字段"
         );
     }
+    #[test]
+    fn yaml_tags_are_unwrapped_and_non_string_keys_are_rejected() {
+        let dir = TestDir::new("tags");
+        let path = dir.0.join("config.yaml");
+
+        // tag 不携带配置语义：解包取它的值（这里解出来是字符串，根不是映射）
+        let err = parse_document("!!str 42", &path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("the document root must be a mapping, got a string"),
+            "{err}"
+        );
+
+        // YAML 允许 complex key；配置里一律报错，并报出实际类型
+        for (yaml, kind) in [
+            ("~: 1", "null"),
+            ("true: 1", "a boolean"),
+            ("[a, b]: 1", "a sequence"),
+            ("{a: b}: 1", "a mapping"),
+            ("!foo a: 1", "a tagged value"),
+        ] {
+            let err = parse_document(yaml, &path).unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("configuration keys must be strings") && message.contains(kind),
+                "{yaml}: {message}"
+            );
+        }
+    }
 }

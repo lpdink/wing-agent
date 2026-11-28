@@ -142,9 +142,10 @@ show_missing = true
 # precision 保留 1 位：报告/评论的展示口径，避免整数四舍五入掩盖 95.6 这样的值。
 precision = 1
 
-# 事件模型的字段收窄（`type: Literal["x"]` 覆盖基类的 `str`，外加 `uuid` /
-# `session_id` 的同类收窄）全部落在 event 包内：写入值仍是基类声明的类型，只是
-# 字面量更窄。只在这个包内关掉该规则，别处照旧检查。
+# 事件模型的字段收窄全部落在 event 包内：`type: Literal["x"]` 覆盖基类的 `str`
+# （30 处），以及 `uuid` / `session_id` 从 `str | None` 收窄成 `str`（5 处，生产代码
+# 经基类引用写入的值实际都是 str）。两类都是构造期定型的字段，收窄不构成可变覆盖
+# 的风险。代价：包内此后新增的事件不再受该规则保护 —— 新增可变字段要在这里之外复查。
 [[tool.ty.overrides]]
 include = ["libs/core/wing/event/**"]
 
