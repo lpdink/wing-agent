@@ -273,8 +273,8 @@ def selftest() -> int:
 def _knob_selftest(check: Callable[[str, object, object], None]) -> int:
     """预算与旋钮是否真的落到了命令行上。
 
-    这条链断过一次：共享档与串行逃生舱双双静默失效，而测试全绿。所以这里直接问：
-    `collect_output.sh --budget` 交出份额、`make -n` 交出展开后的命令行。
+    旋钮没落到 argv 上时测试仍然全绿，所以这里直接问：`collect_output.sh --budget`
+    交出份额、`make -n` 交出展开后的命令行。
 
     覆盖的是 **python** 这条（它在 Makefile 里展开）；rust 的核数由
     `scripts/test_rust_parallel.py --selftest` 钉住，probe 不收预算。

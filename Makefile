@@ -32,6 +32,8 @@ install:
 	cd crates/wing && maturin develop --release
 	uv sync
 
+# ── 统一入口（Python + Rust）─────────────────────────────────
+
 # 职责划分：`check` 只跑静态检查、`test` 只跑测试 —— 两者不重合，可以放心连跑
 # （同一件事不会被跑两遍；组清单见 scripts/collect_output.sh）。
 check:
