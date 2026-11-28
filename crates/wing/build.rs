@@ -9,6 +9,13 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// 构建输入文件：一行 commit（CI 写入，见 `.github/workflows/publish.yml`）。
+///
+/// 为什么需要它：manylinux 的 maturin 构建跑在 Docker 里——宿主 step 的 `env:` 不进容器，
+/// 镜像本身也不带 git，env 与 `git rev-parse` 两条路会同时断。0.7.0 的 Linux wheel 因此
+/// 报 `0.7.0 (unknown)`：`--version`、TUI 开屏身份行与 build skew 检查都取这个常量。
+const COMMIT_FILE: &str = "build_commit";
+
 /// `git rev-parse <arg>` 的路径结果（相对输出按当前目录解析——build script 的 cwd
 /// 就是包根，`--git-dir` 在主仓返回 `.git`）。git 不可用 / 不在仓库里返回 `None`。
 fn git_path(arg: &str) -> Option<PathBuf> {
@@ -55,28 +62,38 @@ fn watch_git_state() {
     }
 }
 
+/// commit 的三档来源，按可信度排序：CI 注入的 env → [`COMMIT_FILE`] → 本地 git。
+fn commit_from_env() -> Option<String> {
+    std::env::var("WING_COMMIT_HASH")
+        .ok()
+        .filter(|value| !value.is_empty())
+}
+
+fn commit_from_file() -> Option<String> {
+    std::fs::read_to_string(COMMIT_FILE)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn commit_from_git() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() { None } else { Some(text) }
+}
+
 fn main() {
     // ── Git commit hash ───────────────────────────────────────────
-    // CI passes the full SHA via env var (git may be unavailable in
-    // Docker containers such as manylinux_2_28).  Fall back to running
-    // `git rev-parse` for local builds.
-    let commit = std::env::var("WING_COMMIT_HASH")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            Command::new("git")
-                .args(["rev-parse", "--short", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| "unknown".to_string())
-        });
+    let commit = commit_from_env()
+        .or_else(commit_from_file)
+        .or_else(commit_from_git)
+        .unwrap_or_else(|| "unknown".to_string());
 
     // Truncate to 7 chars to match `git rev-parse --short` behaviour.
     let commit = if commit.len() > 7 {
@@ -87,6 +104,11 @@ fn main() {
 
     println!("cargo:rustc-env=WING_COMMIT_HASH={commit}");
     println!("cargo:rerun-if-env-changed=WING_COMMIT_HASH");
+    // 与 `watch_git_state` 同一取舍：缺失路径挂 `rerun-if-changed` 会让 cargo 每次判
+    // dirty。CI 在首次构建前写出该文件，本地构建走 git —— 两条路都不依赖"文件后出现"。
+    if std::path::Path::new(COMMIT_FILE).exists() {
+        println!("cargo:rerun-if-changed={COMMIT_FILE}");
+    }
     watch_git_state();
 
     // ── Build time (UTC) ──────────────────────────────────────────

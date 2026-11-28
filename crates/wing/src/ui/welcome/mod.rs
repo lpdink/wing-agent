@@ -1839,6 +1839,17 @@ mod tests {
     }
 
     #[test]
+    fn build_resolves_a_commit_hash() {
+        // 发布门禁：0.7.0 的 manylinux wheel 里 env 与 git 两条来源同时断（容器不进宿主
+        // env、镜像不带 git），`--version` 与开屏身份行都发成 `unknown`。
+        assert_ne!(
+            env!("WING_COMMIT_HASH"),
+            "unknown",
+            "构建未解析出 commit：设置 WING_COMMIT_HASH 或写出 crates/wing/build_commit"
+        );
+    }
+
+    #[test]
     fn tip_is_picked_once_per_process() {
         // 重建 / 缩放不许换 tip：换行会显得界面在自己抖。
         let mut w = welcome();

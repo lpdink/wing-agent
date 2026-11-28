@@ -19,6 +19,8 @@ extensions/vscode/*.vsix
 
 # Rust
 target/
+# 构建输入（CI 写入的 commit，见 crates/wing/build.rs）
+crates/wing/build_commit
 
 # IDE
 .idea/
