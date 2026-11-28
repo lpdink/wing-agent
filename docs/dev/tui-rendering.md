@@ -195,6 +195,7 @@ markdown 的每个元素**归属一个角色**，角色决定色相；同一角�
 
 | 现象 | 原因 | 归类 |
 |---|---|---|
+| 半角片假名 `ｶﾞ` 的列宽：某些组合下比终端多一列 | `unicode-width` 从 0.2.3 起把 U+FF9E/U+FF9F 各算 1 列（旧版算 0），ratatui 0.30 的 `CellWidth` 仍给这两个码点补一列，叠加后 `ｶﾞ` = 3 列而终端只推进 2 列。`Cargo.toml` 把上限钉在 `< 0.2.3`；渲染契约是终端实际列数，由 `render::markdown::links` / `ui::selection` / `ui::chat_view::link` 三组测试钉住 | 上游不兼容，解锁条件见 `Cargo.toml` 的 pin 注释 |
 | 表格嵌在 blockquote / 列表里：不带外层前缀（引用栏 / 续行缩进不出现在表上），列表 item 的 marker 单独成行 | 表格渲染不套外层前缀；单元格内也刻意不注入（注入了就是每格一道假框线 `┃ │ A ┃`，该注入已移除）。与代码块 / 公式块（会带引用栏）不同 | 刻意的语义 |
 | 流式中 `[foo]` 短暂显示成字面量 | 引用式链接的定义与引用落在不同 slice，切片独立解析；`finalize()` 收敛 | 切片隔离，见 `stream.rs` 模块文档 |
 | reasoning 里模型把草稿套在围栏里、内部再套围栏，导致后半段正文被吃进代码块（或反之） | CommonMark 不允许嵌套围栏：一个裸围栏闭合外层后，后续围栏的配对整体翻转。任何 CommonMark 渲染器（GitHub / VS Code / Claude Code）结果相同；还原作者意图需要全局配对最优化，与稳定前缀模型冲突 | 输入歧义，见 `stream.rs` 模块文档「Known limit — nested fences」 |

@@ -61,8 +61,10 @@ wing-probe = { workspace = true }
 [dependency-groups]
 dev = [
     "ruff>=0.15.7",
-    "ty>=0.0.24",
+    "ty>=0.0.112",
     "vulture>=2.16",
+    # starlette 的 TestClient 从 1.10 起首选 httpx2（缺它就退回已弃用的 httpx 路径）
+    "httpx2>=2.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
@@ -140,8 +142,11 @@ show_missing = true
 # precision 保留 1 位：报告/评论的展示口径，避免整数四舍五入掩盖 95.6 这样的值。
 precision = 1
 
-[tool.ty.rules]
-# Pydantic 的 discriminated union 写法：子类把 `type` 从 `str` 收窄成
-# `Literal["x"]`。写入面确实变窄了，但该类字段只在构造时赋值、从不经父类注解
-# 改写 —— ty 的可变覆盖规则在这里是假阳性（35 处，全是同一个模式）。
+# 事件模型的字段收窄（`type: Literal["x"]` 覆盖基类的 `str`，外加 `uuid` /
+# `session_id` 的同类收窄）全部落在 event 包内：写入值仍是基类声明的类型，只是
+# 字面量更窄。只在这个包内关掉该规则，别处照旧检查。
+[[tool.ty.overrides]]
+include = ["libs/core/wing/event/**"]
+
+[tool.ty.overrides.rules]
 incompatible-mutable-override = "ignore"

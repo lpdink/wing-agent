@@ -118,6 +118,8 @@ def with_retry(
     def decorator(func: Callable) -> Callable:
         fn_name = getattr(func, "__name__", repr(func))
         subject = label or fn_name
+        # 装饰器拿到的是裸 `Callable`，两个 wrapper 的签名在这里没有可保留的
+        # 精度：模块级 ParamSpec 只会让 ty 报 out-of-scope（见 #307 的依赖升级）。
         if inspect.iscoroutinefunction(func):
 
             @wraps(func)

@@ -76,18 +76,20 @@ sha2 = "0.11"
 # Agent Client Protocol —— `wing acp` 前端（stdio 上的 ACP agent 服务端）。
 # schema v1 stable；`stdio` feature 提供 `Stdio` 传输（本仓库只充当 agent 侧，
 # 不需要 `process`）。
-agent-client-protocol = { version = "3.0.0", features = ["stdio"] }
+# 钉 =3.0.0：5.x 把 ACP schema 挪了两个 major（1.10 -> 1.22），适配是独立工作。
+# 只在 lockfile 里钉不够——`cargo update` 会把 derive 与 schema 一起带上去。
+agent-client-protocol = { version = "=3.0.0", features = ["stdio"] }
 
 # Utilities
 # 跨平台 syscall 原语（pty / dup2 / termios / poll）：本就是 crossterm / ratatui / tokio 的
 # 传递依赖，这里只是显式声明（stdin 接驳层直接用，见 crates/wing/src/tui/stdin_proxy.rs）。
 libc = "0.2"
-# 钉 0.2.0：0.2.3 把 U+FF9E（半角片假名浊点）从 0 列改成 1 列（对终端更准），但
-# ratatui 0.30 的 `CellWidth` 仍按旧行为给 Grapheme_Extend 补一列，两者叠加把
-# `ｶﾞ` 算成 3 列（测试与 `ui::emoji_width` 的契约都是终端实际列数 2）。解锁条件：
-# ratatui 修正该补偿后放开（`cargo update -p unicode-width` 并跑
-# `render::markdown::links` / `ui::selection` / `ui::chat_view::link` 三组测试）。
-unicode-width = "=0.2.0"
+# 上限 0.2.3：0.2.3 把 U+FF9E/U+FF9F（半角片假名浊点/半浊点）从 0 列改成 1 列
+# （对终端更准），但 ratatui 0.30 的 `CellWidth` 仍给这两个码点补一列，两者叠加
+# 把 `ｶﾞ` 算成 3 列（渲染与测试的契约都是终端实际列数 2）。0.2.1 / 0.2.2 保持
+# 旧宽度表，可用。解锁条件：ratatui 修正该补偿后放开上限，并跑
+# `render::markdown::links` / `ui::selection` / `ui::chat_view::link` 三组测试。
+unicode-width = ">=0.2.0, <0.2.3"
 unicode-linebreak = "0.1.5"
 dirs = "7"
 anyhow = "1"

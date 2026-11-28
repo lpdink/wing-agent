@@ -35,7 +35,11 @@ class _SerializeMixin:
     _config: ProviderConfig
 
     probe_part: Callable[..., "CachePart | None"]
-    """由 ``ModelProvider`` 提供（分段构造的永不抛边界，见 base）。"""
+    """由 ``ModelProvider`` 提供（分段构造的永不抛边界，见 base）。
+
+    参数放宽成 `...`：`Callable[[str, Any], ...]` 生成的是位置-only 签名，与
+    `ModelProvider.probe_part(label, obj)` 的命名参数在 ty 眼里不兼容。
+    """
 
     def _serialize_messages(
         self,
