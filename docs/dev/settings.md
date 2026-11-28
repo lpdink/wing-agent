@@ -9,7 +9,7 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | 文件 | 谁的数据 | 目录（catalog）来源 | 写盘路径 |
 |---|---|---|---|
 | `$WING_HOME/core/config.yaml` | 网关后端配置 | `GET /api/settings/schema`（Python 侧 `config/catalog.py`） | `POST /api/settings/set` → `runtime.apply_settings`（唯一写盘路径） |
-| `$WING_HOME/tui/config.yaml` | TUI 自己的配置 | Rust 侧 `config/catalog.rs::interface_catalog()`（后端不知道它） | `config/store.rs::write_interface_doc`（纯本地原子写） |
+| `$WING_HOME/tui/config.yaml` | TUI 自己的配置 | Rust 侧 `config/catalog.rs::interface_catalog()`（后端不知道它） | `config/store.rs`（本地原子写，可保存整份文档或更新侧栏宽度） |
 
 一句话：**用户再也不用手编这两个文件**——首次运行 `wing` 就是向导，日常在 TUI 的 `/settings`
 面板里改，headless 场景用 `wing config`。但文件仍然存在、仍然是唯一事实来源（面板只是它的编辑器）。
@@ -113,9 +113,9 @@ API 保存与生效，配置不可用时网关怎么活着（setup mode），以
 | 模板不许撒谎 | `test_config_emit.py` | 首启模板可解析 + 覆盖每个有值可展示的声明字段（键行或注释行）+ `ChangeHere` 计数 = 0 + 注释掉的默认值与声明一致 + **分隔行恰好是分组表的 title 序** + **声明层的文案一条都不出现** |
 
 `config/catalog.rs` 是 Rust 侧的**声明表**（后端不知道 TUI 的类型），与后端 catalog **同构**：
-同一个 `SettingNode` 类型（来自 `wing-api-client`），所以树 widget 零分支。Interface 根 22 个叶子 =
-`colors.*` 15（`preset` + 14 个颜色槽，槽位带 `value_hint: "color"` 触发色块预览）+ `layout.*` 3 +
-`rendering.*` 3 + `api_key`（`secret` + `apply: restart`——它只在建连时读一次）。
+同一个 `SettingNode` 类型（来自 `wing-api-client`），所以树 widget 零分支。Interface 根 34 个叶子 =
+`colors.*` 21（`preset` + 20 个颜色槽，槽位带 `value_hint: "color"` 触发色块预览）+ `layout.*` 6 +
+`rendering.*` 3 + `paste.image.*` 3 + `api_key`（`secret` + `apply: restart`——它只在建连时读一次）。
 
 ## 3. 稀疏文档与「缺席即默认」
 

@@ -7,7 +7,8 @@ use crate::protocol::SessionStatus;
 use crate::shared::pinning::{is_pinned, pin_added_at};
 use crate::shared::session_tree::{Forest, TreeRow};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Sidebar section order, measured in local calendar days.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum SessionAge {
     Recent,
     Yesterday,
@@ -16,7 +17,8 @@ pub(crate) enum SessionAge {
 }
 
 impl SessionAge {
-    pub(crate) fn at_date(activity: Option<NaiveDate>, today: NaiveDate) -> Self {
+    /// Future dates share today’s section. Unknown dates belong to the oldest section.
+    pub(crate) fn of(activity: Option<NaiveDate>, today: NaiveDate) -> Self {
         let Some(date) = activity else {
             return Self::Older;
         };
@@ -101,8 +103,8 @@ mod tests {
             ("2026-12-25", SessionAge::Older),
         ] {
             let activity = NaiveDate::parse_from_str(stamp, "%Y-%m-%d").unwrap();
-            assert_eq!(SessionAge::at_date(Some(activity), today), expected);
+            assert_eq!(SessionAge::of(Some(activity), today), expected);
         }
-        assert_eq!(SessionAge::at_date(None, today), SessionAge::Older);
+        assert_eq!(SessionAge::of(None, today), SessionAge::Older);
     }
 }

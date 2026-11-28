@@ -409,6 +409,7 @@ fn divider_drag_previews_then_saves_a_bounded_width_on_each_side() {
         draw(&mut app, &mut terminal);
         assert_eq!(app.session_sidebar.frame.area.width, 40);
         assert_eq!(app.config.layout.session_sidebar.width, 24);
+        app.config_snapshot = Some(app.config.clone());
         assert_eq!(
             app.handle_mouse(release(destination)),
             MouseOutcome::Immediate
@@ -418,6 +419,15 @@ fn divider_drag_previews_then_saves_a_bounded_width_on_each_side() {
             [AppIntent::SaveSidebarWidth { width: 40 }]
         ));
         assert_eq!(app.config.layout.session_sidebar.width, 40);
+        assert_eq!(
+            app.config_snapshot
+                .as_ref()
+                .unwrap()
+                .layout
+                .session_sidebar
+                .width,
+            40
+        );
 
         let mut narrow = test_terminal(87, 20);
         draw(&mut app, &mut narrow);
@@ -426,6 +436,16 @@ fn divider_drag_previews_then_saves_a_bounded_width_on_each_side() {
         let divider = app.session_sidebar.frame.divider;
         click(&mut app, (divider.x, divider.y));
         assert!(app.drain_intents().is_empty());
+        let narrower = if side == SidebarSide::Left { -1 } else { 1 };
+        let at = (divider.x.saturating_add_signed(narrower), divider.y + 1);
+        app.handle_mouse(press((divider.x, divider.y + 1)));
+        app.handle_mouse(drag(at));
+        app.handle_mouse(release(at));
+        assert!(matches!(
+            app.drain_intents().as_slice(),
+            [AppIntent::SaveSidebarWidth { width: 22 }]
+        ));
+        app.config.layout.session_sidebar.width = 40;
         draw(&mut app, &mut terminal);
         assert_eq!(app.session_sidebar.frame.area.width, 40);
         let divider = app.session_sidebar.frame.divider;
@@ -512,4 +532,21 @@ fn time_groups_keep_trees_together_and_reveal_the_active_descendant() {
     refresh(&mut app, updated);
     draw(&mut app, &mut terminal);
     assert!(visible_hit(&app, "Grandchild", RowAction::Open).is_none());
+}
+
+#[test]
+fn a_failed_width_save_reports_the_error_and_retains_the_live_width() {
+    let mut app = app_with_message();
+    app.config.layout.session_sidebar.width = 31;
+    app.finish_sidebar_width_save(Err(crate::config::store::StoreError::Conflict {
+        path: "config.yaml".into(),
+    }));
+    assert!(
+        app.toast
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("侧栏宽度保存失败")
+    );
+    assert_eq!(app.config.layout.session_sidebar.width, 31);
 }

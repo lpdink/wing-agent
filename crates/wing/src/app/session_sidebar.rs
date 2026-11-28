@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
+use chrono::{Local, NaiveDate};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use tokio::time::Instant;
@@ -18,11 +18,13 @@ use super::mouse::MouseOutcome;
 use super::{App, AppIntent};
 use crate::config::{SessionSidebarConfig, SidebarSide};
 use crate::protocol::SessionStatus;
+use crate::shared::pinning::local_activity_date;
 use crate::shared::session_list::{SessionAge, SessionCandidate, session_forest};
 use crate::shared::session_tree::Crew;
-use crate::ui::session_sidebar::{self as ui, RowAction, SidebarChrome, SidebarFrame, SidebarRow};
+use crate::ui::session_sidebar::{self as ui, RowAction, SidebarContext, SidebarFrame, SidebarRow};
 use crate::ui::toast::Toast;
 
+// Leave enough space for a usable composer while reserving the sidebar.
 const MIN_MAIN_WIDTH: u16 = 64;
 const MIN_TERMINAL_WIDTH: u16 = MIN_MAIN_WIDTH + SessionSidebarConfig::MIN_WIDTH;
 const MIN_HEIGHT: u16 = 8;
@@ -90,6 +92,7 @@ struct TreeRow {
     group: SessionAge,
     depth: usize,
     crew: Crew,
+    folded: bool,
 }
 
 #[derive(Default)]
@@ -264,6 +267,7 @@ impl SessionSidebar {
                     reveal = Some(&current.id);
                 }
                 // An interactive ask can be visible in the list before its panel arrives.
+                // Keep the more specific state while the local turn is still in flight.
                 match (current.parsed_status(), row.parsed_status()) {
                     (None, _) | (Some(SessionStatus::Working), Some(SessionStatus::Waiting)) => {}
                     (Some(_), _) => row.status.clone_from(&current.status),
@@ -285,7 +289,7 @@ impl SessionSidebar {
             }
         }
 
-        let mut buckets = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        self.rows.clear();
         let mut remaining = forest.tree();
         while let Some(root) = remaining.first() {
             // Crew counts include every descendant, so the preorder slice contains the whole tree.
@@ -294,13 +298,11 @@ impl SessionSidebar {
             let date = if synthetic == Some(root.index) {
                 Some(today)
             } else {
-                tree.iter()
-                    .filter_map(|entry| {
-                        local_activity_date(&self.candidates[entry.index].last_interaction)
-                    })
-                    .max()
+                forest.activity_of(root.index).and_then(|source| {
+                    local_activity_date(&self.candidates[source].last_interaction)
+                })
             };
-            let group = SessionAge::at_date(date, today);
+            let group = SessionAge::of(date, today);
             let mut folded_depth = None;
             for entry in tree {
                 if folded_depth.is_some_and(|depth| entry.depth > depth) {
@@ -310,16 +312,16 @@ impl SessionSidebar {
                 let folded = crew.descendants > 0
                     && !self.expanded.contains(&self.candidates[entry.index].id);
                 folded_depth = folded.then_some(entry.depth);
-                buckets[group as usize].push(TreeRow {
+                self.rows.push(TreeRow {
                     index: entry.index,
                     depth: entry.depth,
                     crew,
                     group,
+                    folded,
                 });
             }
         }
-        self.rows.clear();
-        self.rows.extend(buckets.into_iter().flatten());
+        self.rows.sort_by_key(|row| row.group);
 
         if let Some(index) = anchor.as_deref().and_then(|id| self.row_position(id)) {
             self.offset = index;
@@ -456,7 +458,7 @@ impl App {
         sidebar.frame = ui::render(
             area,
             buf,
-            SidebarChrome {
+            SidebarContext {
                 side,
                 resizing: sidebar.is_resizing(),
                 palette: &self.palette,
@@ -470,8 +472,7 @@ impl App {
                     group: row.group,
                     depth: row.depth,
                     crew: row.crew,
-                    collapsed: row.crew.descendants > 0
-                        && !sidebar.expanded.contains(&candidate.id),
+                    collapsed: row.folded,
                 }
             }),
         );
@@ -513,6 +514,9 @@ impl App {
                 let width = drag.width_at(position.x, self.geometry.width());
                 if width != drag.start_width {
                     self.config.layout.session_sidebar.width = width;
+                    if let Some(snapshot) = &mut self.config_snapshot {
+                        snapshot.layout.session_sidebar.width = width;
+                    }
                     self.push_intent(AppIntent::SaveSidebarWidth { width });
                 }
             }
@@ -532,6 +536,18 @@ impl App {
             RowAction::Open => return Some(MouseOutcome::Ignored),
         }
         Some(MouseOutcome::Immediate)
+    }
+
+    pub(super) fn finish_sidebar_width_save(
+        &mut self,
+        result: Result<(), crate::config::store::StoreError>,
+    ) {
+        if let Err(error) = result {
+            self.show_toast(Toast::warning(
+                format!("侧栏宽度保存失败：{error}"),
+                Duration::from_secs(4),
+            ));
+        }
     }
 
     pub(super) fn finish_session_list(&mut self, result: Result<SessionListResponse, String>) {
@@ -582,11 +598,35 @@ fn session_in_flight(row: &SessionCandidate) -> bool {
         .is_some_and(SessionStatus::turn_in_flight)
 }
 
-fn local_activity_date(stamp: &str) -> Option<NaiveDate> {
-    if let Ok(naive) = NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H:%M:%S%.f") {
-        return Some(naive.date());
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_calendar_day_regroups_an_unchanged_snapshot() {
+        let area = Rect::new(0, 1, 24, 12);
+        let mut sidebar = SessionSidebar::new(true);
+        let today = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
+        sidebar.set_snapshot(vec![SessionCandidate {
+            id: "current".into(),
+            parent: None,
+            title: "Current".into(),
+            workspace: String::new(),
+            status: "idle".into(),
+            last_interaction: "2026-12-31T23:55:00".into(),
+            pinned: false,
+            pin_added_at: None,
+        }]);
+        let current = || CurrentSession {
+            id: "current",
+            title: Some("Current"),
+            workspace: None,
+            status: Some(SessionStatus::Idle),
+        };
+        sidebar.sync_current(current(), area, today);
+        assert_eq!(sidebar.rows[0].group, SessionAge::Recent);
+        assert!(!sidebar.tree_dirty);
+        sidebar.sync_current(current(), area, today.succ_opt().unwrap());
+        assert_eq!(sidebar.rows[0].group, SessionAge::Yesterday);
     }
-    DateTime::parse_from_rfc3339(stamp)
-        .ok()
-        .map(|timestamp| timestamp.with_timezone(&Local).date_naive())
 }

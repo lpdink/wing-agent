@@ -28,6 +28,7 @@
 └── tui/
     ├── config.yaml     TUI 配置（colors / layout / rendering / api_key；`wing tui --dump-config` 输出它的规范形，密文默认掩码）
     ├── config.yaml.bak 最近一次保存前的原文（同上）
+    ├── .config.yaml.lock TUI 配置写入共用的锁文件
     └── logs/           TUI 日志：wing_YYYY-MM-DD.log（命名同后端，无符号链接）
 ```
 
@@ -125,7 +126,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 同一套 tmp + rename，不再用会留下截断副本的 `fs::copy`）。**读失败不吞**：文件坏掉时报错，
 不静默回落默认值（否则一次保存就会覆盖掉用户手写的文件）。
 
-编辑入口有三个，共用同一份声明（`config/catalog.rs::interface_catalog()`）：
+TUI 配置使用 `config/catalog.rs::interface_catalog()` 声明。配置入口包括：
 
 - **TUI `/settings` 面板的 Interface 根**：实时预览（改颜色当场变色，`Esc` 回退）+ `s` 保存；
 - **`wing tui --dump-config`**：读**当前文件**、输出它的规范形（只有分隔行与注释掉的默认值）；
@@ -141,11 +142,10 @@ schema 之外的未知键**保留并写回**（前向兼容）。
     真值只以末 4 位 hint 出现），而 stdout 会被 shell 重定向、被日志与 CI 捕获；真值只在显式要时才给。
     代价是**不带 `--show-secrets` 的 dump 不是 round-trip artifact**（`api_key` 变成 `null`），
     这一点是刻意的。
-  - **保存路径不受掩码影响**：`store::write_interface_doc`（面板 `s` / setup 向导 / `app/runner.rs`
-    共用的唯一写盘实现）用的是同一个 emitter 的 **Raw** 模式——写掩码 = 把用户密钥换成掩码字符串
-    = **数据损坏**。两处别"顺手统一"。
+  - 设置面板与 setup 向导以 **Raw** 模式写入规范形并保存密文真值。
   - `--show-secrets` 的输出是真值：`> 已存在的文件` 前先备份（shell 会在程序启动前先截断目标）；
 - **手写文件**（仍然支持）：外部改动在面板 `R` 重新载入时读入。
+- **拖动会话侧栏分隔线**在松手时更新一个宽度值，保留文件中的注释和其他键。配置保存使用 `.config.yaml.lock` 串行化协作写入，检测到冲突时提示重试。
 
 > 颜色槽「注释掉的默认值」是 `preset: wing` 下的值；改 `preset` 后它们仅供参考（不随预设重算）。
 > 取消注释 = 一份合法值：嵌套块（`colors:` / `paste:` 等）也是整块注释的，取消整块即可。

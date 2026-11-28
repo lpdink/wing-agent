@@ -96,17 +96,47 @@ pub fn pin_key(pinned: bool, added_at: Option<&str>) -> (bool, Reverse<Option<i6
 /// 解释 naive——两条路径**不互为一致性合约**）。带偏移 / `Z` 的值按瞬时比较；
 /// 两类混排（只有手改 metadata 才会出现）会差一个时区偏移，是已知边界。
 pub fn parse_timestamp_micros(value: &str) -> Option<i64> {
-    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f") {
-        return Some(naive.and_utc().timestamp_micros());
-    }
-    chrono::DateTime::parse_from_rfc3339(value)
+    Some(match parse_timestamp(value)? {
+        Timestamp::Naive(naive) => naive.and_utc().timestamp_micros(),
+        Timestamp::Offset(timestamp) => timestamp.timestamp_micros(),
+    })
+}
+
+pub(crate) fn local_activity_date(value: &str) -> Option<chrono::NaiveDate> {
+    Some(match parse_timestamp(value)? {
+        Timestamp::Naive(naive) => naive.date(),
+        Timestamp::Offset(timestamp) => timestamp.with_timezone(&chrono::Local).date_naive(),
+    })
+}
+
+enum Timestamp {
+    Naive(chrono::NaiveDateTime),
+    Offset(chrono::DateTime<chrono::FixedOffset>),
+}
+
+fn parse_timestamp(value: &str) -> Option<Timestamp> {
+    chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.f")
+        .map(Timestamp::Naive)
+        .or_else(|_| chrono::DateTime::parse_from_rfc3339(value).map(Timestamp::Offset))
         .ok()
-        .map(|dt| dt.timestamp_micros())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn activity_date_uses_the_local_calendar_for_offset_timestamps() {
+        let utc: chrono::DateTime<chrono::Utc> = "2026-02-03T23:30:00Z".parse().unwrap();
+        let expected = Some(utc.with_timezone(&chrono::Local).date_naive());
+        assert_eq!(local_activity_date("2026-02-03T23:30:00Z"), expected);
+        assert_eq!(local_activity_date("2026-02-04T07:30:00+08:00"), expected);
+        assert_eq!(
+            local_activity_date("2026-02-04T07:30:00"),
+            chrono::NaiveDate::from_ymd_opt(2026, 2, 4)
+        );
+        assert_eq!(local_activity_date("unknown"), None);
+    }
 
     fn meta(entries: &[(&str, Option<&str>)]) -> HashMap<String, TagMeta> {
         entries

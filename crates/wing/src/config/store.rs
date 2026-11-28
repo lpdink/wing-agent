@@ -7,7 +7,8 @@
 //!    这正是 `dump_config_yaml` 把默认值写成注释的原因。
 //! 2. **读失败不吞**：文件坏掉时返回 [`StoreError::Parse`]（原文一字不动），不静默回落到默认值
 //!    ——调用方（设置面板）该展示问题并拒绝保存，否则一次保存就会覆盖掉用户手写的文件。
-//! 3. **指纹**：文件字节的 FNV-1a 64（`fnv1a64:<16 hex>`），文件不存在 = `"absent"`
+//! 3. **宽度补丁**：分隔线拖动通过同一原子写事务更新 YAML 的单个值，保留其余文本。
+//! 4. **指纹**：文件字节的 FNV-1a 64（`fnv1a64:<16 hex>`），文件不存在 = `"absent"`
 //!    （与后端 `config/document.py` 的 sha256 同口径：文件变了指纹就变）。Rust 侧没有 `sha2`
 //!    （不为它加依赖），而乐观并发只需要"变没变"，不需要抗碰撞。
 //!
@@ -22,6 +23,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use serde_json::Value;
+use yaml_edit::{YamlFile, path::YamlPath};
 
 use crate::config::AppConfig;
 use crate::config::catalog::DumpMode;
@@ -56,13 +58,19 @@ pub struct WriteOutcome {
 pub enum StoreError {
     /// `$WING_HOME` 与 home 目录都不可得（无法定位配置文件）。
     NoConfigPath,
+    Conflict {
+        path: PathBuf,
+    },
     /// 读文件失败（非 NotFound）。
     Read {
         path: PathBuf,
         source: std::io::Error,
     },
     /// YAML 解析失败：原文原样保留在 `path`。
-    Parse { path: PathBuf, message: String },
+    Parse {
+        path: PathBuf,
+        message: String,
+    },
     /// 写文件失败（含备份、建目录、原子替换）。
     Write {
         path: PathBuf,
@@ -77,6 +85,7 @@ impl std::fmt::Display for StoreError {
                 f,
                 "cannot determine the TUI config directory (neither $WING_HOME nor $HOME is set)"
             ),
+            Self::Conflict { path } => write!(f, "配置正在被修改，请重试（{}）", path.display()),
             Self::Read { path, source } => write!(f, "cannot read {}: {source}", path.display()),
             Self::Parse { path, message } => {
                 write!(f, "cannot parse {}: {message}", path.display())
@@ -148,59 +157,78 @@ pub fn write_interface_doc(doc: &Value) -> Result<WriteOutcome, StoreError> {
 /// [`write_interface_doc`] 的显式路径内核（测试走这里）。
 pub(crate) fn write_interface_doc_to(path: &Path, doc: &Value) -> Result<WriteOutcome, StoreError> {
     let _lock = lock_interface(path)?;
+    let previous = read_interface_text(path)?;
+    // The dump command may mask secrets. A save always uses their original values.
     let text = dump_config_yaml(doc, DumpMode::Raw);
-    write_interface_text(path, &text)
+    write_interface_text(path, &text, previous.as_deref())
 }
 
-pub(crate) fn save_sidebar_width(width: u16) -> Result<(), StoreError> {
+/// Patch an integer on the latest Interface file, retaining the YAML source around it.
+/// `edit` applies the same change to the semantic document for validation before commit.
+pub(crate) fn update_interface_int(
+    key: &str,
+    value: u16,
+    edit: impl FnOnce(&mut Value) -> Result<(), String>,
+) -> Result<(), StoreError> {
     let path = interface_config_path().ok_or(StoreError::NoConfigPath)?;
-    save_sidebar_width_to(&path, width)
+    update_interface_int_at(&path, key, value, edit)
 }
 
-fn save_sidebar_width_to(path: &Path, width: u16) -> Result<(), StoreError> {
+fn update_interface_int_at(
+    path: &Path,
+    key: &str,
+    value: u16,
+    edit: impl FnOnce(&mut Value) -> Result<(), String>,
+) -> Result<(), StoreError> {
     let _lock = lock_interface(path)?;
-    let mut read = read_interface_doc_from(path)?;
+    let previous = read_interface_text(path)?;
+    let before = parse_document(previous.as_deref().unwrap_or_default(), path)?;
+    let mut expected = before.clone();
     let parse_error = |message: String| StoreError::Parse {
         path: path.to_owned(),
         message,
     };
-    let layout = mapping_entry(
-        read.doc
-            .as_object_mut()
-            .expect("document root is a mapping"),
-        "layout",
-    )
-    .ok_or_else(|| parse_error("layout must be a mapping".into()))?;
-    let sidebar = mapping_entry(layout, "session_sidebar")
-        .ok_or_else(|| parse_error("layout.session_sidebar must be a mapping".into()))?;
-    let width = Value::from(width);
-    if sidebar.get("width") == Some(&width) {
+    edit(&mut expected).map_err(parse_error)?;
+    if before == expected {
         return Ok(());
     }
-    sidebar.insert("width".into(), width);
-    // This automatic edit must retain keys outside the current settings catalog.
-    let text = serde_yaml::to_string(&read.doc).map_err(|error| parse_error(error.to_string()))?;
-    if read_interface_doc_from(path)?.fingerprint != read.fingerprint {
-        return Err(StoreError::Write {
+    let text = if let Some(source) = &previous {
+        let yaml: YamlFile = source
+            .parse()
+            .map_err(|error: yaml_edit::YamlError| parse_error(error.to_string()))?;
+        yaml.ensure_document()
+            .try_set_path(key, i64::from(value))
+            .map_err(|error| parse_error(error.to_string()))?;
+        yaml.to_string()
+    } else {
+        dump_config_yaml(&expected, DumpMode::Raw)
+    };
+    // The config reader interprets aliases and scalar types. Verify that the CST patch
+    // did not change any value outside the requested path before replacing the file.
+    if parse_document(&text, path)? != expected {
+        return Err(parse_error("单键修改会改变其他配置值".into()));
+    }
+    if read_interface_text(path)? != previous {
+        return Err(StoreError::Conflict {
             path: path.to_owned(),
-            source: std::io::Error::other("configuration changed during the width update"),
         });
     }
-    write_interface_text(path, &text)?;
+    write_interface_text(path, &text, previous.as_deref())?;
     Ok(())
 }
 
-fn mapping_entry<'a>(
-    object: &'a mut serde_json::Map<String, Value>,
-    key: &str,
-) -> Option<&'a mut serde_json::Map<String, Value>> {
-    object
-        .entry(key)
-        .or_insert_with(|| Value::Object(serde_json::Map::new()))
-        .as_object_mut()
+fn read_interface_text(path: &Path) -> Result<Option<String>, StoreError> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(StoreError::Read {
+            path: path.to_owned(),
+            source,
+        }),
+    }
 }
 
-fn lock_interface(path: &Path) -> Result<fs::File, StoreError> {
+fn lock_interface(path: &Path) -> Result<Option<fs::File>, StoreError> {
     let write_error = |source| StoreError::Write {
         path: path.to_owned(),
         source,
@@ -218,22 +246,35 @@ fn lock_interface(path: &Path) -> Result<fs::File, StoreError> {
         .truncate(false)
         .open(path.with_file_name(format!(".{}.lock", name.to_string_lossy())))
         .map_err(write_error)?;
-    lock.try_lock().map_err(|error| write_error(error.into()))?;
-    Ok(lock)
+    match lock.try_lock() {
+        Ok(()) => Ok(Some(lock)),
+        Err(fs::TryLockError::WouldBlock) => Err(StoreError::Conflict {
+            path: path.to_owned(),
+        }),
+        Err(fs::TryLockError::Error(error)) if unsupported_lock(&error) => Ok(None),
+        Err(fs::TryLockError::Error(error)) => Err(write_error(error)),
+    }
 }
 
-fn write_interface_text(path: &Path, text: &str) -> Result<WriteOutcome, StoreError> {
-    let backup_path = if path.exists() {
+fn unsupported_lock(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::ENOLCK | libc::ENOSYS | libc::EINVAL)
+    ) {
+        return true;
+    }
+    error.kind() == std::io::ErrorKind::Unsupported
+}
+
+fn write_interface_text(
+    path: &Path,
+    text: &str,
+    previous: Option<&str>,
+) -> Result<WriteOutcome, StoreError> {
+    let backup_path = if let Some(previous) = previous {
         let backup = backup_path(path)?;
-        // 读旧文件 → 原子写：`fs::copy` 中途被杀会留下截断的备份，这里与后端
-        // `common/fs.py::atomic_write_bytes` 同语义（`atomic_write` 只有文本版，
-        // 按既有口径不改它）。旧文件是配置文本，原样逐字节写回；非 UTF-8 的旧文件根本
-        // 进不了配置（`read_interface_doc_from` 同样拒绝），这里直接以 Read 错误拒绝整条保存。
-        let previous = fs::read_to_string(path).map_err(|e| StoreError::Read {
-            path: path.to_owned(),
-            source: e,
-        })?;
-        atomic_write(&backup, &previous)?;
+        atomic_write(&backup, previous)?;
         Some(backup)
     } else {
         None
@@ -564,6 +605,19 @@ mod tests {
         );
     }
 
+    fn save_sidebar_width_to(path: &Path, width: u16) -> Result<(), StoreError> {
+        let key = "layout.session_sidebar.width";
+        let steps = wing_api_client::models::parse_path(key).unwrap();
+        update_interface_int_at(path, key, width, |doc| {
+            crate::shared::doc_edit::set_path(
+                doc,
+                &steps,
+                json!(width),
+                crate::shared::doc_edit::Policy::Strict,
+            )
+        })
+    }
+
     #[test]
     fn sidebar_width_updates_preserve_existing_and_future_settings() {
         let dir = TestDir::new("sidebar-width");
@@ -597,6 +651,58 @@ mod tests {
     }
 
     #[test]
+    fn updating_the_width_keeps_yaml_comments_and_layout() {
+        let dir = TestDir::new("width-comments");
+        let file = dir.path("config.yaml");
+        let notes = "# My TUI notes\nlayout: # section\n  # An optional tweak\n  session_sidebar:\n    side: left # My preference\n    width: 24 # Width in columns\n\nother: {wire: true} # Future setting\n";
+        fs::write(&file, notes).unwrap();
+        save_sidebar_width_to(&file, 32).unwrap();
+        assert_eq!(read_text(&file), notes.replace("width: 24", "width: 32"));
+        save_sidebar_width_to(&file, 21).unwrap();
+        assert_eq!(read_text(&file), notes.replace("width: 24", "width: 21"));
+    }
+
+    #[test]
+    fn a_width_update_retains_the_comment_only_default_template() {
+        let dir = TestDir::new("width-default-template");
+        let file = dir.path("config.yaml");
+        let template = dump_config_yaml(&json!({}), DumpMode::Raw);
+        fs::write(&file, &template).unwrap();
+        save_sidebar_width_to(&file, 31).unwrap();
+        let result = read_text(&file);
+        assert!(result.starts_with(&template), "{result}");
+        assert_eq!(
+            AppConfig::load_from_path(&file)
+                .layout
+                .session_sidebar
+                .width,
+            31
+        );
+    }
+
+    #[test]
+    fn a_config_edit_after_the_width_read_survives_the_conflict() {
+        let dir = TestDir::new("width-concurrent-edit");
+        let file = dir.path("config.yaml");
+        let changed = "colors: {preset: light}\n";
+        fs::write(&file, "{}\n").unwrap();
+        let key = "layout.session_sidebar.width";
+        let steps = wing_api_client::models::parse_path(key).unwrap();
+        let result = update_interface_int_at(&file, key, 29, |doc| {
+            fs::write(&file, changed).unwrap();
+            crate::shared::doc_edit::set_path(
+                doc,
+                &steps,
+                json!(29),
+                crate::shared::doc_edit::Policy::Strict,
+            )
+        });
+        assert!(matches!(result, Err(StoreError::Conflict { .. })));
+        assert_eq!(read_text(&file), changed);
+        assert!(!backup_path(&file).unwrap().exists());
+    }
+
+    #[test]
     fn sidebar_width_preserves_invalid_or_locked_files() {
         let dir = TestDir::new("sidebar-invalid");
         let file = dir.path("config.yaml");
@@ -616,7 +722,11 @@ mod tests {
         let lock = lock_interface(&file).unwrap();
         assert!(matches!(
             save_sidebar_width_to(&file, 28),
-            Err(StoreError::Write { .. })
+            Err(StoreError::Conflict { .. })
+        ));
+        assert!(matches!(
+            write_interface_doc_to(&file, &json!({})),
+            Err(StoreError::Conflict { .. })
         ));
         assert_eq!(read_text(&file), "layout: {}\n");
         drop(lock);

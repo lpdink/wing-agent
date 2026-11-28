@@ -76,7 +76,7 @@ pub(crate) fn fitting_rows(area: Rect, groups: impl Iterator<Item = SessionAge>)
         .count()
 }
 
-pub(crate) struct SidebarChrome<'a> {
+pub(crate) struct SidebarContext<'a> {
     pub side: SidebarSide,
     pub resizing: bool,
     pub palette: &'a ThemePalette,
@@ -87,10 +87,10 @@ pub(crate) struct SidebarChrome<'a> {
 pub(crate) fn render<'a>(
     area: Rect,
     buf: &mut Buffer,
-    chrome: SidebarChrome<'_>,
+    chrome: SidebarContext<'_>,
     rows: impl Iterator<Item = SidebarRow<'a>>,
 ) -> SidebarFrame {
-    let SidebarChrome {
+    let SidebarContext {
         side,
         resizing,
         palette,
@@ -267,7 +267,7 @@ mod tests {
         let frame = render(
             area,
             &mut buf,
-            SidebarChrome {
+            SidebarContext {
                 side: SidebarSide::Right,
                 resizing: false,
                 palette: &palette,
@@ -317,6 +317,20 @@ mod tests {
     }
 
     #[test]
+    fn each_visible_group_consumes_a_heading_row() {
+        let same = [SessionAge::Recent, SessionAge::Recent];
+        let split = [SessionAge::Recent, SessionAge::Yesterday];
+        let area = Rect::new(0, 0, 24, 6);
+        assert_eq!(fitting_rows(area, same.into_iter()), 2);
+        assert_eq!(fitting_rows(area, split.into_iter()), 1);
+        assert_eq!(fitting_rows(area, split.into_iter().rev()), 1);
+        assert_eq!(
+            fitting_rows(Rect { height: 7, ..area }, split.into_iter()),
+            2
+        );
+    }
+
+    #[test]
     fn empty_area_has_no_rendered_targets() {
         let area = Rect::new(3, 1, 0, 4);
         let palette = ThemePalette::from_config(&AppConfig::default().colors);
@@ -324,7 +338,7 @@ mod tests {
         let frame = render(
             area,
             &mut buf,
-            SidebarChrome {
+            SidebarContext {
                 side: SidebarSide::Left,
                 resizing: false,
                 palette: &palette,

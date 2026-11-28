@@ -359,12 +359,7 @@ pub async fn execute_intent(
             matches!(intent, AppIntent::FetchSessionList),
         ),
         AppIntent::SaveSidebarWidth { width } => {
-            if let Err(error) = crate::config::store::save_sidebar_width(width) {
-                app.show_toast(Toast::warning(
-                    format!("侧栏宽度保存失败：{error}"),
-                    std::time::Duration::from_secs(4),
-                ));
-            }
+            app.finish_sidebar_width_save(save_sidebar_width(width));
         }
         AppIntent::CompactSession { instruction } => {
             dispatch_compact(
@@ -683,6 +678,20 @@ pub(super) struct OutgoingMessage {
     pub(super) tool_call_id: Option<String>,
     pub(super) request_id: String,
     pub(super) images: Vec<CompressedImage>,
+}
+
+fn save_sidebar_width(width: u16) -> Result<(), crate::config::store::StoreError> {
+    use crate::config::SessionSidebarConfig;
+    use crate::shared::doc_edit::{Policy, set_path};
+    let width = width.clamp(
+        SessionSidebarConfig::MIN_WIDTH,
+        SessionSidebarConfig::MAX_WIDTH,
+    );
+    let key = "layout.session_sidebar.width";
+    let steps = wing_api_client::models::parse_path(key).expect("sidebar width has a fixed path");
+    crate::config::store::update_interface_int(key, width, |doc| {
+        set_path(doc, &steps, serde_json::Value::from(width), Policy::Strict)
+    })
 }
 
 fn dispatch_session_list(
