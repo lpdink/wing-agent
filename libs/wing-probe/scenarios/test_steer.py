@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -59,7 +59,7 @@ pytestmark = [pytest.mark.asyncio, pytest.mark.timeout(45)]
 
 
 @asynccontextmanager
-async def _subscribe(probe: Probe, session: Session) -> AsyncIterator[Session]:
+async def _subscribe(probe: Probe, session: Session) -> AsyncGenerator[Session, None]:
     driver = await Driver.connect(probe.env)
     try:
         yield await driver.attach(session.session_id)

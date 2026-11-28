@@ -104,11 +104,11 @@ class TestProviderModelDeclarations:
 
     def test_agent_level_window_fields_are_ignored(self):
         """窗口字段已从 agents[] 移走：旧键静默忽略（extra="ignore" 的既有契约）。"""
-        agent = AgentConfig(
+        agent = AgentConfig(  # ty: ignore[pydantic-discarded-extra-argument]
             name="a",
             model="m",
-            context_window_tokens=500_000,  # ty: ignore[unknown-argument]
-            keep_recent_tokens=100_000,  # ty: ignore[unknown-argument]
+            context_window_tokens=500_000,
+            keep_recent_tokens=100_000,
         )
         assert not hasattr(agent, "context_window_tokens")
         assert not hasattr(agent, "keep_recent_tokens")

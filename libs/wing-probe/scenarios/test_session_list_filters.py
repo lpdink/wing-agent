@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping
 
 import pytest
 
@@ -41,7 +41,7 @@ ACTIVE_STATUSES = "idle,working,waiting"
 
 
 @contextlib.asynccontextmanager
-async def _observer(probe: Probe) -> AsyncIterator[DriverHttp]:
+async def _observer(probe: Probe) -> AsyncGenerator[DriverHttp, None]:
     """只走 HTTP、从不订阅任何会话的观测客户端（会话列表 / rail 一侧的替身）。"""
     http = DriverHttp(probe.env.gateway_url, started_at=probe.env.started_at)
     try:

@@ -344,7 +344,7 @@ class ModelProvider(ABC):
 
     # ── 缓存账本探针（只观察，不改写请求）───────
 
-    def probe_part(self, label: str, obj: Any) -> "CachePart | None":
+    def probe_part(self, label: str, obj: Any, /) -> "CachePart | None":
         """构造一个探针分段；**永不抛**（构造失败只丢这一段）。
 
         探针是观察面：分段构造（协议 dict → 规范形 JSON）失败绝不能把请求构造

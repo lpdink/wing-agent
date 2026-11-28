@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import time
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -190,7 +190,7 @@ class FakeProvider:
         return self.scripts.models()
 
     @contextmanager
-    def hold_first_content(self, model: str) -> Iterator[asyncio.Event]:
+    def hold_first_content(self, model: str) -> Generator[asyncio.Event, None, None]:
         """暂停同模型下一条有正文的流式请求，yield 首个正文帧到达写入点的信号。
 
         同模型只接受一个待领取的闸门。响应头和正文前的帧照常发送。

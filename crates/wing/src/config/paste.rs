@@ -70,28 +70,29 @@ mod tests {
 
     #[test]
     fn the_section_parses_from_yaml_and_keeps_absent_keys_at_default() {
-        let config: PasteConfig =
-            serde_yaml::from_str("image:\n  max_bytes: 2097152\n  quality: 70\n  max_edge: 1600\n")
-                .unwrap();
+        let config: PasteConfig = serde_yaml_ng::from_str(
+            "image:\n  max_bytes: 2097152\n  quality: 70\n  max_edge: 1600\n",
+        )
+        .unwrap();
         assert_eq!(config.image.max_bytes, 2_097_152);
         assert_eq!(config.image.quality, 70);
         assert_eq!(config.image.max_edge, 1600);
 
         // 缺席的键各自回落默认（稀疏配置是常态）。
-        let partial: PasteConfig = serde_yaml::from_str("image:\n  quality: 60\n").unwrap();
+        let partial: PasteConfig = serde_yaml_ng::from_str("image:\n  quality: 60\n").unwrap();
         assert_eq!(partial.image.quality, 60);
         assert_eq!(partial.image.max_bytes, 1_048_576);
         assert_eq!(partial.image.max_edge, 2048);
 
         // 整个段缺席（旧配置文件）。
-        let absent: PasteConfig = serde_yaml::from_str("{}").unwrap();
+        let absent: PasteConfig = serde_yaml_ng::from_str("{}").unwrap();
         assert_eq!(absent.image, PasteImageConfig::default());
     }
 
     #[test]
     fn out_of_range_values_are_clamped_for_the_compressor_only() {
         let config: PasteImageConfig =
-            serde_yaml::from_str("max_bytes: 0\nquality: 300\nmax_edge: 0\n").unwrap();
+            serde_yaml_ng::from_str("max_bytes: 0\nquality: 300\nmax_edge: 0\n").unwrap();
         // 解析保留用户写的值（面板回读 / 保存不会"吃掉"它）……
         assert_eq!(config.max_bytes, 0);
         assert_eq!(config.quality, 300);
@@ -102,7 +103,7 @@ mod tests {
         assert_eq!(opts.quality, 100);
         assert_eq!(opts.max_edge, 1);
 
-        let zero_quality: PasteImageConfig = serde_yaml::from_str("quality: 0\n").unwrap();
+        let zero_quality: PasteImageConfig = serde_yaml_ng::from_str("quality: 0\n").unwrap();
         assert_eq!(zero_quality.compress_options().quality, 1);
     }
 
@@ -116,8 +117,8 @@ mod tests {
                 max_edge: 1024,
             },
         };
-        let dumped = serde_yaml::to_string(&config).expect("dump");
-        let parsed: PasteConfig = serde_yaml::from_str(&dumped).expect("parse back");
+        let dumped = serde_yaml_ng::to_string(&config).expect("dump");
+        let parsed: PasteConfig = serde_yaml_ng::from_str(&dumped).expect("parse back");
         assert_eq!(parsed.image, config.image);
         assert!(!dumped.contains("null"), "稀疏 dump 不带空值：{dumped}");
     }

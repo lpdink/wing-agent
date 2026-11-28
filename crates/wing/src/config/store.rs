@@ -303,10 +303,10 @@ pub(crate) fn parse_document(text: &str, path: &Path) -> Result<Value, StoreErro
         path: path.to_owned(),
         message,
     };
-    let value: serde_yaml::Value = if text.trim().is_empty() {
-        serde_yaml::Value::Null
+    let value: serde_yaml_ng::Value = if text.trim().is_empty() {
+        serde_yaml_ng::Value::Null
     } else {
-        serde_yaml::from_str(text).map_err(|e| parse_error(e.to_string()))?
+        serde_yaml_ng::from_str(text).map_err(|e| parse_error(e.to_string()))?
     };
     let document = yaml_to_json(value).map_err(parse_error)?;
     match document {
@@ -320,11 +320,11 @@ pub(crate) fn parse_document(text: &str, path: &Path) -> Result<Value, StoreErro
 }
 
 /// YAML 值 → JSON 值（显式转换：非字符串键 / 无穷大这类 JSON 装不下的东西要报错，不能悄悄变 null）。
-fn yaml_to_json(value: serde_yaml::Value) -> Result<Value, String> {
+fn yaml_to_json(value: serde_yaml_ng::Value) -> Result<Value, String> {
     Ok(match value {
-        serde_yaml::Value::Null => Value::Null,
-        serde_yaml::Value::Bool(b) => Value::Bool(b),
-        serde_yaml::Value::Number(n) => {
+        serde_yaml_ng::Value::Null => Value::Null,
+        serde_yaml_ng::Value::Bool(b) => Value::Bool(b),
+        serde_yaml_ng::Value::Number(n) => {
             if let Some(int) = n.as_i64() {
                 Value::from(int)
             } else if let Some(uint) = n.as_u64() {
@@ -337,17 +337,17 @@ fn yaml_to_json(value: serde_yaml::Value) -> Result<Value, String> {
                 return Err(format!("unsupported YAML number: {n}"));
             }
         }
-        serde_yaml::Value::String(s) => Value::String(s),
-        serde_yaml::Value::Sequence(items) => Value::Array(
+        serde_yaml_ng::Value::String(s) => Value::String(s),
+        serde_yaml_ng::Value::Sequence(items) => Value::Array(
             items
                 .into_iter()
                 .map(yaml_to_json)
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        serde_yaml::Value::Mapping(mapping) => {
+        serde_yaml_ng::Value::Mapping(mapping) => {
             let mut object = serde_json::Map::with_capacity(mapping.len());
             for (key, value) in mapping {
-                let serde_yaml::Value::String(key) = key else {
+                let serde_yaml_ng::Value::String(key) = key else {
                     return Err(format!(
                         "configuration keys must be strings, got {}",
                         key_kind(&key)
@@ -358,7 +358,7 @@ fn yaml_to_json(value: serde_yaml::Value) -> Result<Value, String> {
             Value::Object(object)
         }
         // tag（`!!str` 之类）不携带配置语义：解包取它的值。
-        serde_yaml::Value::Tagged(tagged) => yaml_to_json(tagged.value)?,
+        serde_yaml_ng::Value::Tagged(tagged) => yaml_to_json(tagged.value)?,
     })
 }
 
@@ -373,15 +373,15 @@ fn kind_of(value: &Value) -> &'static str {
     }
 }
 
-fn key_kind(value: &serde_yaml::Value) -> &'static str {
+fn key_kind(value: &serde_yaml_ng::Value) -> &'static str {
     match value {
-        serde_yaml::Value::Null => "null",
-        serde_yaml::Value::Bool(_) => "a boolean",
-        serde_yaml::Value::Number(_) => "a number",
-        serde_yaml::Value::String(_) => "a string",
-        serde_yaml::Value::Sequence(_) => "a sequence",
-        serde_yaml::Value::Mapping(_) => "a mapping",
-        serde_yaml::Value::Tagged(_) => "a tagged value",
+        serde_yaml_ng::Value::Null => "null",
+        serde_yaml_ng::Value::Bool(_) => "a boolean",
+        serde_yaml_ng::Value::Number(_) => "a number",
+        serde_yaml_ng::Value::String(_) => "a string",
+        serde_yaml_ng::Value::Sequence(_) => "a sequence",
+        serde_yaml_ng::Value::Mapping(_) => "a mapping",
+        serde_yaml_ng::Value::Tagged(_) => "a tagged value",
     }
 }
 
@@ -918,5 +918,34 @@ mod tests {
             MathMode::Off,
             "resolve() 折进了载体字段"
         );
+    }
+    #[test]
+    fn yaml_tags_are_unwrapped_and_non_string_keys_are_rejected() {
+        let dir = TestDir::new("tags");
+        let path = dir.0.join("config.yaml");
+
+        // tag 不携带配置语义：解包取它的值（这里解出来是字符串，根不是映射）
+        let err = parse_document("!!str 42", &path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("the document root must be a mapping, got a string"),
+            "{err}"
+        );
+
+        // YAML 允许 complex key；配置里一律报错，并报出实际类型
+        for (yaml, kind) in [
+            ("~: 1", "null"),
+            ("true: 1", "a boolean"),
+            ("[a, b]: 1", "a sequence"),
+            ("{a: b}: 1", "a mapping"),
+            ("!foo a: 1", "a tagged value"),
+        ] {
+            let err = parse_document(yaml, &path).unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("configuration keys must be strings") && message.contains(kind),
+                "{yaml}: {message}"
+            );
+        }
     }
 }

@@ -498,8 +498,8 @@ class TestStreamPerIndexAndErrors:
         assert finals["Bash"] == {"cmd": "ls"}
         assert finals["Read"] == {"path": "/a"}
         assert blocks is not None and len(blocks) == 2
-        assert blocks[0].input == {"cmd": "ls"}  # ty: ignore[unresolved-attribute]
-        assert blocks[1].input == {"path": "/a"}  # ty: ignore[unresolved-attribute]
+        assert blocks[0].input == {"cmd": "ls"}  # ty: ignore[missing-union-attribute]
+        assert blocks[1].input == {"path": "/a"}  # ty: ignore[missing-union-attribute]
 
     @pytest.mark.asyncio
     async def test_malformed_tool_input_sets_input_error_not_raises(self):
@@ -541,8 +541,8 @@ class TestStreamPerIndexAndErrors:
         assert final_tc.arguments_error is not None
         assert raw in final_tc.arguments_error
         assert blocks is not None and len(blocks) == 1
-        assert blocks[0].input == {}  # ty: ignore[unresolved-attribute]
-        assert blocks[0].input_error is not None  # ty: ignore[unresolved-attribute]
+        assert blocks[0].input == {}  # ty: ignore[missing-union-attribute]
+        assert blocks[0].input_error is not None  # ty: ignore[missing-union-attribute]
 
     @pytest.mark.asyncio
     async def test_stream_error_event_raises(self):
@@ -1001,11 +1001,11 @@ class TestOpenAICompat:
             "TextBlock",
             "ToolUseBlock",
         ]
-        assert blocks[0].thinking == "let me think"  # ty: ignore[unresolved-attribute]
-        assert blocks[0].signature is None  # ty: ignore[unresolved-attribute]
-        assert blocks[1].text == "hello world"  # ty: ignore[unresolved-attribute]
-        assert blocks[2].name == "Bash"  # ty: ignore[unresolved-attribute]
-        assert blocks[2].input == {"cmd": "ls"}  # ty: ignore[unresolved-attribute]
+        assert blocks[0].thinking == "let me think"  # ty: ignore[missing-union-attribute]
+        assert blocks[0].signature is None  # ty: ignore[missing-union-attribute]
+        assert blocks[1].text == "hello world"  # ty: ignore[missing-union-attribute]
+        assert blocks[2].name == "Bash"  # ty: ignore[missing-union-attribute]
+        assert blocks[2].input == {"cmd": "ls"}  # ty: ignore[missing-union-attribute]
 
     @pytest.mark.asyncio
     async def test_final_blocks_chunk_carries_zero_usage(self):

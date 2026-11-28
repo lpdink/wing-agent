@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from typing import Any
 from unittest.mock import patch
 
@@ -106,7 +106,7 @@ def _record_spawns(agent: Any, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
 
 
 @contextlib.contextmanager
-def _capture_loop_callback_errors() -> Iterator[list[dict[str, Any]]]:
+def _capture_loop_callback_errors() -> Generator[list[dict[str, Any]], None, None]:
     """捕获 event loop 的异常上下文（done callback 里漏出的异常经此上报）。"""
     loop = asyncio.get_running_loop()
     contexts: list[dict[str, Any]] = []

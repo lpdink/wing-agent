@@ -198,7 +198,8 @@ class TrackedList(Generic[T]):
                     item = item_type.model_validate(record)
             except Exception:
                 continue
-            tl._update_memory(item)
+            # 恢复路径把事件与消息混排进同一条链（T 在此退化为 ChainNode）
+            tl._update_memory(item)  # ty: ignore[invalid-argument-type]
 
         tl._data = tl.trace_chain()
 

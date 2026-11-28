@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from wing_probe.provider.server import FakeProvider
@@ -20,7 +20,7 @@ CREATED = 1_700_000_000
 
 
 @contextlib.asynccontextmanager
-async def running_provider() -> AsyncIterator[FakeProvider]:
+async def running_provider() -> AsyncGenerator[FakeProvider, None]:
     """起一个进程内假 Provider（端口由 OS 分配），退出时停掉。"""
     provider = FakeProvider()
     await provider.start()

@@ -61,8 +61,10 @@ wing-probe = { workspace = true }
 [dependency-groups]
 dev = [
     "ruff>=0.15.7",
-    "ty>=0.0.24",
+    "ty>=0.0.112",
     "vulture>=2.16",
+    # starlette 的 TestClient 从 1.10 起首选 httpx2（缺它就退回已弃用的 httpx 路径）
+    "httpx2>=2.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
@@ -139,3 +141,13 @@ show_missing = true
 # 覆盖率：Makefile 的 PATCH_COV_MIN + scripts/ci/patch_coverage.py。
 # precision 保留 1 位：报告/评论的展示口径，避免整数四舍五入掩盖 95.6 这样的值。
 precision = 1
+
+# 事件模型的字段收窄全部落在 event 包内：`type: Literal["x"]` 覆盖基类的 `str`
+# （30 处），以及 `uuid` / `session_id` 从 `str | None` 收窄成 `str`（5 处，生产代码
+# 经基类引用写入的值实际都是 str）。两类都是构造期定型的字段，收窄不构成可变覆盖
+# 的风险。代价：包内此后新增的事件不再受该规则保护 —— 新增可变字段要在这里之外复查。
+[[tool.ty.overrides]]
+include = ["libs/core/wing/event/**"]
+
+[tool.ty.overrides.rules]
+incompatible-mutable-override = "ignore"

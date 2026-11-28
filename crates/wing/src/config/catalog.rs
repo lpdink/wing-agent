@@ -796,7 +796,7 @@ fn emit_leaf(
             // 声明的标量拿到 list/map（手写文件的畸形值）：块输出，不静默丢数据。
             None => {
                 line(out, indent, &format!("{key}:"), false);
-                let rendered = serde_yaml::to_string(value).unwrap_or_default();
+                let rendered = serde_yaml_ng::to_string(value).unwrap_or_default();
                 for text in rendered.lines() {
                     line(out, indent + 2, text, false);
                 }
@@ -1842,7 +1842,7 @@ mod tests {
         // `Serialize` 的变体名（`Dark` / `Hidden` / `Off` / `Auto`）也读得回来——这是既有行为，
         // 也正是"文件里已经写下的值原样输出"能 round-trip 的原因。旧名 `wing` / `terminal`
         // 仍然可读（分别落到 `dark` / `auto`）。
-        let parse = |yaml: &str| -> AppConfig { serde_yaml::from_str(yaml).expect("yaml") };
+        let parse = |yaml: &str| -> AppConfig { serde_yaml_ng::from_str(yaml).expect("yaml") };
         assert_eq!(
             parse("colors:\n  preset: Dark\n").colors.preset,
             ColorPreset::Dark

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 
 import pytest
@@ -97,7 +97,7 @@ def gateway_app(
 @contextlib.contextmanager
 def _auth_gateway(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Iterator[TestClient]:
+) -> Generator[TestClient, None, None]:
     """开启鉴权（admin / tool_runtime 两把 key）的真网关。"""
     monkeypatch.setenv("WING_HOME", str(tmp_path))
     monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))

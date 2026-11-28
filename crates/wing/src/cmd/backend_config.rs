@@ -77,7 +77,7 @@ pub fn read_backend_gateway_config() -> BackendGatewayConfig {
     let path = wing_root().join("core").join("config.yaml");
 
     match std::fs::read_to_string(&path) {
-        Ok(content) => match serde_yaml::from_str::<BackendConfigFile>(&content) {
+        Ok(content) => match serde_yaml_ng::from_str::<BackendConfigFile>(&content) {
             Ok(cfg) => {
                 tracing::debug!(?path, host = %cfg.gateway.host, port = cfg.gateway.port,
                     "loaded gateway config from backend");
@@ -129,7 +129,7 @@ gateway:
   host: 0.0.0.0
   port: 9000
 "#;
-        let cfg: BackendConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let cfg: BackendConfigFile = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(cfg.gateway.host, "0.0.0.0");
         assert_eq!(cfg.gateway.port, 9000);
     }
@@ -142,7 +142,7 @@ openai:
   base_url: https://api.example.com
   api_key: sk-xxx
 "#;
-        let cfg: BackendConfigFile = serde_yaml::from_str(yaml).unwrap();
+        let cfg: BackendConfigFile = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(cfg.gateway.host, DEFAULT_HOST);
         assert_eq!(cfg.gateway.port, DEFAULT_PORT);
     }

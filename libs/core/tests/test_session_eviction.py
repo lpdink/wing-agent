@@ -201,7 +201,7 @@ class TestIdleEviction:
             raise RuntimeError("worker died")
 
         agent = session.agent
-        agent.shutdown = boom  # ty: ignore[invalid-assignment]
+        agent.shutdown = boom
         runtime.sm.evict(session.session_id, reason="test")
         await runtime.sm.wait_teardowns()
 

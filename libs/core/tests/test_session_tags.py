@@ -486,7 +486,7 @@ class TestCreateAndProjection:
         m = file_sm.set_session_tags(sid, remove=["a"])
         assert m.tags == []
 
-        raw = json.loads((session.store.root / sid / "metadata.json").read_text())  # ty: ignore[unresolved-attribute]
+        raw = json.loads((session.store.root / sid / "metadata.json").read_text())
         assert "tags" not in raw
 
     @pytest.mark.asyncio
@@ -510,7 +510,9 @@ class TestForkDoesNotInheritTags:
         seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
-        child, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
+        forked = file_sm.fork_session(source.session_id, last_uuid)
+        assert forked is not None
+        child, _ = forked
 
         assert child.tags == []
         assert source.tags == ["favorite", "task=x"]

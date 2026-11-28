@@ -413,4 +413,5 @@ class TestBackoffWindowResidueKnownLimitation:
         fresh.content_chunks.append("new attempt")
         acc.state = fresh
         blocks2 = provider.snapshot_blocks(acc)
+        assert blocks2 is not None
         assert blocks2[0].text == "new attempt"

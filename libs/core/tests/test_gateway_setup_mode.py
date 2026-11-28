@@ -11,7 +11,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import sys
-from collections.abc import Iterator
+from collections.abc import Generator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -114,7 +114,7 @@ def _server(text: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 @contextlib.contextmanager
-def _client(server, *, loopback: bool = True) -> Iterator[TestClient]:
+def _client(server, *, loopback: bool = True) -> Generator[TestClient, None, None]:
     """TestClient（lifespan 真跑）：``loopback=True`` 伪造 loopback 来源地址，
     ``False`` 用 TestClient 的默认来源（``testclient``，天然非 loopback）。"""
     if loopback:
@@ -169,7 +169,7 @@ class TestBootConfig:
         assert problem.path is None  # 文档级：定位不到单个字段
         with pytest.raises(yaml.YAMLError) as excinfo:
             yaml.safe_load(SYNTAX_ERROR_YAML)
-        expected_line = excinfo.value.problem_mark.line + 1  # ty: ignore[unresolved-attribute]
+        expected_line = excinfo.value.problem_mark.line + 1  # ty: ignore[missing-attribute]
         assert f"第 {expected_line} 行" in problem.message
 
     def test_boot_config_never_raises_and_keeps_the_loader_contract(

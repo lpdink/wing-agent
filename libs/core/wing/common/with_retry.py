@@ -2,12 +2,10 @@ import asyncio
 import inspect
 from collections.abc import AsyncIterator, Callable
 from functools import wraps
-from typing import ParamSpec, TypeVar
+from typing import Any
 
 from .logger import log
 
-P = ParamSpec("P")
-T = TypeVar("T")
 
 # 默认最大重试次数（config 未提供时兜底）。
 DEFAULT_MAX_RETRIES = 10
@@ -119,10 +117,12 @@ def with_retry(
     def decorator(func: Callable) -> Callable:
         fn_name = getattr(func, "__name__", repr(func))
         subject = label or fn_name
+        # 装饰器拿到的是裸 `Callable`，两个 wrapper 的签名在这里没有可保留的
+        # 精度：模块级 ParamSpec 只会让 ty 报 out-of-scope（见 #307 的依赖升级）。
         if inspect.iscoroutinefunction(func):
 
             @wraps(func)
-            async def wrapper(*args: P.args, **kwargs: P.kwargs) -> object:
+            async def wrapper(*args: Any, **kwargs: Any) -> object:
                 resolved_retries, resolved_max_delay = _resolve_retry_params(
                     args[0] if args else None, max_retries, max_delay
                 )
@@ -150,7 +150,8 @@ def with_retry(
 
         @wraps(func)
         async def async_gen_wrapper(
-            *args: P.args, **kwargs: P.kwargs
+            *args: Any,
+            **kwargs: Any,
         ) -> AsyncIterator[object]:
             resolved_retries, resolved_max_delay = _resolve_retry_params(
                 args[0] if args else None, max_retries, max_delay

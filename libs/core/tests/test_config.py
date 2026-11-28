@@ -115,20 +115,20 @@ class TestConfigModels:
         """重复 provider name 报错"""
         with pytest.raises(ValueError, match="duplicate provider name"):
             Config(
-                providers=[  # ty: ignore[invalid-argument-type]
+                providers=[
                     {"name": "x", "base_url": "http://a", "api_key": "k1"},
                     {"name": "x", "base_url": "http://b", "api_key": "k2"},
                 ],
-                agents=[{"name": "default", "model": "m"}],  # ty: ignore[invalid-argument-type]
+                agents=[{"name": "default", "model": "m"}],
             )
 
     def test_agent_provider_field_is_silently_ignored(self):
         """`agents[].provider` 已删除：继续写不报错、不生效（extra=ignore 契约）。"""
         config = Config(
-            providers=[  # ty: ignore[invalid-argument-type]
+            providers=[
                 {"name": "a", "base_url": "http://a", "api_key": "k", "models": ["m"]},
             ],
-            agents=[  # ty: ignore[invalid-argument-type]
+            agents=[
                 {"name": "default", "model": "m", "provider": "nonexistent"},
             ],
         )
