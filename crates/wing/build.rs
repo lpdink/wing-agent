@@ -5,8 +5,13 @@
 //!   WING_COMMIT_HASH  — short git SHA (e.g. "a1b2c3d")
 //!   WING_BUILD_TIME   — UTC timestamp  (e.g. "2025-01-15 10:30:00 UTC")
 //!   WING_TARGET       — target triple   (e.g. "aarch64-apple-darwin")
+//!
+//! commit 的三档来源与取舍在 [`build_meta`]（与 lib 侧测试共用同一份源码）。
 
-use std::path::PathBuf;
+#[path = "build_meta.rs"]
+mod build_meta;
+
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// `git rev-parse <arg>` 的路径结果（相对输出按当前目录解析——build script 的 cwd
@@ -55,38 +60,36 @@ fn watch_git_state() {
     }
 }
 
+/// 构建输入文件的位置：包根（`CARGO_MANIFEST_DIR`），不依赖 build script 的 cwd。
+fn commit_file() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(build_meta::COMMIT_FILE)
+}
+
+fn git_commit() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn main() {
     // ── Git commit hash ───────────────────────────────────────────
-    // CI passes the full SHA via env var (git may be unavailable in
-    // Docker containers such as manylinux_2_28).  Fall back to running
-    // `git rev-parse` for local builds.
-    let commit = std::env::var("WING_COMMIT_HASH")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| {
-            Command::new("git")
-                .args(["rev-parse", "--short", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| {
-                    if o.status.success() {
-                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| "unknown".to_string())
-        });
-
-    // Truncate to 7 chars to match `git rev-parse --short` behaviour.
-    let commit = if commit.len() > 7 {
-        commit[..7].to_string()
-    } else {
-        commit
-    };
+    let env = std::env::var("WING_COMMIT_HASH").ok();
+    let file = build_meta::read_commit_file(&commit_file());
+    let git = git_commit();
+    let commit = build_meta::resolve(env.as_deref(), git.as_deref(), file.as_deref());
 
     println!("cargo:rustc-env=WING_COMMIT_HASH={commit}");
     println!("cargo:rerun-if-env-changed=WING_COMMIT_HASH");
+    // 同 `watch_git_state`：缺失路径挂 `rerun-if-changed` 会让 cargo 每次判 dirty。
+    let commit_file = commit_file();
+    if commit_file.exists() {
+        println!("cargo:rerun-if-changed={}", commit_file.display());
+    }
     watch_git_state();
 
     // ── Build time (UTC) ──────────────────────────────────────────

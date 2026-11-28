@@ -496,5 +496,17 @@ libs/core/hatch_build.py（hatchling custom build hook，构建/安装时执行�
 - 生成文件缺失时 `wing/build_info.py` 返回 None，health 回落到发行包元数据。
 - commit 反映**上次安装/构建时**的 HEAD：改完代码要做集成测试前，重新安装并重启 gateway，`wing status` 才不会显示旧 commit。
   - `pip install libs/core`（in-tree 构建）会重跑钩子；uv workspace 里必须用 **`uv sync --reinstall-package wing-gateway`**——普通 `uv sync` 只看 `libs/core/pyproject.toml` 的 mtime 决定是否复用 editable 构建缓存，源码改了、提交了都不重跑钩子，生成文件停在上一次构建的 commit（实测）。
-- **两侧错配会被指出来**：CLI 自己的 commit 同样是构建期注入（`crates/wing/build.rs` → `WING_COMMIT_HASH`，无 git 的构建回落 `"unknown"`），`wing status` 在两侧都报出哈希且不相等时于 **stderr** 打一行 `Warning: CLI build … differs from gateway build …`（stdout 保持纯状态报告）。任一侧拿不到哈希——旧网关不返回 `commit`、无 git 构建——不构成错配，保持沉默。
+- **两侧错配会被指出来**：`wing status` 在两侧都报出哈希且不相等时于 **stderr** 打一行 `Warning: CLI build … differs from gateway build …`（stdout 保持纯状态报告）。任一侧拿不到哈希——旧网关不返回 `commit`、构建输入全断——不构成错配，保持沉默。
   - 比对口径是**构建注入的 commit**：同一 commit 上带未提交改动构建的两侧会被判为一致（构建不记录工作区状态）——这种情况 `wing status` 看不出来，得靠重装/重建的纪律。
+
+### CLI 侧：`crates/wing/build_meta.rs`（`build.rs` 与 lib 单测共用一份源码）
+
+三档来源，按**显式程度**排序：
+
+1. `WING_COMMIT_HASH` 环境变量（CI 注入）；
+2. 仓库的 `git rev-parse --short HEAD`（任何有 git 的构建）；
+3. `crates/wing/build_commit` 文件（一行 commit，gitignore）——发布 workflow 在构建前写入。
+
+第 3 档只为 manylinux 存在：maturin 的构建跑在 Docker 里，宿主 step 的 `env:` 不进容器、镜像也不带 git，另两条路会同时断——v0.7.0 的 Linux wheel 因此报 `wing 0.7.0 (unknown)`（`--version`、TUI 开屏身份行、build skew 检查都读这个常量）。文件档排在 git **之后**：一份陈旧残留不能让二进制永久报假 hash——它被 gitignore 藏着、`git status` 看不见，静默的假 hash 比 `unknown` 更危险。
+
+这条不变量**只能在发布流水线验证**（CI 不构建 wheel：manylinux 要容器）：PR 期由 `build_meta.rs` 的单测守三档顺序，发布期由 `scripts/ci/assert_wheel_commit.py` 在构建后跑真实产物——CLI wheel 的 `--version` 必须等于本次 HEAD 的 7 位、版本已注入，gateway wheel 的 `_build_info.py` 必须带 commit。
