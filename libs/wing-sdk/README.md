@@ -16,6 +16,7 @@ from wing_sdk import ToolHost
 
 host = ToolHost(client_id="my-host", gateway_url="http://127.0.0.1:32523")
 
+
 @host.tool(name="Bash")
 async def bash(command: str, timeout: int = 30) -> str:
     """Execute a shell command.
@@ -25,6 +26,7 @@ async def bash(command: str, timeout: int = 30) -> str:
         timeout: Maximum wait time in seconds.
     """
     ...  # 实现
+
 
 asyncio.run(host.run())
 ```

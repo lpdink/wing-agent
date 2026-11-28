@@ -14,7 +14,7 @@ import asyncio
 import inspect
 import tempfile
 import time
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -105,7 +105,7 @@ class ToolExecutor:
     @contextmanager
     def _measure_tool_execution(
         self, clocks: dict[str, _ToolExecutionClock], call_id: str, timeout: float
-    ) -> Iterator[None]:
+    ) -> Generator[None, None, None]:
         if clocks is not self._tool_clocks:
             yield
             return

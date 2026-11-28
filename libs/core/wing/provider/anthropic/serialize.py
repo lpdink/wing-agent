@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from wing.provider.base import mark_last_cache_control
 from wing.provider.media import (
@@ -43,7 +43,7 @@ class _SerializeMixin:
 
     _config: ProviderConfig
 
-    probe_part: Callable[[str, Any], "CachePart | None"]
+    probe_part: Callable[..., "CachePart | None"]
     """由 ``ModelProvider`` 提供（分段构造的永不抛边界，见 base）。"""
 
     def _serialize_messages(

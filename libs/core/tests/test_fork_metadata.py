@@ -70,7 +70,7 @@ class TestForkMetadata:
         seed_messages(source, "hello", "hi", "question")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
-        new_session, draft = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
+        new_session, draft = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[not-iterable]
         assert draft == "question"
 
         meta = source.store.load_metadata(new_session.session_id)
@@ -91,7 +91,7 @@ class TestForkMetadata:
         seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
-        new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
+        new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[not-iterable]
         new_sid = new_session.session_id
 
         # 模拟进程重启：同一 store 根目录，全新 SM 实例
@@ -116,7 +116,7 @@ class TestForkMetadata:
         seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
-        new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
+        new_session, _ = file_sm.fork_session(source.session_id, last_uuid)  # ty: ignore[not-iterable]
 
         # 首条消息走真实 `post`（停掉 worker：不跑 turn）：子会话生来已物化，
         # 标题与 last_interaction 必须在 `post` 里直接落盘（回归：物化闸门不得
@@ -141,14 +141,14 @@ class TestForkMetadata:
         uuids_before = [m.uuid for m in source.context_manager.get_context_window()]
         target = uuids_before[-1]
 
-        file_sm.fork_session(source.session_id, target)  # ty: ignore[invalid-argument-type]
+        file_sm.fork_session(source.session_id, target)
 
         uuids_after = [m.uuid for m in source.context_manager.get_context_window()]
         assert uuids_after == uuids_before
-        assert source.context_manager._messages.find(target) is not None  # ty: ignore[invalid-argument-type]
+        assert source.context_manager._messages.find(target) is not None
 
         # 二次 fork 仍可用原 uuid 定位
-        result = file_sm.fork_session(source.session_id, target)  # ty: ignore[invalid-argument-type]
+        result = file_sm.fork_session(source.session_id, target)
         assert result is not None
 
     @pytest.mark.asyncio
@@ -159,7 +159,7 @@ class TestForkMetadata:
         seed_messages(source, "hello", "hi")
 
         last_uuid = source.context_manager.get_context_window()[-1].uuid
-        new_session, _ = sm.fork_session(source.session_id, last_uuid)  # ty: ignore[invalid-argument-type, not-iterable]
+        new_session, _ = sm.fork_session(source.session_id, last_uuid)  # ty: ignore[not-iterable]
         assert new_session.store.name == "memory"
         assert len(new_session.context_manager.get_context_window()) == 1
 

@@ -1501,7 +1501,7 @@ class TestSystemModels:
                                 description="flagship",
                                 context_window_tokens=128_000,
                                 keep_recent_tokens=16_000,
-                                capabilities={"vision": True},  # ty: ignore[invalid-argument-type]
+                                capabilities={"vision": True},
                             ),
                         ),
                         ModelRef(
@@ -1607,7 +1607,7 @@ class TestModelsCatalogFromConfig:
                             display_name="DeepSeek-Flash",
                             context_window_tokens=1_000_000,
                             keep_recent_tokens=80_000,
-                            capabilities={"vision": True},  # ty: ignore[invalid-argument-type]
+                            capabilities={"vision": True},
                         ),
                         ModelSpec(id="ds-flash", name="sonnet", display_name="Sonnet"),
                     ],

@@ -534,7 +534,7 @@ class TestToolBindingIsolation:
         # 验证新 agent 的 bash 工具闭包绑定到新 agent 而非旧 agent
         bash_tool = new_agent._tools["Bash"]
         # wrapper 的 __kwdefaults__ 包含 _agent=self 的默认值
-        captured_agent = bash_tool.function.__kwdefaults__["_agent"]  # ty: ignore[unresolved-attribute]
+        captured_agent = bash_tool.function.__kwdefaults__["_agent"]  # ty: ignore[missing-attribute]
         assert id(captured_agent) == new_agent_id, (
             f"bash 工具仍绑定旧 agent ({old_agent_id})，应为新 agent ({new_agent_id})"
         )
@@ -569,7 +569,7 @@ class TestToolBindingIsolation:
 
         # 验证新 agent 的 bash 工具闭包绑定到新 agent
         bash_tool = new_agent._tools["Bash"]
-        captured_agent = bash_tool.function.__kwdefaults__["_agent"]  # ty: ignore[unresolved-attribute]
+        captured_agent = bash_tool.function.__kwdefaults__["_agent"]  # ty: ignore[missing-attribute]
         assert id(captured_agent) == new_agent_id, (
             f"bash 工具仍绑定旧 agent ({old_agent_id})，应为新 agent ({new_agent_id})"
         )

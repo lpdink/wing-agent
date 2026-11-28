@@ -32,7 +32,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Generator, Iterable, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -343,7 +343,7 @@ class Database:
     @contextmanager
     def transaction(
         self, *, busy_timeout_ms: int | None = None
-    ) -> Iterator[Transaction]:
+    ) -> Generator[Transaction, None, None]:
         """把 with 块里的一切放进一个 ``BEGIN IMMEDIATE`` 事务（全有或全无）。
 
         yield 的是事务句柄：``live=False`` 表示库不可用、或 ``BEGIN IMMEDIATE`` 没能

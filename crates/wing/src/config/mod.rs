@@ -728,7 +728,7 @@ mod tests {
     /// a comfortable margin over WCAG 4.5:1.
     #[test]
     fn test_light_preset_is_readable_on_white() {
-        let cfg: ColorsConfig = serde_yaml::from_str("preset: light\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("preset: light\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert_eq!(p.appearance, Appearance::Light);
         assert_eq!(p.syntax, SyntaxTheme::Light);
@@ -830,7 +830,7 @@ mod tests {
         );
         assert_eq!(cfg.resolved_preset(None), ColorPreset::Dark);
         // An explicit preset ignores the probe.
-        let cfg: ColorsConfig = serde_yaml::from_str("preset: light\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("preset: light\n").unwrap();
         assert_eq!(
             cfg.resolved_preset(Some(Appearance::Dark)),
             ColorPreset::Light
@@ -841,7 +841,7 @@ mod tests {
     /// parse (same policy as the rendering modes).
     #[test]
     fn test_unknown_preset_falls_back_to_auto() {
-        let cfg: AppConfig = serde_yaml::from_str("colors:\n  preset: neon\n").unwrap();
+        let cfg: AppConfig = serde_yaml_ng::from_str("colors:\n  preset: neon\n").unwrap();
         assert_eq!(cfg.colors.preset, ColorPreset::Auto);
     }
 
@@ -849,7 +849,8 @@ mod tests {
     /// preset.
     #[test]
     fn test_slot_override_sits_on_the_preset() {
-        let cfg: ColorsConfig = serde_yaml::from_str("accent: \"#ff00ff\"\ndim: gray\n").unwrap();
+        let cfg: ColorsConfig =
+            serde_yaml_ng::from_str("accent: \"#ff00ff\"\ndim: gray\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert_eq!(p.accent, Color::Rgb(255, 0, 255));
         assert_eq!(p.dim, Color::Gray);
@@ -869,7 +870,7 @@ mod tests {
             crate::config::catalog::DumpMode::Raw,
         );
         assert!(dumped.contains("preset: Dark"), "{dumped}");
-        let parsed: AppConfig = serde_yaml::from_str(&dumped).unwrap();
+        let parsed: AppConfig = serde_yaml_ng::from_str(&dumped).unwrap();
         assert_eq!(parsed.colors.preset, ColorPreset::Dark);
         assert_eq!(parsed.colors.accent.as_deref(), Some("#ff00ff"));
         assert_eq!(parsed.colors.dim, None);
@@ -880,7 +881,7 @@ mod tests {
     #[test]
     fn test_math_mode_reaches_the_palette() {
         let yaml = "rendering:\n  math: off\ncolors:\n  math: magenta\n";
-        let mut cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        let mut cfg: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
         cfg.resolve();
         let p = ThemePalette::from_config(&cfg.colors);
         assert_eq!(p.math_mode, MathMode::Off);
@@ -901,7 +902,7 @@ mod tests {
     #[test]
     fn test_math_mode_is_skipped_in_the_colors_section() {
         let yaml = "colors:\n  math_mode: off\n";
-        let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(cfg.colors.math_mode, MathMode::Text);
         let dumped = crate::config::catalog::dump_config_yaml(
             &serde_json::to_value(&cfg).unwrap(),
@@ -917,7 +918,7 @@ mod tests {
     #[test]
     fn test_legacy_config_without_preset_or_diff_tints() {
         let yaml = "colors:\n  accent: cyan\n  danger: red\n";
-        let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: AppConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(cfg.colors.preset, ColorPreset::Auto);
         let p = ThemePalette::from_config(&cfg.colors);
         assert_eq!(p.accent, Color::Cyan);
@@ -929,7 +930,7 @@ mod tests {
     /// own slot, and the derived values follow the slot they are derived from.
     #[test]
     fn test_markdown_role_slots_override_and_drive_their_derived_partner() {
-        let cfg: ColorsConfig = serde_yaml::from_str(
+        let cfg: ColorsConfig = serde_yaml_ng::from_str(
             "heading: \"#00ff00\"\ninline_code: yellow\nmarker: gray\nquote: \"#123456\"\n",
         )
         .unwrap();
@@ -942,7 +943,7 @@ mod tests {
         // override moves it with it (a named colour cannot be lifted, so it
         // stays the same value).
         assert_ne!(p.heading_bright, p.heading, "hex heading must be lifted");
-        let cfg: ColorsConfig = serde_yaml::from_str("heading: green\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("heading: green\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert_eq!(p.heading_bright, Color::Green);
     }
@@ -951,7 +952,7 @@ mod tests {
     /// does not brighten by itself), and it is never the body colour.
     #[test]
     fn test_strong_is_its_own_slot() {
-        let cfg: ColorsConfig = serde_yaml::from_str("strong: \"#00ff00\"\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("strong: \"#00ff00\"\n").unwrap();
         assert_eq!(
             ThemePalette::from_config(&cfg).strong,
             Color::Rgb(0, 255, 0)
@@ -979,7 +980,7 @@ mod tests {
         let dark = ThemePalette::default();
         assert!(luma(dark.heading_bright) > luma(dark.heading), "dark: lift");
 
-        let cfg: ColorsConfig = serde_yaml::from_str("preset: light\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("preset: light\n").unwrap();
         let light = ThemePalette::from_config(&cfg);
         assert!(
             luma(light.heading_bright) < luma(light.heading),
@@ -987,28 +988,28 @@ mod tests {
         );
 
         // Overriding only `text` stays on the same palette: H1 keeps its rung.
-        let cfg: ColorsConfig = serde_yaml::from_str("text: \"#202020\"\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("text: \"#202020\"\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert_eq!(p.appearance, Appearance::Dark);
         assert_eq!(p.heading_bright, dark.heading_bright);
 
         // A hex heading override is derived along the preset's direction.
-        let cfg: ColorsConfig = serde_yaml::from_str("heading: \"#808080\"\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("heading: \"#808080\"\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert!(luma(p.heading_bright) > luma(p.heading), "dark: lift");
         let cfg: ColorsConfig =
-            serde_yaml::from_str("preset: light\nheading: \"#808080\"\n").unwrap();
+            serde_yaml_ng::from_str("preset: light\nheading: \"#808080\"\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert!(luma(p.heading_bright) < luma(p.heading), "light: deepen");
 
         // A named heading cannot be stretched: the value stands.
-        let cfg: ColorsConfig = serde_yaml::from_str("heading: green\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("heading: green\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert_eq!(p.heading, Color::Green);
         assert_eq!(p.heading_bright, Color::Green);
 
         // An invalid value falls back to the preset slot, rung included.
-        let cfg: ColorsConfig = serde_yaml::from_str("heading: neon_pink\n").unwrap();
+        let cfg: ColorsConfig = serde_yaml_ng::from_str("heading: neon_pink\n").unwrap();
         let p = ThemePalette::from_config(&cfg);
         assert_eq!(p.heading, dark.heading);
         assert_eq!(p.heading_bright, dark.heading_bright);
@@ -1090,8 +1091,8 @@ mod tests {
     #[test]
     fn test_default_config_yaml_roundtrip() {
         let cfg = AppConfig::default();
-        let yaml = serde_yaml::to_string(&cfg).unwrap();
-        let parsed: AppConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml_ng::to_string(&cfg).unwrap();
+        let parsed: AppConfig = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(parsed.colors.preset, ColorPreset::Auto);
         assert_eq!(parsed.colors.accent, None);
         assert_eq!(parsed.layout.max_input_lines, 10);

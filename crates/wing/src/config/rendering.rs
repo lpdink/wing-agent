@@ -134,18 +134,18 @@ mod tests {
 
     #[test]
     fn math_mode_parses_both_values_and_falls_back() {
-        let cfg: RenderingConfig = serde_yaml::from_str("math: off\n").unwrap();
+        let cfg: RenderingConfig = serde_yaml_ng::from_str("math: off\n").unwrap();
         assert_eq!(cfg.math, MathMode::Off);
-        let cfg: RenderingConfig = serde_yaml::from_str("math: text\n").unwrap();
+        let cfg: RenderingConfig = serde_yaml_ng::from_str("math: text\n").unwrap();
         assert_eq!(cfg.math, MathMode::Text);
         // `--dump-config` writes the variant name; it must round-trip.
-        let cfg: RenderingConfig = serde_yaml::from_str("math: Off\n").unwrap();
+        let cfg: RenderingConfig = serde_yaml_ng::from_str("math: Off\n").unwrap();
         assert_eq!(cfg.math, MathMode::Off);
         // Unknown value warns and keeps the default (never fails the parse).
-        let cfg: RenderingConfig = serde_yaml::from_str("math: katex\n").unwrap();
+        let cfg: RenderingConfig = serde_yaml_ng::from_str("math: katex\n").unwrap();
         assert_eq!(cfg.math, MathMode::Text);
         // Absent key keeps the default.
-        let cfg: RenderingConfig = serde_yaml::from_str("thinking: hidden\n").unwrap();
+        let cfg: RenderingConfig = serde_yaml_ng::from_str("thinking: hidden\n").unwrap();
         assert_eq!(cfg.math, MathMode::Text);
         assert_eq!(cfg.thinking, ThinkingMode::Hidden);
     }
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn the_images_mode_parses_both_names_and_falls_back_to_auto() {
         let parse = |value: &str| -> ImagesMode {
-            serde_yaml::from_str::<RenderingConfig>(&format!("images: {value}"))
+            serde_yaml_ng::from_str::<RenderingConfig>(&format!("images: {value}"))
                 .expect("rendering config")
                 .images
         };
@@ -188,9 +188,9 @@ mod tests {
                         math,
                         images,
                     };
-                    let dumped = serde_yaml::to_string(&config).expect("dump");
+                    let dumped = serde_yaml_ng::to_string(&config).expect("dump");
                     let parsed: RenderingConfig =
-                        serde_yaml::from_str(&dumped).expect("parse back");
+                        serde_yaml_ng::from_str(&dumped).expect("parse back");
                     assert_eq!(parsed.thinking, thinking, "thinking round-trip: {dumped}");
                     assert_eq!(parsed.math, math, "math round-trip: {dumped}");
                     assert_eq!(parsed.images, images, "images round-trip: {dumped}");
@@ -199,7 +199,7 @@ mod tests {
         }
         // The dump really spells the variant names (not the lowercase input
         // form) — that is what makes the round-trip test above meaningful.
-        let dumped = serde_yaml::to_string(&RenderingConfig {
+        let dumped = serde_yaml_ng::to_string(&RenderingConfig {
             thinking: ThinkingMode::Hidden,
             math: MathMode::Off,
             images: ImagesMode::Off,
@@ -224,7 +224,7 @@ mod tests {
     #[test]
     fn an_absent_key_is_auto() {
         let config: RenderingConfig =
-            serde_yaml::from_str("thinking: hidden").expect("rendering config");
+            serde_yaml_ng::from_str("thinking: hidden").expect("rendering config");
         assert_eq!(config.images, ImagesMode::Auto);
         assert_eq!(config.thinking, ThinkingMode::Hidden);
     }

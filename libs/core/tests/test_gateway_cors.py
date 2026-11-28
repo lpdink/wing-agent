@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 
 import pytest
@@ -59,7 +59,7 @@ def _gateway(
     auth_enabled: bool = False,
     config_text: str | None = None,
     host: str | None = None,
-) -> Iterator[TestClient]:
+) -> Generator[TestClient, None, None]:
     monkeypatch.setenv("WING_HOME", str(tmp_path))
     monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))
     text = config_text or VALID_YAML

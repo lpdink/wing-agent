@@ -11,7 +11,7 @@ import contextlib
 import json
 import struct
 import time
-from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Generator, Sequence
 from datetime import date, datetime, time as day_time
 from pathlib import Path
 from typing import Any
@@ -228,7 +228,7 @@ def gateway_auth_config(
 
 
 @contextlib.contextmanager
-def gateway_server(tmp_path: Path, monkeypatch: Any) -> Iterator[Any]:
+def gateway_server(tmp_path: Path, monkeypatch: Any) -> Generator[Any, None, None]:
     """独立 sessions 根 + 真实 `WingRuntime` 的 `GatewayServer`（`load_config` 打替身）。
 
     鉴权关闭；其余配置字段保持 `MagicMock` 的宽容行为。不起 uvicorn——调用方自己套

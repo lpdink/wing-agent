@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -90,7 +90,7 @@ def create_app(server: GatewayServer) -> FastAPI:
     """
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         """进程生命周期钩子：启停后台周期任务（uvicorn 自动调用）。
 
         不启 lifespan（如无上下文的 TestClient）时后台任务完全不跑——

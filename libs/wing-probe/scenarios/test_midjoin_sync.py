@@ -26,7 +26,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -43,7 +43,7 @@ IDLE_MODEL = "probe/midjoin-idle"
 
 
 @asynccontextmanager
-async def midjoin(probe: Probe, session_id: str) -> AsyncIterator[Event]:
+async def midjoin(probe: Probe, session_id: str) -> AsyncGenerator[Event, None]:
     """第二个 client 中途订阅，产出它收到的 ``sync_session`` 事件。
 
     独立于场景 driver 的新连接（新 ``client_id``）——这才是"中途加入"的形态：

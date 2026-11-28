@@ -2,11 +2,10 @@ import asyncio
 import inspect
 from collections.abc import AsyncIterator, Callable
 from functools import wraps
-from typing import ParamSpec, TypeVar
+from typing import Any, TypeVar
 
 from .logger import log
 
-P = ParamSpec("P")
 T = TypeVar("T")
 
 # 默认最大重试次数（config 未提供时兜底）。
@@ -122,7 +121,7 @@ def with_retry(
         if inspect.iscoroutinefunction(func):
 
             @wraps(func)
-            async def wrapper(*args: P.args, **kwargs: P.kwargs) -> object:
+            async def wrapper(*args: Any, **kwargs: Any) -> object:
                 resolved_retries, resolved_max_delay = _resolve_retry_params(
                     args[0] if args else None, max_retries, max_delay
                 )
@@ -150,7 +149,8 @@ def with_retry(
 
         @wraps(func)
         async def async_gen_wrapper(
-            *args: P.args, **kwargs: P.kwargs
+            *args: Any,
+            **kwargs: Any,
         ) -> AsyncIterator[object]:
             resolved_retries, resolved_max_delay = _resolve_retry_params(
                 args[0] if args else None, max_retries, max_delay

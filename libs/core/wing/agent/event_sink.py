@@ -26,7 +26,7 @@ run_turn / worker 循环（见 #187）。窗口把「报告动作不得失败」
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator
 from typing import TYPE_CHECKING
 
 from wing.common.logger import log
@@ -108,7 +108,7 @@ class AgentEventSink:
         self._best_effort = False
 
     @contextlib.contextmanager
-    def best_effort(self) -> Iterator[None]:
+    def best_effort(self) -> Generator[None, None, None]:
         """上报窗口：窗口内的发射失败降级为日志，绝不抛出（#187）。
 
         兜底 handler 的收尾（`turn_result` / `error` / `done`）依赖落盘，而

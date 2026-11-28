@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -63,7 +63,7 @@ def _gateway(
     auth_enabled: bool = False,
     keys: list[ApiKeyEntry] | None = None,
     text: str = VALID_YAML,
-) -> Iterator[tuple[TestClient, Path, object]]:
+) -> Generator[tuple[TestClient, Path, object], None, None]:
     """真实 runtime + tmp WING_HOME + TestClient（照 test_gateway_http 的既有模式）。"""
     monkeypatch.setenv("WING_HOME", str(tmp_path))
     monkeypatch.setenv("WING_SESSIONS_PATH", str(tmp_path / "sessions"))

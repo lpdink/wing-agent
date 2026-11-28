@@ -139,3 +139,9 @@ show_missing = true
 # 覆盖率：Makefile 的 PATCH_COV_MIN + scripts/ci/patch_coverage.py。
 # precision 保留 1 位：报告/评论的展示口径，避免整数四舍五入掩盖 95.6 这样的值。
 precision = 1
+
+[tool.ty.rules]
+# Pydantic 的 discriminated union 写法：子类把 `type` 从 `str` 收窄成
+# `Literal["x"]`。写入面确实变窄了，但该类字段只在构造时赋值、从不经父类注解
+# 改写 —— ty 的可变覆盖规则在这里是假阳性（35 处，全是同一个模式）。
+incompatible-mutable-override = "ignore"

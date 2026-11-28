@@ -189,7 +189,7 @@ def _openai_stream_provider(chunks: list[dict]) -> OpenAICompatProvider:
     """只装配 `_generate_stream` 需要的属性（不走 __init__：无 config / http）。"""
     provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
     provider.timeout_first_chunk = 30.0
-    provider._client = _FakeStreamClient(openai_sse(chunks))
+    provider._client = _FakeStreamClient(openai_sse(chunks))  # ty: ignore[invalid-assignment]
     return provider
 
 

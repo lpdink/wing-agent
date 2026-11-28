@@ -257,7 +257,7 @@ class TestCatalogValidation:
         config = Config(
             providers=[_provider("a", models=["m"])],
             agents=[
-                AgentConfig(name="default", model="m", provider="ghost")  # ty: ignore[unknown-argument]
+                AgentConfig(name="default", model="m", provider="ghost")  # ty: ignore[pydantic-discarded-extra-argument]
             ],
         )
         assert config.agents[0].model == "m"

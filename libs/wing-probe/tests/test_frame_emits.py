@@ -535,7 +535,7 @@ async def test_frame_emits_is_a_read_only_snapshot() -> None:
     assert isinstance(snapshot, tuple)
     assert len(snapshot) == payload_count(Turn.of(text="ab"))
     with pytest.raises(AttributeError):
-        snapshot.clear()  # ty: ignore[unresolved-attribute]
+        snapshot.clear()  # ty: ignore[missing-attribute]
 
     assert len(provider.frame_emits) == len(snapshot)
 

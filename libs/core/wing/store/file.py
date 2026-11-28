@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Collection
-from typing import Any, BinaryIO, Iterator
+from typing import Any, BinaryIO, Generator, Iterator
 
 from wing.common.fs import atomic_write_bytes, atomic_write_json
 from wing.common.logger import log
@@ -681,7 +681,7 @@ class FileSessionStore(SessionStore):
         return real if real is not None and is_valid_session_id(real) else None
 
     @contextmanager
-    def index_batch(self) -> Iterator[None]:
+    def index_batch(self) -> Generator[None, None, None]:
         """归档索引的批量写窗口（见基类契约）：块内攒、块尾一次落盘。
 
         嵌套调用不改变语义（外层窗口兜底）。块尾**不重建**索引：重建要读 N 份

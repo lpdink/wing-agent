@@ -172,7 +172,9 @@ class TestCompact:
         cm._messages.append_detached(compact_node)
         for msg in relink_tail:
             cm._messages.append_detached(msg)
-        cm._messages.set_tip(relink_tail[-1].uuid)
+        tail_uuid = relink_tail[-1].uuid
+        assert tail_uuid is not None
+        cm._messages.set_tip(tail_uuid)
 
         entries = _read_history(tmp_dir / "test-session")
         assert len(entries) == 7  # 原始 4 + compact + 2 relink

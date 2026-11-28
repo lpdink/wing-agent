@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Iterator
+from typing import Any, Generator, Iterator, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from wing.store.models import (
@@ -263,7 +263,7 @@ class SessionStore(ABC):
         return self.exists(session_id)
 
     @contextmanager
-    def index_batch(self) -> Iterator[None]:
+    def index_batch(self) -> Generator[None, None, None]:
         """归档索引的批量写窗口（批量 sweep 专用；默认 no-op）。
 
         块内每次归档 / 恢复**照常即时落目录**（rename 的原子性不变），索引

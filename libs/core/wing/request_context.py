@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-from collections.abc import Iterator
+from collections.abc import Generator
 from dataclasses import dataclass, replace
 
 
@@ -71,7 +71,7 @@ def get_request_context() -> RequestContext:
 
 
 @contextlib.contextmanager
-def session_context(session_id: str) -> Iterator[None]:
+def session_context(session_id: str) -> Generator[None, None, None]:
     """在**当前** RequestContext 上绑定 ``session_id``（保留 request_id 等）。
 
     供「已知自己在为哪个 session 工作、但入站协程未设过上下文」的路径使用：
