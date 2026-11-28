@@ -303,7 +303,6 @@ crates/wing/src/
 - `libs/wing-probe/` — 确定性集成测试基础设施（假 Provider + driver + observer 断言库）：`wing_probe/`（env / provider / driver / watch / history / files / toolhost）、`scenarios/`（整机断言场景）、`tests/`（基础设施自测）。**禁止 import `wing`**（AST 门禁强制；允许 `wing_sdk`），一切经公开 HTTP / WS 协议 → [docs/dev/probe-testing.md](docs/dev/probe-testing.md)。
 - `scripts/perf/` — PR 级性能回归测量（merge-base 交错 A/B：criterion 子集 / TUI 显示延迟 / gateway socket 套件 → sticky comment；`.github/workflows/perf.yml` 在 PR 上跑并评论，纯报告不做门禁）→ [docs/dev/perf-testing.md](docs/dev/perf-testing.md)。
 - `scripts/capacity/` — 容量测量（手工、不进 CI）：N 个并发会话的阶梯扫描 + 网关侧 CPU / RSS / fd / 投递延迟采样，产出 `run.json` + `report.md`；五种负载形态（纯流式 / 工具循环 / 空转 / 水合 / 混合）与四态判据在工具内 → [docs/dev/capacity.md](docs/dev/capacity.md)。
-- `extensions/vscode/` — VSCode 前端（编辑器内的接入面，与 `wing` 二进制的四种形态并列；TS strict + pnpm 单包四层：`src/core` 网关能力层 / `src/host` 扩展宿主 / `src/webview` React 渲染 / `src/shared` 两侧契约）。层门禁由机制强制：分 tsconfig（DOM/node 隔离）+ ESLint 分区规则 + `tests/layers` 守门测试；`make check`/`make test` 含 `check-ts`/`test-ts`，CI 有 `typescript-check` job → [docs/dev/vscode-extension.md](docs/dev/vscode-extension.md) · [extensions/vscode/README.md](extensions/vscode/README.md)。
 - 测试目录：`libs/core/tests/`（后端 pytest，130+ 个测试文件 + `conftest.py`（fixture）+ `_support.py`（跨文件 helper））、`libs/wing-sdk/tests/`。
 - 顶层 `docs/dev/` 为开发者深度文档（中文），`scripts/sync_version.py` 同步版本号。
 
@@ -330,7 +329,6 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/tui-rendering.md`](docs/dev/tui-rendering.md) | TUI markdown 渲染：`render_probe` 调试入口、Content/Thinking 两个 profile 的差异、公式（`$…$` / `$$…$$` / AMS 环境）渲染与定界符归一化、流式静息态 == 参考渲染的不变量、已知边界、图片锚点的行数纯函数与路径策略 |
 | [`docs/dev/tui-theming.md`](docs/dev/tui-theming.md) | TUI 明暗主题：`colors.preset` 三值（auto/dark/light）、显式 `appearance`、light 调色板与 WCAG 判据、OSC 11 探测与降级、浅色下各渲染面的处置（toast/选中行/品牌图形/语法主题） |
 | [`docs/dev/tui-images.md`](docs/dev/tui-images.md) | TUI 图片能力：两档阶梯（可渲染 / 标签）、探测与配置、三态、资源上限与压力验证、**新鲜度**（重写同一路径 ≤1s 换图）、**用户消息里的图**（媒体对象：形状来自引用、按视口抓字节、字节 LRU、失败即状态）、失效触发点、遮挡与选择、性能数字、真机验收清单、症状→先看哪里 |
-| [`docs/dev/vscode-extension.md`](docs/dev/vscode-extension.md) | VSCode 扩展（`extensions/vscode/`）：四层分层与数据流、桥协议与归约（重放==直播 / 单 WS 多订阅）、会话时序与多 Tab、连接自愈、构建门禁 / smoke / 打包与验收 |
 | [`docs/dev/wake.md`](docs/dev/wake.md) | 会话唤醒：语义表（收口/提问/失败/归档联动）、`done` 的静息判据与「押住」（不投递不扣配额）、时间语义与重启后的错过补偿、内置信封逐字形状、HTTP / CLI、后端包结构与已知边界 |
 | [`docs/dev/session-lineage.md`](docs/dev/session-lineage.md) | 会话血缘：父子关联字段语义、采集机制（CLI / TUI / 外部前端）、树序与 pin 规则的产品语义参照点 |
 | [`docs/dev/tui-input.md`](docs/dev/tui-input.md) | TUI 输入通道：鼠标上报的 DECSET 配对与生命周期对称、滚轮 / 键盘 / 选择的路由（新增鼠标能力前先读） |
@@ -340,7 +338,7 @@ AGENTS.md 保持高信息密度总览；机制级细节去 `docs/dev/`（中文�
 | [`docs/dev/probe-testing.md`](docs/dev/probe-testing.md) | 确定性集成测试（wing-probe）：跑法 / 新增断言场景（写代码、不写配置）/ 观测与断言原语速查 / 上下文红线清单与 persist 口径 / 逃生舱约定 / 停机两路径（快 `stop()` vs 优雅 `shutdown()`） |
 | [`docs/dev/perf-testing.md`](docs/dev/perf-testing.md) | PR 级性能回归测量（perf-ci）：方法论（merge-base 交错 A/B / 三层测量）、四个套件与指标表、本地跑法与产物、加套件/指标/bench 的约定、阈值与校准口径（初始值与依据）、CI 行为与局限、排查手册 |
 | [`docs/dev/capacity.md`](docs/dev/capacity.md) | 容量与并发上限：口径（事件/唤醒/轮次三种成本）、三道结构墙（连接池 100 / fd / 单核）、速度轴阶梯与 1000 会话的可持续包络、内存与轮次两轴、过载崩塌的机制、复现命令与已知缺口 |
-| [`docs/dev/test-speed.md`](docs/dev/test-speed.md) | 测试回环的成本结构：四组的并行度旋钮（独占 / 共享档）、各组时间花在哪（probe 的网关启动、python 的真实等待、rust 的份额分线程、ts 的 jsdom）、改测试时的判据、`scripts/bench_tests.py` 的交错 A/B 与负载门禁 |
+| [`docs/dev/test-speed.md`](docs/dev/test-speed.md) | 测试回环的成本结构：三组的并行度旋钮（独占 / 共享档）、各组时间花在哪（probe 的网关启动、python 的真实等待、rust 的份额分线程）、改测试时的判据、`scripts/bench_tests.py` 的交错 A/B 与负载门禁 |
 | [`docs/dev/welcome-mascot.md`](docs/dev/welcome-mascot.md) | 开屏海鸥：字母网格帧数据与品牌调色板、待机/干活两姿态与动作族、可见性门控的重绘成本契约、改画与预览的创作期工作流 |
 
 事实来源优先级：**代码 > docs/dev > AGENTS.md 概述**。若发现不一致，以代码为准并欢迎修正文档。
@@ -360,9 +358,9 @@ cargo test
 make check-rust                   # cargo fmt --check + clippy
 
 # All
-make test                         # 只跑测试：Python + Rust + TS + probe（四组并行，共享档见 docs/dev/test-speed.md）
+make test                         # 只跑测试：Python + Rust + probe（三组并行，共享档见 docs/dev/test-speed.md）
 make test-probe                   # 确定性集成场景（wing-probe，离线、无外部 API key）
-make check                        # 只跑静态检查：Python + Rust + TS（含 extensions/vscode 门禁）
+make check                        # 只跑静态检查：Python + Rust
 make fmt                          # 格式化全部
 ```
 

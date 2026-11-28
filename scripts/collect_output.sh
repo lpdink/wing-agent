@@ -20,12 +20,12 @@ cd "$ROOT" || exit 2
 
 case "$MODE" in
   test)
-    LABELS=("python" "probe" "rust" "ts")
-    CMDS=("make test-python" "make test-probe" "make test-rust" "make test-ts")
+    LABELS=("python" "probe" "rust")
+    CMDS=("make test-python" "make test-probe" "make test-rust")
     ;;
   check)
-    LABELS=("python" "rust" "ts")
-    CMDS=("make check-python" "make check-rust" "make check-ts")
+    LABELS=("python" "rust")
+    CMDS=("make check-python" "make check-rust")
     ;;
   --budget)
     # 只回答"这一处算出来的份额是多少"，见下面的 `--budget` 出口。
@@ -37,24 +37,6 @@ case "$MODE" in
     exit 2
     ;;
 esac
-
-# SKIP_TS=1：本地逃生舱，ts 组不跑。这里把它从组列表里摘掉，
-# 并在结论块里显式标注「已跳过」——否则「没跑」会被读成「跑了且过了」。
-# CI 不设这个变量，门禁照旧强制。
-SKIP_TS="${SKIP_TS:-}"
-TS_SKIPPED=0
-if [ -n "$SKIP_TS" ] && [ "$SKIP_TS" != "0" ]; then
-  TS_SKIPPED=1
-  KEPT_LABELS=()
-  KEPT_CMDS=()
-  for i in "${!LABELS[@]}"; do
-    [ "${LABELS[$i]}" = "ts" ] && continue
-    KEPT_LABELS+=("${LABELS[$i]}")
-    KEPT_CMDS+=("${CMDS[$i]}")
-  done
-  LABELS=(${KEPT_LABELS[@]+"${KEPT_LABELS[@]}"})
-  CMDS=(${KEPT_CMDS[@]+"${KEPT_CMDS[@]}"})
-fi
 
 TMP_BASE="${TMPDIR:-/tmp}"
 # 日志目录按 checkout 分开：一台机器上并行开几个 worktree 是常态（见 AGENTS.md
@@ -83,13 +65,14 @@ SERIAL="${WING_TEST_SERIAL:-0}"
 rm -f "$LOG_DIR"/*.code "$LOG_DIR"/*.dur "$LOG_DIR"/*.ms
 
 # ── 编队预算（唯一的定义处）────────────────────────────────────
-# 四组并行 ⇒ 每组都不独占整机。各自按"我独占"配并行度会把机器压到 2~3 倍超订，
-# **每一组都变慢**（本机 12 核实测：默认 30.5s，后三组各收到 1/3 核数后 26.0s）。
+# 三组并行 ⇒ 每组都不独占整机。各自按"我独占"配并行度会把机器压到两倍以上超订
+# （12 核上约 3×，量法见 docs/dev/test-speed.md §4），**每一组都变慢**。
 # 所以这里把份额算成**数值**发给各组（`WING_TEST_BUDGET_*`），各组只消费、不再各算一遍
-# ——同一条公式写三遍必然会分叉。probe 不在这里收：它是延迟受限而不是算力受限，
+# ——同一条公式各自再写一份必然分叉。probe 不在这里收：它是延迟受限而不是算力受限，
 # 少给 worker 只会让它更慢（见 docs/dev/test-speed.md §1）。
 # 不设这些变量时（单独跑一组）各组按独占配——一个人跑 `make test-rust` 应该拿满机器。
 # 串行模式（WING_TEST_SERIAL=1）也不设：那时每组本来就独占。
+# 除数 3 是调参常数（不是组数）：probe 不领份额、`check` 模式只有两组，两边都不按组数均分。
 CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 SHARE=$(( CORES / 3 ))
 [ "$SHARE" -gt 4 ] && SHARE=4
@@ -97,7 +80,6 @@ SHARE=$(( CORES / 3 ))
 if [ "$SERIAL" != "1" ]; then
   export WING_TEST_BUDGET_PYTEST=$SHARE
   export WING_TEST_BUDGET_RUST=$SHARE
-  export WING_TEST_BUDGET_TS=$SHARE
 fi
 
 # `--budget`：把这一处算出来的份额打出来就退出（供 `scripts/bench_tests.py --selftest`
@@ -246,9 +228,6 @@ for i in "${!LABELS[@]}"; do
   fi
   printf '  %s %-6s %4ss  %s%s\n' "$icon" "$label" "${DURS[$i]}" "$stat" "$note"
 done
-if [ "$TS_SKIPPED" -eq 1 ]; then
-  printf '  ⏭️  %-6s  —     TypeScript 组已按 SKIP_TS=%s 跳过（CI 不设该变量：那边照旧强制）\n' "ts" "$SKIP_TS"
-fi
 
 # 机器读的报告（可选）：逐组的**毫秒**耗时 + 退出码 + 统计行。
 # 消费者只有一个——scripts/bench_tests.py（提速的前后对比），而它只读这几项；

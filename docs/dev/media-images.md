@@ -389,9 +389,9 @@ providers:
   "truncated or corrupt"。其私有字节序刻意不解析（无可验证的规范来源）。
 - 远程工具（`wing-sdk` / `tool_host.rs`）返回图片、**全局**媒体池端点（`GET /api/media/{id}`——
   会话私有媒体已由 `GET /api/session/media` 提供，见「用户贴图」）不在本期。TUI 侧的用户图渲染
-  已交付（见「TUI 里的用户图」一节与 [tui-images.md](tui-images.md)）；**VSCode 的 webview 渲染**
-  仍未做，`tool_call_result.tool_media` / tool 消息里的 `media`（ReadImage 的结果）也还没进
-  TUI 图块——两处都只差「同一套锚点接到另一张卡片上」。
+  已交付（见「TUI 里的用户图」一节与 [tui-images.md](tui-images.md)）；
+  `tool_call_result.tool_media` / tool 消息里的 `media`（ReadImage 的结果）也还没进 TUI 图块
+  ——只差「同一套锚点接到另一张卡片上」。
 - **上传 body 没有服务级大小上限**：两个上传端点（媒体 / 文件）都自己做了两道前置（会话存在性 →
   `Content-Length` 预检）——声明超限的请求在收包**之前**就 400，幽灵会话也先 404；但**没有声明 /
   声明说谎**的 body 仍会先被 `await request.body()` 整包收进内存，`≤ images.max_bytes`（/ 文件端点的

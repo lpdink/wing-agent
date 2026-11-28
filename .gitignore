@@ -12,11 +12,6 @@ build/
 .pytest_cache
 openspec
 
-# Node / TypeScript (extensions/vscode)
-node_modules/
-extensions/vscode/out/
-extensions/vscode/*.vsix
-
 # Rust
 target/
 # 构建输入（CI 写入的 commit，见 crates/wing/build.rs）
@@ -24,10 +19,6 @@ crates/wing/build_commit
 
 # IDE
 .idea/
-.vscode/
-# …except the extension's dev config: the F5 launch/task definitions are part of the
-# deliverable (see extensions/vscode/README.md), so they must be committed.
-!extensions/vscode/.vscode/
 *.swp
 *.swo
 
