@@ -780,9 +780,7 @@ impl App {
         // the screen goes through the wire pass — see [`crate::ui::emoji_width`].
         crate::tui::draw_frame(terminal, |frame| {
             let area = frame.area();
-            let (main, sidebar_area) = self
-                .session_sidebar
-                .layout(area, layout.session_sidebar.side);
+            let (main, sidebar_area) = self.session_sidebar.layout(area, layout.session_sidebar);
             self.geometry.record_area(area, main);
 
             // A selection is anchored to *content* coordinates, which only
@@ -1055,7 +1053,7 @@ impl App {
             // 一次，编码与句柄在那里作废。
             let mut masks: Vec<Rect> = toast_area.into_iter().collect();
             masks.extend(settings_card);
-            if !self.selection.is_press_active() {
+            if !self.selection.is_press_active() && !self.session_sidebar.is_resizing() {
                 self.images
                     .paint(recorded, clip, &masks, frame.buffer_mut());
             }
@@ -1482,6 +1480,7 @@ pub async fn run_app(
                     }
                     TermEvent::Resize(_, _) => {
                         app.session_sidebar.cancel_press();
+                        app.session_sidebar.cancel_resize();
                         // ratatui auto-resizes its buffers on the next draw;
                         // force a full repaint so the resized screen is fully
                         // resynced with the terminal.
@@ -1496,6 +1495,7 @@ pub async fn run_app(
                         // behind.
                         if !focused {
                             app.session_sidebar.cancel_press();
+                            app.session_sidebar.cancel_resize();
                             app.cancel_selection();
                         }
                         // On focus regain, restore the correct title.

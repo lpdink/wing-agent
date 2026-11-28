@@ -1,10 +1,33 @@
 //! Session list facts shared by the TUI session picker and sidebar.
 
+use chrono::NaiveDate;
 use wing_api_client::models::SessionInfo;
 
 use crate::protocol::SessionStatus;
 use crate::shared::pinning::{is_pinned, pin_added_at};
 use crate::shared::session_tree::{Forest, TreeRow};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionAge {
+    Recent,
+    Yesterday,
+    Week,
+    Older,
+}
+
+impl SessionAge {
+    pub(crate) fn at_date(activity: Option<NaiveDate>, today: NaiveDate) -> Self {
+        let Some(date) = activity else {
+            return Self::Older;
+        };
+        match today.signed_duration_since(date).num_days() {
+            ..=0 => Self::Recent,
+            1 => Self::Yesterday,
+            2..=7 => Self::Week,
+            _ => Self::Older,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionCandidate {
@@ -60,4 +83,26 @@ pub fn session_forest(candidates: &[SessionCandidate]) -> Forest<'_> {
         })
         .collect();
     Forest::build(&rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_buckets_use_calendar_days_across_a_year_boundary() {
+        let today = NaiveDate::from_ymd_opt(2027, 1, 2).unwrap();
+        for (stamp, expected) in [
+            ("2027-01-03", SessionAge::Recent),
+            ("2027-01-02", SessionAge::Recent),
+            ("2027-01-01", SessionAge::Yesterday),
+            ("2026-12-31", SessionAge::Week),
+            ("2026-12-26", SessionAge::Week),
+            ("2026-12-25", SessionAge::Older),
+        ] {
+            let activity = NaiveDate::parse_from_str(stamp, "%Y-%m-%d").unwrap();
+            assert_eq!(SessionAge::at_date(Some(activity), today), expected);
+        }
+        assert_eq!(SessionAge::at_date(None, today), SessionAge::Older);
+    }
 }

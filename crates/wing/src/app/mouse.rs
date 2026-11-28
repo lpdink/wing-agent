@@ -154,6 +154,9 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                if self.session_sidebar.is_resizing() {
+                    return MouseOutcome::Ignored;
+                }
                 self.session_sidebar.cancel_press();
                 let down = mouse.kind == MouseEventKind::ScrollDown;
                 if self.sidebar_contains(mouse.column, mouse.row) {
@@ -176,6 +179,9 @@ impl App {
             MouseEventKind::Moved => self.hover_scrollbar(mouse.column, mouse.row),
             MouseEventKind::Down(MouseButton::Left) => self.mouse_press(mouse.column, mouse.row),
             MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(outcome) = self.resize_sidebar_to(mouse.column) {
+                    return outcome;
+                }
                 self.session_sidebar.cancel_press();
                 // An in-flight bar drag owns the motion; everything else is
                 // the selection's flood — a drag, so coalesced by the gate.
@@ -208,6 +214,7 @@ impl App {
     /// "nothing to see" verdict.
     fn mouse_press(&mut self, column: u16, row: u16) -> MouseOutcome {
         self.session_sidebar.cancel_press();
+        self.session_sidebar.cancel_resize();
         let owner = self.pointer_owner(column, row);
         // The bar first: its column overprints the chat band, so grabbing the
         // grip under the pointer is the only way to drag it. The claim is

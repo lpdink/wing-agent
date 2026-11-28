@@ -138,7 +138,7 @@ pub(crate) fn read_interface_doc_from(path: &Path) -> Result<InterfaceDoc, Store
 
 /// 原子写 `$WING_HOME/tui/config.yaml`：`.bak` → tmp + `sync_all` + `rename`。
 ///
-/// 写盘内容 = [`dump_config_yaml`] 的 [`DumpMode::Raw`] 输出（`--dump-config` 与保存共用同一个
+/// 设置面板的写盘内容 = [`dump_config_yaml`] 的 [`DumpMode::Raw`] 输出（`--dump-config` 与保存共用同一个
 /// emitter，但模式相反：**保存永远写密文真值**，展示默认写掩码）。
 pub fn write_interface_doc(doc: &Value) -> Result<WriteOutcome, StoreError> {
     let path = interface_config_path().ok_or(StoreError::NoConfigPath)?;
@@ -147,6 +147,82 @@ pub fn write_interface_doc(doc: &Value) -> Result<WriteOutcome, StoreError> {
 
 /// [`write_interface_doc`] 的显式路径内核（测试走这里）。
 pub(crate) fn write_interface_doc_to(path: &Path, doc: &Value) -> Result<WriteOutcome, StoreError> {
+    let _lock = lock_interface(path)?;
+    let text = dump_config_yaml(doc, DumpMode::Raw);
+    write_interface_text(path, &text)
+}
+
+pub(crate) fn save_sidebar_width(width: u16) -> Result<(), StoreError> {
+    let path = interface_config_path().ok_or(StoreError::NoConfigPath)?;
+    save_sidebar_width_to(&path, width)
+}
+
+fn save_sidebar_width_to(path: &Path, width: u16) -> Result<(), StoreError> {
+    let _lock = lock_interface(path)?;
+    let mut read = read_interface_doc_from(path)?;
+    let parse_error = |message: String| StoreError::Parse {
+        path: path.to_owned(),
+        message,
+    };
+    let layout = mapping_entry(
+        read.doc
+            .as_object_mut()
+            .expect("document root is a mapping"),
+        "layout",
+    )
+    .ok_or_else(|| parse_error("layout must be a mapping".into()))?;
+    let sidebar = mapping_entry(layout, "session_sidebar")
+        .ok_or_else(|| parse_error("layout.session_sidebar must be a mapping".into()))?;
+    let width = Value::from(width);
+    if sidebar.get("width") == Some(&width) {
+        return Ok(());
+    }
+    sidebar.insert("width".into(), width);
+    // This automatic edit must retain keys outside the current settings catalog.
+    let text = serde_yaml::to_string(&read.doc).map_err(|error| parse_error(error.to_string()))?;
+    if read_interface_doc_from(path)?.fingerprint != read.fingerprint {
+        return Err(StoreError::Write {
+            path: path.to_owned(),
+            source: std::io::Error::other("configuration changed during the width update"),
+        });
+    }
+    write_interface_text(path, &text)?;
+    Ok(())
+}
+
+fn mapping_entry<'a>(
+    object: &'a mut serde_json::Map<String, Value>,
+    key: &str,
+) -> Option<&'a mut serde_json::Map<String, Value>> {
+    object
+        .entry(key)
+        .or_insert_with(|| Value::Object(serde_json::Map::new()))
+        .as_object_mut()
+}
+
+fn lock_interface(path: &Path) -> Result<fs::File, StoreError> {
+    let write_error = |source| StoreError::Write {
+        path: path.to_owned(),
+        source,
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(write_error)?;
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| write_error(std::io::Error::other("path has no file name")))?;
+    // The config inode changes on every atomic replacement. Lock a stable sibling.
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_file_name(format!(".{}.lock", name.to_string_lossy())))
+        .map_err(write_error)?;
+    lock.try_lock().map_err(|error| write_error(error.into()))?;
+    Ok(lock)
+}
+
+fn write_interface_text(path: &Path, text: &str) -> Result<WriteOutcome, StoreError> {
     let backup_path = if path.exists() {
         let backup = backup_path(path)?;
         // 读旧文件 → 原子写：`fs::copy` 中途被杀会留下截断的备份，这里与后端
@@ -162,10 +238,7 @@ pub(crate) fn write_interface_doc_to(path: &Path, doc: &Value) -> Result<WriteOu
     } else {
         None
     };
-    // **保存路径永远是 `Raw`**：写掩码 = 把用户的密钥换成掩码字符串 = 数据损坏。
-    // 展示路径（`--dump-config`）在 `cmd/mod.rs` 里显式传 `Masked`。
-    let text = dump_config_yaml(doc, DumpMode::Raw);
-    atomic_write(path, &text)?;
+    atomic_write(path, text)?;
     Ok(WriteOutcome {
         path: path.to_owned(),
         fingerprint: fingerprint(text.as_bytes()),
@@ -479,13 +552,75 @@ mod tests {
             "备份 = 改前的文件"
         );
 
-        // 目录里只剩目标 + 备份：没有 tmp 残留
+        // 目录保留目标、备份和写锁。
         let mut entries: Vec<String> = fs::read_dir(file.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         entries.sort();
-        assert_eq!(entries, ["config.yaml", "config.yaml.bak"]);
+        assert_eq!(
+            entries,
+            [".config.yaml.lock", "config.yaml", "config.yaml.bak"]
+        );
+    }
+
+    #[test]
+    fn sidebar_width_updates_preserve_existing_and_future_settings() {
+        let dir = TestDir::new("sidebar-width");
+        let file = dir.path("config.yaml");
+        save_sidebar_width_to(&file, 28).unwrap();
+        assert_eq!(
+            AppConfig::load_from_path(&file)
+                .layout
+                .session_sidebar
+                .width,
+            28
+        );
+        assert!(!backup_path(&file).unwrap().exists());
+
+        let text = "api_key: sample-secret\nlayout:\n  tool_output_max: 7\n  session_sidebar:\n    side: right\n    width: 33\n    future_knob: 5\nunknown: { enabled: true }\n";
+        fs::write(&file, text).unwrap();
+        save_sidebar_width_to(&file, 20).unwrap();
+        assert_eq!(
+            read_interface_doc_from(&file).unwrap().doc,
+            json!({
+                "api_key": "sample-secret",
+                "layout": {"tool_output_max": 7, "session_sidebar": {"side": "right", "width": 20, "future_knob": 5}},
+                "unknown": {"enabled": true},
+            })
+        );
+        assert_eq!(read_text(&backup_path(&file).unwrap()), text);
+        let saved = read_interface_doc_from(&file).unwrap().fingerprint;
+        save_sidebar_width_to(&file, 20).unwrap();
+        assert_eq!(saved, read_interface_doc_from(&file).unwrap().fingerprint);
+        assert_eq!(read_text(&backup_path(&file).unwrap()), text);
+    }
+
+    #[test]
+    fn sidebar_width_preserves_invalid_or_locked_files() {
+        let dir = TestDir::new("sidebar-invalid");
+        let file = dir.path("config.yaml");
+        for text in [
+            "layout: [",
+            "layout: false",
+            "layout: {session_sidebar: []}",
+        ] {
+            fs::write(&file, text).unwrap();
+            assert!(matches!(
+                save_sidebar_width_to(&file, 28),
+                Err(StoreError::Parse { .. })
+            ));
+            assert_eq!(read_text(&file), text);
+        }
+        fs::write(&file, "layout: {}\n").unwrap();
+        let lock = lock_interface(&file).unwrap();
+        assert!(matches!(
+            save_sidebar_width_to(&file, 28),
+            Err(StoreError::Write { .. })
+        ));
+        assert_eq!(read_text(&file), "layout: {}\n");
+        drop(lock);
+        save_sidebar_width_to(&file, 28).unwrap();
     }
 
     /// 含密文的样本（保存路径的不变量测试用）。
@@ -570,11 +705,12 @@ mod tests {
         let outcome = write_interface_doc_to(&file, &json!({"api_key": SAVE_SECRET})).unwrap();
         assert!(outcome.backup_path.is_none(), "首次写入没有可备份的旧文件");
         assert!(!dir.path("config.yaml.bak").exists());
-        let entries: Vec<String> = fs::read_dir(&dir.0)
+        let mut entries: Vec<String> = fs::read_dir(&dir.0)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(entries, ["config.yaml"], "目录里只有目标文件");
+        entries.sort();
+        assert_eq!(entries, [".config.yaml.lock", "config.yaml"]);
     }
 
     #[test]

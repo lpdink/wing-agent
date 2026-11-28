@@ -51,7 +51,7 @@ fn click(app: &mut App, at: (u16, u16)) -> MouseOutcome {
 
 #[test]
 fn startup_toggle_and_resize_use_the_conversation_width() {
-    let mut app = app_with_draft(&"x".repeat(78));
+    let mut app = app_with_draft(&"x".repeat(90));
     let mut wide = test_terminal(104, 24);
     draw(&mut app, &mut wide);
     assert!(app.session_sidebar.frame.area.is_empty());
@@ -66,11 +66,11 @@ fn startup_toggle_and_resize_use_the_conversation_width() {
     ));
     draw(&mut app, &mut wide);
     let left = app.session_sidebar.frame.area;
-    assert_eq!((left.x, left.y, left.width), (0, 1, 30));
+    assert_eq!((left.x, left.y, left.width), (0, 1, 24));
     assert_eq!(app.geometry.chat_band().x, left.right());
     assert!(app.input.rendered_area().x >= left.right());
     assert!(app.input.rendered_area().height > original.height);
-    assert_eq!(app.input.text(), "x".repeat(78));
+    assert_eq!(app.input.text(), "x".repeat(90));
 
     app.apply_settings_preview(&json!({"layout": {"session_sidebar": {"side": "right"}}}));
     draw(&mut app, &mut wide);
@@ -83,11 +83,11 @@ fn startup_toggle_and_resize_use_the_conversation_width() {
         Some(PointerOwner::SessionSidebar)
     );
 
-    let mut narrow = test_terminal(99, 24);
+    let mut narrow = test_terminal(83, 24);
     draw(&mut app, &mut narrow);
     assert!(app.session_sidebar.frame.area.is_empty());
     assert!(app.session_sidebar.deadline(true).is_none());
-    assert_eq!(app.geometry.chat_band().width, 99);
+    assert_eq!(app.geometry.chat_band().width, 83);
     draw(&mut app, &mut wide);
     assert_eq!(app.session_sidebar.frame.area, right);
 
@@ -109,7 +109,7 @@ fn startup_toggle_and_resize_use_the_conversation_width() {
 #[test]
 fn right_sidebar_discloses_children_and_switches_through_the_snapshot_commit() {
     let config: AppConfig = serde_json::from_value(json!({
-        "layout": {"session_sidebar": {"default_open": true, "side": "right"}},
+        "layout": {"session_sidebar": {"default_open": true, "side": "right", "width": 36}},
         "colors": {"preset": "light"},
     }))
     .unwrap();
@@ -128,10 +128,9 @@ fn right_sidebar_discloses_children_and_switches_through_the_snapshot_commit() {
     );
     draw(&mut app, &mut terminal);
     let text = frame_text(terminal.backend().buffer());
-    assert!(text.contains("? Waiting"), "{text}");
-    assert!(text.contains("● Running"), "{text}");
     assert!(text.contains("Project ★"), "{text}");
-    assert!(text.contains("wing-agent · 01-01 14:30"), "{text}");
+    assert!(text.contains("▸2 ?1 ●1"), "{text}");
+    assert!(visible_hit(&app, "Waiting", RowAction::Open).is_none());
     let current = visible_hit(&app, "test-session", RowAction::Open).unwrap();
     assert_eq!(
         terminal.backend().buffer()[current].bg,
@@ -142,14 +141,11 @@ fn right_sidebar_discloses_children_and_switches_through_the_snapshot_commit() {
     let disclosure = visible_hit(&app, "Project", RowAction::ToggleChildren).unwrap();
     assert_eq!(click(&mut app, disclosure), MouseOutcome::Immediate);
     draw(&mut app, &mut terminal);
-    assert!(visible_hit(&app, "Waiting", RowAction::Open).is_none());
     let text = frame_text(terminal.backend().buffer());
-    assert!(text.contains("▸2 ?1 ●1"), "{text}");
+    assert!(text.contains("? Waiting"), "{text}");
+    assert!(text.contains("● Running"), "{text}");
+    assert!(text.contains("wing-agent · 01-01 14:30"), "{text}");
     assert!(app.drain_intents().is_empty());
-
-    let disclosure = visible_hit(&app, "Project", RowAction::ToggleChildren).unwrap();
-    click(&mut app, disclosure);
-    draw(&mut app, &mut terminal);
     let (x, y) = visible_hit(&app, "Waiting", RowAction::Open).unwrap();
     assert_eq!(click(&mut app, (x, y + 1)), MouseOutcome::Immediate);
     assert!(
@@ -201,10 +197,10 @@ fn wheel_routing_and_press_identity_survive_refreshes() {
     let mut sessions: Vec<_> = (0..20)
         .map(|i| row(&format!("row-{i:02}"), None, "idle", ""))
         .collect();
-    sessions.push(row("test-session", None, "idle", "2026-01-01T10:00:00"));
+    sessions.push(row("test-session", None, "idle", "2000-01-01T10:00:00"));
     refresh(&mut app, sessions.clone());
     draw(&mut app, &mut terminal);
-    assert!(frame_text(terminal.backend().buffer()).contains("1–6/21"));
+    assert!(frame_text(terminal.backend().buffer()).contains("1–5/21"));
     let chat = app.chat.scroll_position();
     let mut wheel = wheel_up();
     wheel.column = 60;
@@ -218,8 +214,8 @@ fn wheel_routing_and_press_identity_survive_refreshes() {
     app.handle_mouse(wheel);
     draw(&mut app, &mut terminal);
     assert_eq!(app.chat.scroll_position(), chat);
-    assert_eq!(visible_hit(&app, "row-02", RowAction::Open).unwrap().1, 2);
-    assert!(frame_text(terminal.backend().buffer()).contains("4–9/21"));
+    assert_eq!(visible_hit(&app, "row-02", RowAction::Open).unwrap().1, 3);
+    assert!(frame_text(terminal.backend().buffer()).contains("4–8/21"));
     let pressed = visible_hit(&app, "row-03", RowAction::Open).unwrap();
     app.handle_mouse(press(pressed));
     let mut reordered = sessions;
@@ -228,7 +224,7 @@ fn wheel_routing_and_press_identity_survive_refreshes() {
     reordered.swap_remove(3);
     refresh(&mut app, reordered);
     draw(&mut app, &mut terminal);
-    assert_eq!(visible_hit(&app, "row-02", RowAction::Open).unwrap().1, 2);
+    assert_eq!(visible_hit(&app, "row-02", RowAction::Open).unwrap().1, 3);
     assert_eq!(app.handle_mouse(release(pressed)), MouseOutcome::Ignored);
     assert!(app.drain_intents().is_empty());
 
@@ -389,4 +385,131 @@ fn the_current_row_uses_the_list_until_sync_and_shows_live_asks() {
     draw(&mut app, &mut terminal);
     let (x, y) = visible_hit(&app, "test-session", RowAction::Open).unwrap();
     assert_eq!(terminal.backend().buffer()[(x + 3, y)].symbol(), "?");
+}
+
+#[test]
+fn divider_drag_previews_then_saves_a_bounded_width_on_each_side() {
+    for side in [SidebarSide::Left, SidebarSide::Right] {
+        let mut app = app_with_message();
+        let mut terminal = test_terminal(140, 20);
+        app.config.layout.session_sidebar.side = side;
+        draw(&mut app, &mut terminal);
+        app.toggle_session_sidebar();
+        draw(&mut app, &mut terminal);
+        let frame = &app.session_sidebar.frame;
+        let divider = (frame.divider.x, frame.divider.y + 2);
+        let wider = if side == SidebarSide::Left { 25 } else { -25 };
+        let destination = (divider.0.saturating_add_signed(wider), divider.1);
+        assert_eq!(click(&mut app, divider), MouseOutcome::Immediate);
+        assert!(app.drain_intents().is_empty());
+        app.handle_mouse(press(divider));
+        assert_eq!(app.handle_mouse(drag(destination)), MouseOutcome::Coalesced);
+        assert!(!app.selection.is_press_active());
+        assert!(app.drain_intents().is_empty());
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.session_sidebar.frame.area.width, 40);
+        assert_eq!(app.config.layout.session_sidebar.width, 24);
+        assert_eq!(
+            app.handle_mouse(release(destination)),
+            MouseOutcome::Immediate
+        );
+        assert!(matches!(
+            app.drain_intents().as_slice(),
+            [AppIntent::SaveSidebarWidth { width: 40 }]
+        ));
+        assert_eq!(app.config.layout.session_sidebar.width, 40);
+
+        let mut narrow = test_terminal(87, 20);
+        draw(&mut app, &mut narrow);
+        assert_eq!(app.session_sidebar.frame.area.width, 23);
+        assert_eq!(app.geometry.chat_band().width, 64);
+        let divider = app.session_sidebar.frame.divider;
+        click(&mut app, (divider.x, divider.y));
+        assert!(app.drain_intents().is_empty());
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.session_sidebar.frame.area.width, 40);
+        let divider = app.session_sidebar.frame.divider;
+        let smaller = (divider.x.saturating_add_signed(-wider), divider.y + 1);
+        app.handle_mouse(press((divider.x, divider.y + 1)));
+        app.handle_mouse(drag(smaller));
+        draw(&mut app, &mut terminal);
+        assert_eq!(app.session_sidebar.frame.area.width, 20);
+        app.toggle_session_sidebar();
+        app.handle_mouse(release(smaller));
+        assert!(app.drain_intents().is_empty());
+        assert_eq!(app.config.layout.session_sidebar.width, 40);
+    }
+}
+
+#[test]
+fn time_groups_keep_trees_together_and_reveal_the_active_descendant() {
+    let mut config = AppConfig::default();
+    config.layout.session_sidebar.default_open = true;
+    let mut app = App::new("test-session".into(), config, None);
+    app.clear_welcome();
+    let mut terminal = test_terminal(120, 38);
+    let today = chrono::Local::now().date_naive();
+    let ago = |days| format!("{}T12:00:00", today - chrono::Days::new(days));
+    let sessions = vec![
+        row("Root", None, "idle", &ago(12)),
+        row("Child", Some("Root"), "working", &ago(0)),
+        row("Grandchild", Some("Child"), "waiting", &ago(2)),
+        row("Yesterday", None, "idle", &ago(1)),
+        row("Week boundary", None, "idle", &ago(7)),
+        row("Eight days", None, "idle", &ago(8)),
+        row("Missing", None, "idle", "unknown"),
+    ];
+    refresh(&mut app, sessions.clone());
+    draw(&mut app, &mut terminal);
+    let screen = frame_text(terminal.backend().buffer());
+    let headings = ["最 近", "昨 天", "一 周", "更 久"].map(|label| {
+        screen
+            .find(label)
+            .unwrap_or_else(|| panic!("missing {label}:\n{screen}"))
+    });
+    assert!(headings.windows(2).all(|orders| orders[0] < orders[1]));
+    for (label, group) in [
+        ("Root", 0),
+        ("Yesterday", 1),
+        ("Week boundary", 2),
+        ("Eight days", 3),
+        ("Missing", 3),
+    ] {
+        let index = screen
+            .find(label)
+            .unwrap_or_else(|| panic!("missing {label}:\n{screen}"));
+        assert!(index > headings[group]);
+        assert!(headings.get(group + 1).is_none_or(|end| index < *end));
+    }
+    assert!(visible_hit(&app, "Child", RowAction::Open).is_none());
+    assert!(visible_hit(&app, "Grandchild", RowAction::Open).is_none());
+    let (x, y) = visible_hit(&app, "Root", RowAction::Open).unwrap();
+    assert_eq!(app.session_sidebar.frame.hit(Position::new(x, y - 1)), None);
+
+    let disclosure = visible_hit(&app, "Root", RowAction::ToggleChildren).unwrap();
+    click(&mut app, disclosure);
+    draw(&mut app, &mut terminal);
+    assert!(visible_hit(&app, "Child", RowAction::Open).is_some());
+    assert!(visible_hit(&app, "Grandchild", RowAction::Open).is_none());
+
+    app.await_session_snapshot("Grandchild".into());
+    let mut event = sync_event(vec![], None, vec![], vec![], None);
+    if let WingEvent::SyncSession(snapshot) = &mut event {
+        snapshot.session_id = "Grandchild".into();
+    }
+    app.handle_event(event);
+    draw(&mut app, &mut terminal);
+    let grandchild = visible_hit(&app, "Grandchild", RowAction::Open).unwrap();
+    assert_eq!(
+        terminal.backend().buffer()[grandchild].bg,
+        app.palette().surface
+    );
+
+    let disclosure = visible_hit(&app, "Root", RowAction::ToggleChildren).unwrap();
+    click(&mut app, disclosure);
+    let mut updated = sessions;
+    updated[1].status = "idle".into();
+    refresh(&mut app, updated);
+    draw(&mut app, &mut terminal);
+    assert!(visible_hit(&app, "Grandchild", RowAction::Open).is_none());
 }

@@ -327,13 +327,30 @@ impl Default for LayoutConfig {
 }
 
 /// Session sidebar configuration.
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionSidebarConfig {
     /// Show the session sidebar when the TUI starts.
     pub default_open: bool,
     /// Place the session sidebar to the left or right of the conversation.
     pub side: SidebarSide,
+    /// Preferred sidebar width in terminal columns.
+    pub width: u16,
+}
+
+impl SessionSidebarConfig {
+    pub(crate) const MIN_WIDTH: u16 = 20;
+    pub(crate) const MAX_WIDTH: u16 = 40;
+}
+
+impl Default for SessionSidebarConfig {
+    fn default() -> Self {
+        Self {
+            default_open: false,
+            side: SidebarSide::Left,
+            width: 24,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

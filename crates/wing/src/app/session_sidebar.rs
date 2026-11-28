@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use tokio::time::Instant;
@@ -15,25 +16,26 @@ use wing_api_client::models::SessionListResponse;
 
 use super::mouse::MouseOutcome;
 use super::{App, AppIntent};
-use crate::config::SidebarSide;
+use crate::config::{SessionSidebarConfig, SidebarSide};
 use crate::protocol::SessionStatus;
-use crate::shared::session_list::{SessionCandidate, session_forest};
+use crate::shared::session_list::{SessionAge, SessionCandidate, session_forest};
 use crate::shared::session_tree::Crew;
-use crate::ui::session_sidebar::{self as ui, RowAction, SidebarFrame, SidebarRow};
+use crate::ui::session_sidebar::{self as ui, RowAction, SidebarChrome, SidebarFrame, SidebarRow};
 use crate::ui::toast::Toast;
 
-const MIN_WIDTH: u16 = 100;
+const MIN_MAIN_WIDTH: u16 = 64;
+const MIN_TERMINAL_WIDTH: u16 = MIN_MAIN_WIDTH + SessionSidebarConfig::MIN_WIDTH;
 const MIN_HEIGHT: u16 = 8;
 const WHEEL_SCROLL_SESSIONS: isize = 3;
 const ACTIVE_REFRESH: Duration = Duration::from_secs(8);
 const IDLE_REFRESH: Duration = Duration::from_secs(30);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
-fn split(area: Rect, open: bool, side: SidebarSide) -> (Rect, Option<Rect>) {
+fn split(area: Rect, open: bool, side: SidebarSide, preferred_width: u16) -> (Rect, Option<Rect>) {
     if !open || session_sidebar_too_small(area) {
         return (area, None);
     }
-    let width = ((u32::from(area.width) * 28 / 100) as u16).clamp(30, 40);
+    let width = clamp_sidebar_width(i32::from(preferred_width), area.width);
     let mut main = Rect {
         width: area.width - width,
         ..area
@@ -46,6 +48,35 @@ fn split(area: Rect, open: bool, side: SidebarSide) -> (Rect, Option<Rect>) {
     (main, Some(sidebar))
 }
 
+fn clamp_sidebar_width(width: i32, screen_width: u16) -> u16 {
+    let max_width = screen_width.saturating_sub(MIN_MAIN_WIDTH).clamp(
+        SessionSidebarConfig::MIN_WIDTH,
+        SessionSidebarConfig::MAX_WIDTH,
+    );
+    width.clamp(
+        i32::from(SessionSidebarConfig::MIN_WIDTH),
+        i32::from(max_width),
+    ) as u16
+}
+
+struct SidebarResize {
+    side: SidebarSide,
+    start_column: u16,
+    start_width: u16,
+    preview_width: u16,
+}
+
+impl SidebarResize {
+    fn width_at(&self, column: u16, screen_width: u16) -> u16 {
+        let dx = i32::from(column) - i32::from(self.start_column);
+        let change = match self.side {
+            SidebarSide::Left => dx,
+            SidebarSide::Right => -dx,
+        };
+        clamp_sidebar_width(i32::from(self.start_width) + change, screen_width)
+    }
+}
+
 struct CurrentSession<'a> {
     id: &'a str,
     title: Option<&'a str>,
@@ -56,6 +87,7 @@ struct CurrentSession<'a> {
 #[derive(Clone, Copy)]
 struct TreeRow {
     index: usize,
+    group: SessionAge,
     depth: usize,
     crew: Crew,
 }
@@ -72,16 +104,19 @@ pub(super) struct SessionSidebar {
     open: bool,
     pub frame: SidebarFrame,
     press: Option<(String, RowAction)>,
+    resize: Option<SidebarResize>,
     snapshot: Option<Vec<SessionCandidate>>,
     last_fetch: Option<Instant>,
     active_sessions: bool,
     fetch: Option<ListRequest>,
     refresh_requested: bool,
     consecutive_failures: u32,
-    collapsed: HashSet<String>,
+    expanded: HashSet<String>,
     candidates: Vec<SessionCandidate>,
     rows: Vec<TreeRow>,
     current: Option<SessionCandidate>,
+    current_was_synthetic: bool,
+    group_day: Option<NaiveDate>,
     tree_dirty: bool,
     offset: usize,
 }
@@ -94,8 +129,20 @@ impl SessionSidebar {
         }
     }
 
-    pub fn layout(&self, area: Rect, side: SidebarSide) -> (Rect, Option<Rect>) {
-        split(area, self.open, side)
+    pub fn layout(&self, area: Rect, config: SessionSidebarConfig) -> (Rect, Option<Rect>) {
+        let width = self
+            .resize
+            .as_ref()
+            .map_or(config.width, |drag| drag.preview_width);
+        split(area, self.open, config.side, width)
+    }
+
+    pub fn is_resizing(&self) -> bool {
+        self.resize.is_some()
+    }
+
+    pub fn cancel_resize(&mut self) {
+        self.resize = None;
     }
 
     pub fn request_refresh(&mut self) {
@@ -159,9 +206,9 @@ impl SessionSidebar {
 
     fn set_snapshot(&mut self, candidates: Vec<SessionCandidate>) {
         if self.snapshot.as_ref() != Some(&candidates) {
-            if !self.collapsed.is_empty() {
+            if !self.expanded.is_empty() {
                 let ids: HashSet<_> = candidates.iter().map(|row| row.id.as_str()).collect();
-                self.collapsed.retain(|id| ids.contains(id.as_str()));
+                self.expanded.retain(|id| ids.contains(id.as_str()));
             }
             self.active_sessions = candidates.iter().any(session_in_flight);
             self.snapshot = Some(candidates);
@@ -169,7 +216,7 @@ impl SessionSidebar {
         }
     }
 
-    fn sync_current(&mut self, current: CurrentSession<'_>, page: usize) {
+    fn sync_current(&mut self, current: CurrentSession<'_>, area: Rect, today: NaiveDate) {
         let reveal = self.current.as_ref().is_none_or(|row| row.id != current.id);
         if self.current.as_ref().is_none_or(|row| {
             row.id != current.id
@@ -191,14 +238,15 @@ impl SessionSidebar {
             });
             self.tree_dirty = true;
         }
-        if self.tree_dirty {
-            self.rebuild(page, reveal.then_some(current.id));
+        if self.tree_dirty || self.group_day != Some(today) {
+            self.rebuild(area, today, reveal.then_some(current.id));
             self.tree_dirty = false;
+            self.group_day = Some(today);
         }
-        self.clamp_offset(page);
+        self.clamp_offset(area);
     }
 
-    fn rebuild(&mut self, page: usize, reveal: Option<&str>) {
+    fn rebuild(&mut self, area: Rect, today: NaiveDate, reveal: Option<&str>) {
         let anchor = self
             .rows
             .get(self.offset)
@@ -208,52 +256,79 @@ impl SessionSidebar {
         } else {
             self.candidates.clear();
         }
+        let mut reveal = reveal;
+        let mut synthetic = None;
         if let Some(current) = &self.current {
             if let Some(row) = self.candidates.iter_mut().find(|row| row.id == current.id) {
+                if self.current_was_synthetic {
+                    reveal = Some(&current.id);
+                }
                 // An interactive ask can be visible in the list before its panel arrives.
-                // Keep that more specific state while the local turn is still in flight.
                 match (current.parsed_status(), row.parsed_status()) {
                     (None, _) | (Some(SessionStatus::Working), Some(SessionStatus::Waiting)) => {}
                     (Some(_), _) => row.status.clone_from(&current.status),
                 }
             } else {
+                synthetic = Some(self.candidates.len());
                 self.candidates.push(current.clone());
             }
         }
+        self.current_was_synthetic = synthetic.is_some();
         let forest = session_forest(&self.candidates);
         if let Some(index) =
             reveal.and_then(|id| self.candidates.iter().position(|row| row.id == id))
         {
             let mut parent = forest.parent_of(index);
             while let Some(index) = parent {
-                self.collapsed.remove(&self.candidates[index].id);
+                self.expanded.insert(self.candidates[index].id.clone());
                 parent = forest.parent_of(index);
             }
         }
 
-        self.rows.clear();
-        let mut folded_depth = None;
-        for entry in forest.tree() {
-            if folded_depth.is_some_and(|depth| entry.depth > depth) {
-                continue;
+        let mut buckets = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let mut remaining = forest.tree();
+        while let Some(root) = remaining.first() {
+            // Crew counts include every descendant, so the preorder slice contains the whole tree.
+            let (tree, rest) = remaining.split_at(forest.crew(root.index).descendants + 1);
+            remaining = rest;
+            let date = if synthetic == Some(root.index) {
+                Some(today)
+            } else {
+                tree.iter()
+                    .filter_map(|entry| {
+                        local_activity_date(&self.candidates[entry.index].last_interaction)
+                    })
+                    .max()
+            };
+            let group = SessionAge::at_date(date, today);
+            let mut folded_depth = None;
+            for entry in tree {
+                if folded_depth.is_some_and(|depth| entry.depth > depth) {
+                    continue;
+                }
+                let crew = forest.crew(entry.index);
+                let folded = crew.descendants > 0
+                    && !self.expanded.contains(&self.candidates[entry.index].id);
+                folded_depth = folded.then_some(entry.depth);
+                buckets[group as usize].push(TreeRow {
+                    index: entry.index,
+                    depth: entry.depth,
+                    crew,
+                    group,
+                });
             }
-            folded_depth = self
-                .collapsed
-                .contains(&self.candidates[entry.index].id)
-                .then_some(entry.depth);
-            self.rows.push(TreeRow {
-                index: entry.index,
-                depth: entry.depth,
-                crew: forest.crew(entry.index),
-            });
         }
+        self.rows.clear();
+        self.rows.extend(buckets.into_iter().flatten());
+
         if let Some(index) = anchor.as_deref().and_then(|id| self.row_position(id)) {
             self.offset = index;
         }
         if let Some(index) = reveal.and_then(|id| self.row_position(id)) {
-            self.offset = self
-                .offset
-                .clamp(index.saturating_sub(page.saturating_sub(1)), index);
+            let fitting =
+                ui::fitting_rows(area, self.rows[..=index].iter().rev().map(|row| row.group));
+            let earliest = (index + 1).saturating_sub(fitting).min(index);
+            self.offset = self.offset.clamp(earliest, index);
         }
     }
 
@@ -263,13 +338,14 @@ impl SessionSidebar {
             .position(|row| self.candidates[row.index].id == id)
     }
 
-    fn clamp_offset(&mut self, page: usize) {
-        self.offset = self.offset.min(self.rows.len().saturating_sub(page));
+    fn clamp_offset(&mut self, area: Rect) {
+        let final_page = ui::fitting_rows(area, self.rows.iter().rev().map(|row| row.group));
+        self.offset = self.offset.min(self.rows.len().saturating_sub(final_page));
     }
 
     fn toggle_children(&mut self, id: String) {
-        if !self.collapsed.remove(&id) {
-            self.collapsed.insert(id);
+        if !self.expanded.remove(&id) {
+            self.expanded.insert(id);
         }
         self.tree_dirty = true;
     }
@@ -282,7 +358,7 @@ impl SessionSidebar {
             -WHEEL_SCROLL_SESSIONS
         };
         self.offset = self.offset.saturating_add_signed(step);
-        self.clamp_offset(ui::capacity(self.frame.area));
+        self.clamp_offset(self.frame.area);
         if previous != self.offset {
             MouseOutcome::Immediate
         } else {
@@ -295,6 +371,7 @@ impl App {
     pub(super) fn toggle_session_sidebar(&mut self) {
         self.session_sidebar.open = !self.session_sidebar.open;
         self.session_sidebar.cancel_press();
+        self.session_sidebar.cancel_resize();
         if !self.session_sidebar.open {
             self.session_sidebar.frame = SidebarFrame::default();
         }
@@ -303,7 +380,7 @@ impl App {
             self.needs_full_redraw |= self.images.is_enabled();
         } else if self.session_sidebar.open {
             self.show_toast(Toast::info(
-                format!("会话侧栏需要 {MIN_WIDTH} 列 × {MIN_HEIGHT} 行"),
+                format!("会话侧栏需要 {MIN_TERMINAL_WIDTH} 列 × {MIN_HEIGHT} 行"),
                 Duration::from_secs(3),
             ));
         }
@@ -350,9 +427,17 @@ impl App {
                 workspace: self.status.workdir.as_deref(),
                 status,
             },
-            ui::capacity(area),
+            area,
+            Local::now().date_naive(),
         );
-        let capacity = ui::capacity(area);
+        let capacity = ui::fitting_rows(
+            area,
+            sidebar
+                .rows
+                .iter()
+                .skip(sidebar.offset)
+                .map(|row| row.group),
+        );
         let total = sidebar.rows.len();
         let range = (total > capacity && capacity > 0).then(|| {
             let first = sidebar.offset + 1;
@@ -371,17 +456,22 @@ impl App {
         sidebar.frame = ui::render(
             area,
             buf,
-            side,
-            &self.palette,
-            &self.session_id,
-            message,
+            SidebarChrome {
+                side,
+                resizing: sidebar.is_resizing(),
+                palette: &self.palette,
+                current_id: &self.session_id,
+                message,
+            },
             sidebar.rows.iter().skip(sidebar.offset).map(|row| {
                 let candidate = &sidebar.candidates[row.index];
                 SidebarRow {
                     candidate,
+                    group: row.group,
                     depth: row.depth,
                     crew: row.crew,
-                    collapsed: sidebar.collapsed.contains(&candidate.id),
+                    collapsed: row.crew.descendants > 0
+                        && !sidebar.expanded.contains(&candidate.id),
                 }
             }),
         );
@@ -390,6 +480,16 @@ impl App {
     pub(super) fn sidebar_press(&mut self, position: Position) -> MouseOutcome {
         self.cancel_selection();
         let sidebar = &mut self.session_sidebar;
+        if sidebar.frame.divider.contains(position) {
+            sidebar.resize = Some(SidebarResize {
+                side: self.config.layout.session_sidebar.side,
+                start_column: position.x,
+                start_width: sidebar.frame.area.width,
+                preview_width: sidebar.frame.area.width,
+            });
+            self.needs_full_redraw |= self.images.is_enabled();
+            return MouseOutcome::Immediate;
+        }
         sidebar.press = sidebar
             .frame
             .hit(position)
@@ -397,7 +497,27 @@ impl App {
         MouseOutcome::Immediate
     }
 
+    pub(super) fn resize_sidebar_to(&mut self, column: u16) -> Option<MouseOutcome> {
+        let drag = self.session_sidebar.resize.as_mut()?;
+        let width = drag.width_at(column, self.geometry.width());
+        if width == drag.preview_width {
+            return Some(MouseOutcome::Ignored);
+        }
+        drag.preview_width = width;
+        Some(MouseOutcome::Coalesced)
+    }
+
     pub(super) fn sidebar_release(&mut self, position: Position) -> Option<MouseOutcome> {
+        if let Some(drag) = self.session_sidebar.resize.take() {
+            if !self.background_pointer_blocked() {
+                let width = drag.width_at(position.x, self.geometry.width());
+                if width != drag.start_width {
+                    self.config.layout.session_sidebar.width = width;
+                    self.push_intent(AppIntent::SaveSidebarWidth { width });
+                }
+            }
+            return Some(MouseOutcome::Immediate);
+        }
         let (id, action) = self.session_sidebar.press.take()?;
         if self.background_pointer_blocked()
             || self.session_sidebar.frame.hit(position) != Some((id.as_str(), action))
@@ -454,10 +574,19 @@ impl App {
 }
 
 fn session_sidebar_too_small(area: Rect) -> bool {
-    area.width < MIN_WIDTH || area.height < MIN_HEIGHT
+    area.width < MIN_TERMINAL_WIDTH || area.height < MIN_HEIGHT
 }
 
 fn session_in_flight(row: &SessionCandidate) -> bool {
     row.parsed_status()
         .is_some_and(SessionStatus::turn_in_flight)
+}
+
+fn local_activity_date(stamp: &str) -> Option<NaiveDate> {
+    if let Ok(naive) = NaiveDateTime::parse_from_str(stamp, "%Y-%m-%dT%H:%M:%S%.f") {
+        return Some(naive.date());
+    }
+    DateTime::parse_from_rfc3339(stamp)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&Local).date_naive())
 }

@@ -10,7 +10,7 @@ use super::session_row::{PIN_MARK, PIN_WIDTH, UNTITLED, crew_badges, format_last
 use crate::config::{SidebarSide, ThemePalette};
 use crate::protocol::SessionStatus;
 use crate::render::markdown::elide_to_display_width;
-use crate::shared::session_list::SessionCandidate;
+use crate::shared::session_list::{SessionAge, SessionCandidate};
 use crate::shared::session_tree::Crew;
 use crate::util::title::dir_label;
 
@@ -19,6 +19,7 @@ const HEADER_HEIGHT: u16 = 1;
 
 pub(crate) struct SidebarRow<'a> {
     pub candidate: &'a SessionCandidate,
+    pub group: SessionAge,
     pub depth: usize,
     pub crew: Crew,
     pub collapsed: bool,
@@ -39,6 +40,7 @@ struct RowHit {
 #[derive(Default)]
 pub(crate) struct SidebarFrame {
     pub area: Rect,
+    pub divider: Rect,
     rows: Vec<RowHit>,
 }
 
@@ -54,19 +56,47 @@ impl SidebarFrame {
     }
 }
 
-pub(crate) fn capacity(area: Rect) -> usize {
-    usize::from(area.height.saturating_sub(HEADER_HEIGHT) / ROW_HEIGHT)
+fn height_for_row(previous: Option<SessionAge>, group: SessionAge) -> u16 {
+    ROW_HEIGHT + u16::from(previous != Some(group))
+}
+
+pub(crate) fn fitting_rows(area: Rect, groups: impl Iterator<Item = SessionAge>) -> usize {
+    let mut remaining = area.height.saturating_sub(HEADER_HEIGHT);
+    let mut previous = None;
+    groups
+        .take_while(|group| {
+            let height = height_for_row(previous, *group);
+            if height > remaining {
+                return false;
+            }
+            remaining -= height;
+            previous = Some(*group);
+            true
+        })
+        .count()
+}
+
+pub(crate) struct SidebarChrome<'a> {
+    pub side: SidebarSide,
+    pub resizing: bool,
+    pub palette: &'a ThemePalette,
+    pub current_id: &'a str,
+    pub message: Option<&'a str>,
 }
 
 pub(crate) fn render<'a>(
     area: Rect,
     buf: &mut Buffer,
-    side: SidebarSide,
-    palette: &ThemePalette,
-    current_id: &str,
-    message: Option<&str>,
+    chrome: SidebarChrome<'_>,
     rows: impl Iterator<Item = SidebarRow<'a>>,
 ) -> SidebarFrame {
+    let SidebarChrome {
+        side,
+        resizing,
+        palette,
+        current_id,
+        message,
+    } = chrome;
     if area.width < 2 || area.height == 0 {
         return SidebarFrame::default();
     }
@@ -77,8 +107,13 @@ pub(crate) fn render<'a>(
     let content_x = area.x + u16::from(side == SidebarSide::Right);
     let width = area.width - 1;
     let dim = Style::default().fg(palette.dim);
+    let (divider, divider_style) = if resizing {
+        ("┃", Style::default().fg(palette.accent))
+    } else {
+        ("│", dim)
+    };
     for y in area.y..area.bottom() {
-        buf[(edge, y)].set_symbol("│").set_style(dim);
+        buf[(edge, y)].set_symbol(divider).set_style(divider_style);
     }
     let header = Line::from(vec![
         Span::styled(" 会话", Style::default().fg(palette.text)),
@@ -86,20 +121,42 @@ pub(crate) fn render<'a>(
     ]);
     buf.set_line(content_x, area.y, &header, width);
     if let Some(message) = message {
-        let x = content_x + width.saturating_sub(message.width() as u16 + 1);
+        let available = usize::from(width).saturating_sub(header.width() + 1);
+        let message = elide_to_display_width(message, available);
+        let x = area
+            .right()
+            .saturating_sub(u16::from(side == SidebarSide::Left) + message.width() as u16);
         buf.set_string(x, area.y, message, dim);
     }
 
-    let rows = rows
-        .take(capacity(area))
-        .enumerate()
-        .map(|(index, row)| {
-            let y = area.y + HEADER_HEIGHT + index as u16 * ROW_HEIGHT;
-            let row_area = Rect::new(content_x, y, width, ROW_HEIGHT);
-            render_row(row_area, buf, palette, row, current_id)
-        })
-        .collect();
-    SidebarFrame { area, rows }
+    let mut hits = Vec::new();
+    let mut y = area.y + HEADER_HEIGHT;
+    let mut previous = None;
+    for row in rows {
+        let height = height_for_row(previous, row.group);
+        if height > area.bottom().saturating_sub(y) {
+            break;
+        }
+        if previous != Some(row.group) {
+            let title = match row.group {
+                SessionAge::Recent => " 最近",
+                SessionAge::Yesterday => " 昨天",
+                SessionAge::Week => " 一周",
+                SessionAge::Older => " 更久",
+            };
+            buf.set_stringn(content_x, y, title, usize::from(width), dim);
+            y += 1;
+            previous = Some(row.group);
+        }
+        let row_area = Rect::new(content_x, y, width, ROW_HEIGHT);
+        hits.push(render_row(row_area, buf, palette, row, current_id));
+        y += ROW_HEIGHT;
+    }
+    SidebarFrame {
+        area,
+        divider: Rect::new(edge, area.y, 1, area.height),
+        rows: hits,
+    }
 }
 
 fn render_row(
@@ -210,12 +267,16 @@ mod tests {
         let frame = render(
             area,
             &mut buf,
-            SidebarSide::Right,
-            &palette,
-            &candidate.id,
-            None,
+            SidebarChrome {
+                side: SidebarSide::Right,
+                resizing: false,
+                palette: &palette,
+                current_id: &candidate.id,
+                message: None,
+            },
             std::iter::once(SidebarRow {
                 candidate: &candidate,
+                group: SessionAge::Week,
                 depth: 16,
                 crew: Crew {
                     descendants: 20,
@@ -231,28 +292,28 @@ mod tests {
                 .map(|x| buf[(x, y)].symbol())
                 .collect::<String>()
         };
-        assert!(text(2).contains("▸ ? "));
-        assert!(text(2).contains("… ★"));
-        assert!(text(3).contains("▸20 ?4 ●3"));
-        assert_eq!(buf[(79, 2)].symbol(), " ");
-        assert_eq!(buf[(80, 2)].symbol(), "│");
-        assert_eq!(
-            frame.hit(Position::new(88, 2)),
-            Some(("long-session", RowAction::ToggleChildren))
-        );
-        assert_eq!(
-            frame.hit(Position::new(89, 2)),
-            Some(("long-session", RowAction::ToggleChildren))
-        );
-        assert_eq!(
-            frame.hit(Position::new(90, 2)),
-            Some(("long-session", RowAction::Open))
-        );
+        assert!(text(3).contains("▸ ? "));
+        assert!(text(3).contains("… ★"));
+        assert!(text(4).contains("▸20 ?4 ●3"));
+        assert_eq!(buf[(79, 3)].symbol(), " ");
+        assert_eq!(buf[(80, 3)].symbol(), "│");
         assert_eq!(
             frame.hit(Position::new(88, 3)),
+            Some(("long-session", RowAction::ToggleChildren))
+        );
+        assert_eq!(
+            frame.hit(Position::new(89, 3)),
+            Some(("long-session", RowAction::ToggleChildren))
+        );
+        assert_eq!(
+            frame.hit(Position::new(90, 3)),
             Some(("long-session", RowAction::Open))
         );
-        assert_eq!(frame.hit(Position::new(80, 2)), None);
+        assert_eq!(
+            frame.hit(Position::new(88, 4)),
+            Some(("long-session", RowAction::Open))
+        );
+        assert_eq!(frame.hit(Position::new(80, 3)), None);
     }
 
     #[test]
@@ -263,10 +324,13 @@ mod tests {
         let frame = render(
             area,
             &mut buf,
-            SidebarSide::Left,
-            &palette,
-            "",
-            None,
+            SidebarChrome {
+                side: SidebarSide::Left,
+                resizing: false,
+                palette: &palette,
+                current_id: "",
+                message: None,
+            },
             std::iter::empty(),
         );
         assert!(frame.area.is_empty());

@@ -33,7 +33,7 @@ use wing_api_client::models::SettingNode;
 
 use crate::config::ThemePalette;
 use crate::config::paste::PasteImageConfig;
-use crate::config::{LayoutConfig, SidebarSide};
+use crate::config::{LayoutConfig, SessionSidebarConfig, SidebarSide};
 
 // ── 声明 ────────────────────────────────────────────────────────
 
@@ -95,10 +95,12 @@ const SLOT_NOTE: &str = "缺席 = 跟随 `preset`。";
 
 const LAYOUT_SECTION_DOC: &str = "布局：会话侧栏与输入区 / 弹窗 / 工具输出的行数上限。";
 const LAYOUT_DOC: &str = "Layout configuration section.";
-const SIDEBAR_DOC: &str = "Session sidebar visibility and position.";
+const SIDEBAR_DOC: &str = "Session sidebar visibility, position, and width.";
 const SIDEBAR_DEFAULT_OPEN_DOC: &str = "Show the session sidebar when the TUI starts.";
 const SIDEBAR_SIDE_DOC: &str =
     "Place the session sidebar to the left or right of the conversation.";
+
+const SIDEBAR_WIDTH_DOC: &str = "Preferred sidebar width in terminal columns.";
 
 const RENDERING_SECTION_DOC: &str = "渲染：思考块 / 公式 / 图片。";
 const RENDERING_DOC: &str = "Rendering configuration section.";
@@ -126,7 +128,7 @@ const API_KEY_EXAMPLE: &str = "sk-xxx";
 /// Interface 根的设置目录（TUI 自己的配置）。
 ///
 /// 结构与后端 catalog 同构：同一个 [`SettingNode`] 类型。覆盖 `AppConfig` 的**全部** YAML 键
-/// （`colors.*` 21 + `layout.*` 5 + `rendering.*` 3 + `paste.image.*` 3 + `api_key`）。
+/// （`colors.*` 21 + `layout.*` 6 + `rendering.*` 3 + `paste.image.*` 3 + `api_key`）。
 ///
 /// 根节点的 `key` / `path` 是 `"interface"`（与后端根的 `"config"` 对称）；
 /// 子节点的 `path` **不带根前缀**——它们就是稀疏文档（`settings/get` 的 `values`）里的真实键路径，
@@ -238,7 +240,20 @@ pub fn interface_catalog() -> SettingNode {
     ];
     side.default = Some(Value::from(layout_defaults.session_sidebar.side.as_str()));
     side.has_default = true;
-    sidebar.children = vec![default_open, side];
+    let mut width = node(
+        "width",
+        "layout.session_sidebar.width",
+        SettingKind::Int,
+        SIDEBAR_WIDTH_DOC,
+        2,
+        "Layout",
+        LAYOUT_SECTION_DOC,
+    );
+    width.default = Some(Value::from(layout_defaults.session_sidebar.width));
+    width.has_default = true;
+    width.min = Some(f64::from(SessionSidebarConfig::MIN_WIDTH));
+    width.max = Some(f64::from(SessionSidebarConfig::MAX_WIDTH));
+    sidebar.children = vec![default_open, side, width];
     layout.children.push(sidebar);
 
     let mut rendering = node(
@@ -1186,6 +1201,7 @@ mod tests {
                 session_sidebar: crate::config::SessionSidebarConfig {
                     default_open: true,
                     side: SidebarSide::Right,
+                    width: 32,
                 },
             },
             rendering: RenderingConfig {
@@ -1490,7 +1506,7 @@ mod tests {
         let catalog = interface_catalog();
         let leaves: Vec<&SettingNode> = catalog.leaves().collect();
         let paths: Vec<&str> = leaves.iter().map(|node| node.path.as_str()).collect();
-        assert_eq!(leaves.len(), 33, "{paths:?}");
+        assert_eq!(leaves.len(), 34, "{paths:?}");
         fn count(leaves: &[&SettingNode], predicate: impl Fn(&SettingNode) -> bool) -> usize {
             leaves.iter().filter(|node| predicate(node)).count()
         }
@@ -1502,7 +1518,7 @@ mod tests {
         );
         assert_eq!(count(&leaves, |node| node.required), 0);
         assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Restart), 1);
-        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 31);
+        assert_eq!(count(&leaves, |node| node.apply == ApplyScope::Hot), 32);
         assert_eq!(
             count(&leaves, |node| node.apply == ApplyScope::NextTuiStart),
             1

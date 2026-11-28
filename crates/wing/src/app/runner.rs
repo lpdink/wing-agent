@@ -358,6 +358,14 @@ pub async fn execute_intent(
             fetch_tx,
             matches!(intent, AppIntent::FetchSessionList),
         ),
+        AppIntent::SaveSidebarWidth { width } => {
+            if let Err(error) = crate::config::store::save_sidebar_width(width) {
+                app.show_toast(Toast::warning(
+                    format!("侧栏宽度保存失败：{error}"),
+                    std::time::Duration::from_secs(4),
+                ));
+            }
+        }
         AppIntent::CompactSession { instruction } => {
             dispatch_compact(
                 transport.as_ref().map(|t| t.http.clone()),

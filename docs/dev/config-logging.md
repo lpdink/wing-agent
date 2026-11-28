@@ -152,7 +152,7 @@ schema 之外的未知键**保留并写回**（前向兼容）。
 
 > `gateway.host/port` 只影响独立启动 `wing-gateway` 的场景；Rust TUI 读的是 backend config，不会读 TUI config 里的网关地址。
 
-启动时的侧栏状态与左右位置可通过 `layout.session_sidebar` 设置。键名和取值见 [会话侧栏](tui-session-sidebar.md)。
+启动时的侧栏状态、左右位置和宽度可通过 `layout.session_sidebar` 设置。拖动侧栏分隔线只保存宽度值。键名和取值见 [会话侧栏](tui-session-sidebar.md)。
 
 ## 日志策略（前后端统一）
 

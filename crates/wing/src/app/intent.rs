@@ -183,6 +183,9 @@ pub enum AppIntent {
     /// Refresh the visible session sidebar.
     RefreshSessionSidebar,
 
+    /// Persist a completed sidebar resize in the local TUI config.
+    SaveSidebarWidth { width: u16 },
+
     /// Fetch session runtime info (model, tokens, thinking, yolo) via HTTP API.
     FetchInfo,
 
