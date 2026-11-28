@@ -2,9 +2,10 @@
 
 被守的语义：
 
-- **缺省零变化**：``max_connections`` 未声明时 ``httpx.AsyncClient(...)`` 收到的 kwargs
-  与引入该旋钮之前逐字相同——**根本没有** ``limits`` 这个键。显式传一个"近似默认"的
-  ``Limits()`` 也算不合格：它把 httpx 的默认连接池口径抄进了本仓库（httpx 改默认即失真）；
+- **默认值是有意的**：``max_connections`` 未声明时装配成 ``Limits(2000, 20)``。httpx 的默认池
+  只有 100 条，第 101 个并发调用会在 ``send(stream=True)`` 里排队，被 ``timeout_first_chunk``
+  包住 ⇒ 表现为「卡满首块超时后失败并重试」，而不是变慢（容量实测见 ``docs/dev/capacity.md``
+  §3.1）。显式写 ``null`` 才是「交回 httpx 默认」——那种情况下**根本**不传 ``limits`` 这个键；
 - 声明值 → ``Limits(max_connections=n, max_keepalive_connections=min(n, 20))``；
 - 非法值（``0`` / 负数）落在**配置校验期**并带精确路径，而不是等到构造 provider 才炸栈；
 - 两个协议实现同形（openai / anthropic 各一个 ``AsyncClient``）。
@@ -57,25 +58,26 @@ def make_provider(protocol: str, **overrides: Any) -> ModelProvider:
 
 
 @pytest.mark.parametrize("protocol", tuple(FACTORIES))
-def test_default_sends_no_limits_kwarg(
+def test_default_pool_is_not_the_httpx_default(
     protocol: str, client_kwargs: list[dict[str, Any]]
 ) -> None:
-    """未配置时不给 ``AsyncClient`` 传 ``limits``（与改动前逐字相同）。"""
+    """未配置时装配成 ``Limits(2000, 20)``：httpx 的 100 会让第 101 个调用排队超时。"""
     make_provider(protocol)
 
     assert len(client_kwargs) == 1
     kwargs = client_kwargs[0]
-    assert "limits" not in kwargs, kwargs
-    assert set(kwargs) == BASE_CLIENT_KWARGS, sorted(kwargs)
-    # 值也要与「没引入这个旋钮」时相同：timeout 是唯一另一个装配出来的参数。
+    assert kwargs["limits"] == httpx.Limits(
+        max_connections=2000, max_keepalive_connections=20
+    ), kwargs["limits"]
+    assert set(kwargs) == BASE_CLIENT_KWARGS | {"limits"}, sorted(kwargs)
     assert kwargs["timeout"] == make_http_timeout(), kwargs["timeout"]
 
 
 @pytest.mark.parametrize("protocol", tuple(FACTORIES))
-def test_explicit_none_is_the_same_as_absent(
+def test_explicit_null_hands_the_pool_back_to_httpx(
     protocol: str, client_kwargs: list[dict[str, Any]]
 ) -> None:
-    """显式写 ``max_connections: null`` 与不写等价（YAML 两种形态都常见）。"""
+    """显式写 ``max_connections: null`` 才是「交回 httpx 默认」：不传 ``limits``。"""
     make_provider(protocol, max_connections=None)
 
     assert set(client_kwargs[0]) == BASE_CLIENT_KWARGS, sorted(client_kwargs[0])
