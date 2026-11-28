@@ -88,7 +88,6 @@ fn startup_toggle_and_resize_use_the_conversation_width() {
     assert!(app.session_sidebar.frame.area.is_empty());
     assert!(app.session_sidebar.deadline(true).is_none());
     assert_eq!(app.geometry.chat_band().width, 99);
-    assert!(app.session_sidebar.open);
     draw(&mut app, &mut wide);
     assert_eq!(app.session_sidebar.frame.area, right);
 
@@ -267,9 +266,20 @@ fn polling_coalesces_with_popup_and_discards_pre_reconnect_responses() {
     let text = frame_text(terminal.backend().buffer());
     assert!(text.contains("更 新 失 败"), "{text}");
     assert!(text.contains("Other"), "{text}");
+    let remaining = app.session_sidebar.deadline(true).unwrap() - Instant::now();
+    assert!(remaining.as_secs_f64() > 13.0 && remaining.as_secs_f64() <= 16.0);
+    for _ in 0..3 {
+        assert!(app.session_sidebar.begin_fetch(None));
+        finish(&mut app, "test-session", Err("timeout".into()));
+    }
+    let remaining = app.session_sidebar.deadline(true).unwrap() - Instant::now();
+    assert!(remaining.as_secs_f64() > 55.0 && remaining.as_secs_f64() <= 60.0);
     assert!(app.session_sidebar.begin_fetch(Some("test-session")));
     app.set_connected(false);
     assert!(app.session_sidebar.deadline(false).is_none());
+    draw(&mut app, &mut terminal);
+    let text = frame_text(terminal.backend().buffer());
+    assert!(text.contains("离 线"), "{text}");
     app.set_connected(true);
     finish(&mut app, "test-session", Ok(vec![]));
     assert!(matches!(
@@ -321,4 +331,30 @@ fn mutations_during_an_inflight_list_request_keep_a_follow_up() {
     );
     assert_eq!(app.popup.cache.sessions[0].id, "New name");
     assert!(app.drain_intents().is_empty());
+}
+
+#[test]
+fn a_sidebar_switch_closes_the_old_picker_and_keeps_the_draft() {
+    let mut app = app_with_message();
+    let mut terminal = test_terminal(104, 22);
+    draw(&mut app, &mut terminal);
+    app.toggle_session_sidebar();
+    refresh(&mut app, vec![row("Other", None, "idle", "")]);
+    open_session_popup(&mut app, 3);
+    app.drain_intents();
+    draw(&mut app, &mut terminal);
+    assert!(app.popup.height() > 0);
+    let target = visible_hit(&app, "Other", RowAction::Open).unwrap();
+    click(&mut app, target);
+    assert!(
+        matches!(app.drain_intents().as_slice(), [AppIntent::ResumeSession { session_id }] if session_id == "Other")
+    );
+    app.await_session_snapshot("Other".into());
+    let mut event = sync_event(vec![], None, vec![], vec![], None);
+    if let WingEvent::SyncSession(snapshot) = &mut event {
+        snapshot.session_id = "Other".into();
+    }
+    app.handle_event(event);
+    assert_eq!(app.popup.height(), 0);
+    assert_eq!(app.input.text(), "/ss");
 }

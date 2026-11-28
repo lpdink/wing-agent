@@ -641,6 +641,7 @@ impl App {
             return false;
         }
         self.session_id = session_id;
+        self.popup.close_active();
         self.draft_recovery_epoch = self.draft_recovery_epoch.wrapping_add(1);
         self.status.pinned = false;
         self.push_intent(AppIntent::FetchInfo);

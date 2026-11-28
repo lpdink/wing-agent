@@ -93,8 +93,13 @@ fn slot_docs() -> Vec<(&'static str, &'static str)> {
 
 const SLOT_NOTE: &str = "缺席 = 跟随 `preset`。";
 
-const LAYOUT_SECTION_DOC: &str = "布局：输入区 / 弹窗 / 工具输出的行数上限。";
+const LAYOUT_SECTION_DOC: &str = "布局：会话侧栏与输入区 / 弹窗 / 工具输出的行数上限。";
 const LAYOUT_DOC: &str = "Layout configuration section.";
+const SIDEBAR_DOC: &str = "Session sidebar visibility and position.";
+const SIDEBAR_DEFAULT_OPEN_DOC: &str = "Show the session sidebar when the TUI starts.";
+const SIDEBAR_DEFAULT_OPEN_NOTE: &str = "下次启动 Wing TUI 时生效。";
+const SIDEBAR_SIDE_DOC: &str =
+    "Place the session sidebar to the left or right of the conversation.";
 
 const RENDERING_SECTION_DOC: &str = "渲染：思考块 / 公式 / 图片。";
 const RENDERING_DOC: &str = "Rendering configuration section.";
@@ -202,7 +207,7 @@ pub fn interface_catalog() -> SettingNode {
         "session_sidebar",
         "layout.session_sidebar",
         SettingKind::Object,
-        "Session sidebar visibility and position.",
+        SIDEBAR_DOC,
         3,
         "Layout",
         LAYOUT_SECTION_DOC,
@@ -211,19 +216,19 @@ pub fn interface_catalog() -> SettingNode {
         "default_open",
         "layout.session_sidebar.default_open",
         SettingKind::Bool,
-        "Show the session sidebar when the TUI starts.",
+        SIDEBAR_DEFAULT_OPEN_DOC,
         0,
         "Layout",
         LAYOUT_SECTION_DOC,
     );
     default_open.default = Some(Value::from(layout_defaults.session_sidebar.default_open));
     default_open.has_default = true;
-    default_open.notes = vec!["下次启动 Wing TUI 时生效。".to_owned()];
+    default_open.notes = vec![SIDEBAR_DEFAULT_OPEN_NOTE.to_owned()];
     let mut side = node(
         "side",
         "layout.session_sidebar.side",
         SettingKind::Enum,
-        "Place the session sidebar to the left or right of the conversation.",
+        SIDEBAR_SIDE_DOC,
         1,
         "Layout",
         LAYOUT_SECTION_DOC,
@@ -1439,8 +1444,9 @@ mod tests {
     #[test]
     fn the_enum_choices_are_lowercase_and_contain_their_defaults() {
         let catalog = interface_catalog();
-        let cases: [(&str, &[&str], &str); 4] = [
+        let cases: [(&str, &[&str], &str); 5] = [
             ("colors.preset", &["auto", "dark", "light"], "auto"),
+            ("layout.session_sidebar.side", &["left", "right"], "left"),
             ("rendering.thinking", &["visible", "hidden"], "visible"),
             ("rendering.math", &["text", "off"], "text"),
             ("rendering.images", &["auto", "off"], "auto"),

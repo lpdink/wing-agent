@@ -519,12 +519,12 @@ impl App {
                 // animated (spinner / progress) and must not read as a content
                 // change — see `InputArea::guard_text`.
                 text: self.input.guard_text(),
-                columns: self.geometry.main_columns(),
+                columns: self.geometry.main_x_and_width(),
             },
             SelectionRegion::Chat => SelectionGuard::Chat {
                 cells: self.chat.len(),
                 pending: self.chat.pending_len(),
-                columns: self.geometry.main_columns(),
+                columns: self.geometry.main_x_and_width(),
                 rebuilds: self.chat.structure_epoch(),
                 pending_revision: self.chat.pending_revision(),
             },

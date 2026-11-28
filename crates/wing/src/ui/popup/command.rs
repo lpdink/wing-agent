@@ -13,13 +13,13 @@ use super::selection::LevelDecor;
 use super::selection::LevelHeader;
 use super::selection::RichSessionRow;
 use super::selection::SelectionRow;
-use super::selection::format_last_active;
 use super::selection::plain_row;
 use crate::protocol::CommandInfo;
 use crate::protocol::SessionStatus;
 pub use crate::shared::session_list::SessionCandidate;
 use crate::shared::session_list::session_forest;
 use crate::shared::session_tree::Forest;
+use crate::ui::session_row::format_last_active;
 
 /// Action to take when popup candidates need to be fetched.
 ///
@@ -336,7 +336,7 @@ fn rich_session_row(
         rich: Some(RichSessionRow {
             // Display-only surface: a value this build does not know
             // (version mismatch on the list endpoint) shows as inactive.
-            status: SessionStatus::parse(&c.status).unwrap_or(SessionStatus::Inactive),
+            status: c.parsed_status().unwrap_or(SessionStatus::Inactive),
             last_active,
             title: c.title.clone(),
             workspace: c.workspace.clone(),

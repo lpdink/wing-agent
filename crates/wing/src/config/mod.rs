@@ -311,6 +311,7 @@ pub struct LayoutConfig {
     pub max_popup_rows: usize,
     /// Maximum tool result output lines.
     pub tool_output_max: usize,
+    /// Session sidebar preferences.
     pub session_sidebar: SessionSidebarConfig,
 }
 
@@ -325,6 +326,7 @@ impl Default for LayoutConfig {
     }
 }
 
+/// Session sidebar configuration.
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionSidebarConfig {

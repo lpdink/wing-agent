@@ -90,7 +90,7 @@ impl Default for FrameGeometry {
 }
 
 impl FrameGeometry {
-    /// Record the whole terminal area of the frame being drawn.
+    /// Record the screen and its conversation column for the frame being drawn.
     ///
     /// Called at the top of the draw pass, before anything reads the width —
     /// the selection-invalidation check compares the anchor's width against
@@ -104,7 +104,7 @@ impl FrameGeometry {
         self.area
     }
 
-    pub(super) fn main_columns(&self) -> (u16, u16) {
+    pub(super) fn main_x_and_width(&self) -> (u16, u16) {
         (self.main.x, self.main.width)
     }
 

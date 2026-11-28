@@ -1,4 +1,9 @@
 //! Session sidebar state, pointer gestures, and the shared session-list request.
+//!
+//! A picker open can join the in-flight query. Local mutations schedule a
+//! follow-up refresh and invalidate its picker result. Connection loss discards
+//! the entire old reply. Successful list snapshots belong to the gateway and
+//! survive switches between sessions in the same connection.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -11,6 +16,7 @@ use wing_api_client::models::SessionListResponse;
 use super::mouse::MouseOutcome;
 use super::{App, AppIntent};
 use crate::config::SidebarSide;
+use crate::protocol::SessionStatus;
 use crate::shared::session_list::{SessionCandidate, session_forest};
 use crate::shared::session_tree::Crew;
 use crate::ui::session_sidebar::{self as ui, RowAction, SidebarFrame, SidebarRow};
@@ -18,10 +24,12 @@ use crate::ui::toast::Toast;
 
 const MIN_WIDTH: u16 = 100;
 const MIN_HEIGHT: u16 = 8;
+const WHEEL_SCROLL_SESSIONS: isize = 3;
 const ACTIVE_REFRESH: Duration = Duration::from_secs(8);
 const IDLE_REFRESH: Duration = Duration::from_secs(30);
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
-pub(super) fn split(area: Rect, open: bool, side: SidebarSide) -> (Rect, Option<Rect>) {
+fn split(area: Rect, open: bool, side: SidebarSide) -> (Rect, Option<Rect>) {
     if !open || session_sidebar_too_small(area) {
         return (area, None);
     }
@@ -42,7 +50,7 @@ struct CurrentSession<'a> {
     id: &'a str,
     title: Option<&'a str>,
     workspace: Option<&'a str>,
-    status: &'static str,
+    status: Option<SessionStatus>,
 }
 
 #[derive(Clone, Copy)]
@@ -61,7 +69,7 @@ struct ListRequest {
 
 #[derive(Default)]
 pub(super) struct SessionSidebar {
-    pub open: bool,
+    open: bool,
     pub frame: SidebarFrame,
     press: Option<(String, RowAction)>,
     snapshot: Option<Vec<SessionCandidate>>,
@@ -69,7 +77,7 @@ pub(super) struct SessionSidebar {
     active_sessions: bool,
     fetch: Option<ListRequest>,
     refresh_requested: bool,
-    failed: bool,
+    consecutive_failures: u32,
     collapsed: HashSet<String>,
     candidates: Vec<SessionCandidate>,
     rows: Vec<TreeRow>,
@@ -84,6 +92,10 @@ impl SessionSidebar {
             open,
             ..Self::default()
         }
+    }
+
+    pub fn layout(&self, area: Rect, side: SidebarSide) -> (Rect, Option<Rect>) {
+        split(area, self.open, side)
     }
 
     pub fn request_refresh(&mut self) {
@@ -109,25 +121,24 @@ impl SessionSidebar {
         }
     }
 
-    fn current_status(&self) -> Option<&str> {
-        self.current.as_ref().map(|row| row.status.as_str())
-    }
-
-    pub fn deadline(&self, connected: bool) -> Option<Instant> {
-        if !connected || self.frame.area.is_empty() || self.fetch.is_some() {
+    pub fn deadline(&self, can_fetch: bool) -> Option<Instant> {
+        if !can_fetch || self.frame.area.is_empty() || self.fetch.is_some() {
             return None;
         }
         if self.refresh_requested {
             return Some(Instant::now());
         }
-        let interval = if self.active_sessions || self.current_status().is_some_and(is_active) {
-            ACTIVE_REFRESH
-        } else {
-            IDLE_REFRESH
-        };
+        let interval =
+            if self.active_sessions || self.current.as_ref().is_some_and(session_in_flight) {
+                ACTIVE_REFRESH
+            } else {
+                IDLE_REFRESH
+            };
+        let multiplier = 1 << self.consecutive_failures.min(3);
+        let delay = interval.saturating_mul(multiplier).min(MAX_RETRY_DELAY);
         Some(
             self.last_fetch
-                .map_or_else(Instant::now, |last| last + interval),
+                .map_or_else(Instant::now, |last| last + delay),
         )
     }
 
@@ -152,7 +163,7 @@ impl SessionSidebar {
                 let ids: HashSet<_> = candidates.iter().map(|row| row.id.as_str()).collect();
                 self.collapsed.retain(|id| ids.contains(id.as_str()));
             }
-            self.active_sessions = candidates.iter().any(|row| is_active(&row.status));
+            self.active_sessions = candidates.iter().any(session_in_flight);
             self.snapshot = Some(candidates);
             self.tree_dirty = true;
         }
@@ -162,7 +173,7 @@ impl SessionSidebar {
         let reveal = self.current.as_ref().is_none_or(|row| row.id != current.id);
         if self.current.as_ref().is_none_or(|row| {
             row.id != current.id
-                || row.status != current.status
+                || row.parsed_status() != current.status
                 || row.title != current.title.unwrap_or_default()
                 || row.workspace != current.workspace.unwrap_or_default()
         }) {
@@ -171,7 +182,9 @@ impl SessionSidebar {
                 parent: None,
                 title: current.title.unwrap_or_default().to_owned(),
                 workspace: current.workspace.unwrap_or_default().to_owned(),
-                status: current.status.to_owned(),
+                status: current
+                    .status
+                    .map_or_else(String::new, |status| status.as_str().to_owned()),
                 last_interaction: String::new(),
                 pinned: false,
                 pin_added_at: None,
@@ -197,10 +210,9 @@ impl SessionSidebar {
         }
         if let Some(current) = &self.current {
             if let Some(row) = self.candidates.iter_mut().find(|row| row.id == current.id) {
-                if !current.status.is_empty()
-                    && (current.status != "working" || row.status != "waiting")
-                {
-                    row.status.clone_from(&current.status);
+                match (current.parsed_status(), row.parsed_status()) {
+                    (None, _) | (Some(SessionStatus::Working), Some(SessionStatus::Waiting)) => {}
+                    (Some(_), _) => row.status.clone_from(&current.status),
                 }
             } else {
                 self.candidates.push(current.clone());
@@ -239,7 +251,7 @@ impl SessionSidebar {
         if let Some(index) = reveal.and_then(|id| self.row_position(id)) {
             self.offset = self
                 .offset
-                .clamp(index.saturating_add(1).saturating_sub(page), index);
+                .clamp(index.saturating_sub(page.saturating_sub(1)), index);
         }
     }
 
@@ -261,9 +273,13 @@ impl SessionSidebar {
     }
 
     pub fn scroll(&mut self, down: bool) -> MouseOutcome {
-        self.cancel_press();
         let previous = self.offset;
-        self.offset = self.offset.saturating_add_signed(if down { 3 } else { -3 });
+        let step = if down {
+            WHEEL_SCROLL_SESSIONS
+        } else {
+            -WHEEL_SCROLL_SESSIONS
+        };
+        self.offset = self.offset.saturating_add_signed(step);
         self.clamp_offset(ui::capacity(self.frame.area));
         if previous != self.offset {
             MouseOutcome::Immediate
@@ -277,13 +293,13 @@ impl App {
     pub(super) fn toggle_session_sidebar(&mut self) {
         self.session_sidebar.open = !self.session_sidebar.open;
         self.session_sidebar.cancel_press();
-        if !session_sidebar_too_small(self.geometry.area()) {
-            self.needs_full_redraw = true;
+        if !self.session_sidebar.open {
+            self.session_sidebar.frame = SidebarFrame::default();
         }
-        if self.session_sidebar.open
-            && self.session_sidebar.frame.area.is_empty()
-            && session_sidebar_too_small(self.geometry.area())
-        {
+        if !session_sidebar_too_small(self.geometry.area()) {
+            // Inline terminal graphics may still cover cells reassigned to the side column.
+            self.needs_full_redraw |= self.images.is_enabled();
+        } else if self.session_sidebar.open {
             self.show_toast(Toast::info(
                 format!("会话侧栏需要 {MIN_WIDTH} 列 × {MIN_HEIGHT} 行"),
                 Duration::from_secs(3),
@@ -291,7 +307,12 @@ impl App {
         }
     }
 
-    pub(super) fn draw_session_sidebar(&mut self, area: Option<Rect>, buf: &mut Buffer) {
+    pub(super) fn draw_session_sidebar(
+        &mut self,
+        area: Option<Rect>,
+        side: SidebarSide,
+        buf: &mut Buffer,
+    ) {
         let sidebar = &mut self.session_sidebar;
         if sidebar.frame.area != area.unwrap_or_default() {
             sidebar.cancel_press();
@@ -308,13 +329,13 @@ impl App {
             .as_ref()
             .is_some_and(|pending| pending.session_id == self.session_id)
         {
-            ""
+            None
         } else if !self.ask_panels.is_empty() {
-            "waiting"
+            Some(SessionStatus::Waiting)
         } else if self.turn.working {
-            "working"
+            Some(SessionStatus::Working)
         } else {
-            "idle"
+            Some(SessionStatus::Idle)
         };
         sidebar.sync_current(
             CurrentSession {
@@ -331,7 +352,7 @@ impl App {
         );
         let message = if !self.connected {
             Some("离线")
-        } else if sidebar.failed {
+        } else if sidebar.consecutive_failures > 0 {
             Some("更新失败")
         } else if sidebar.snapshot.is_none() {
             Some("加载中…")
@@ -341,7 +362,7 @@ impl App {
         sidebar.frame = ui::render(
             area,
             buf,
-            self.config.layout.session_sidebar.side,
+            side,
             &self.palette,
             &self.session_id,
             message,
@@ -411,11 +432,12 @@ impl App {
                     self.apply_popup_sessions(&candidates);
                 }
                 self.session_sidebar.set_snapshot(candidates);
-                self.session_sidebar.failed = false;
+                self.session_sidebar.consecutive_failures = 0;
             }
             Err(error) => {
                 tracing::warn!(%error, "list sessions failed");
-                self.session_sidebar.failed = true;
+                self.session_sidebar.consecutive_failures =
+                    self.session_sidebar.consecutive_failures.saturating_add(1);
             }
         }
     }
@@ -425,6 +447,7 @@ fn session_sidebar_too_small(area: Rect) -> bool {
     area.width < MIN_WIDTH || area.height < MIN_HEIGHT
 }
 
-fn is_active(status: &str) -> bool {
-    matches!(status, "working" | "waiting")
+fn session_in_flight(row: &SessionCandidate) -> bool {
+    row.parsed_status()
+        .is_some_and(SessionStatus::turn_in_flight)
 }

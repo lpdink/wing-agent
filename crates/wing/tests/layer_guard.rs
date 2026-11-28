@@ -154,6 +154,7 @@ const UI_ANCHORS: &[&str] = &[
     "ui/panel.rs",
     "ui/chat_view/cell.rs",
     "ui/cells/ask_msg.rs",
+    "ui/session_row.rs",
     "ui/session_sidebar.rs",
 ];
 

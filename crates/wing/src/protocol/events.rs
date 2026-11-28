@@ -93,6 +93,15 @@ impl SessionStatus {
         }
     }
 
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactive => "inactive",
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Waiting => "waiting",
+        }
+    }
+
     /// Whether a turn is in flight — the only question a mid-join subscriber
     /// asks of the snapshot. `waiting` counts: the turn runs, blocked on a
     /// pending ask (the live path keeps the spinner up for it too).

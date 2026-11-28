@@ -1749,7 +1749,7 @@ mod session_list {
 #[test]
 fn test_opening_the_session_panel_refreshes_the_cached_list_once() {
     use crate::app::intent::AppIntent;
-    use crate::ui::popup::command::SessionCandidate;
+    use crate::shared::session_list::SessionCandidate;
 
     let mut app = test_app();
     app.popup.cache.sessions = vec![SessionCandidate {
@@ -1799,7 +1799,7 @@ fn test_opening_the_session_panel_refreshes_the_cached_list_once() {
 
 #[test]
 fn test_the_refresh_response_does_not_trigger_another_request() {
-    use crate::ui::popup::command::SessionCandidate;
+    use crate::shared::session_list::SessionCandidate;
     use wing_api_client::models::SessionListResponse;
 
     let mut app = test_app();
@@ -1916,8 +1916,8 @@ fn test_a_panels_first_fetch_survives_a_running_turn() {
 fn test_a_panel_refresh_still_waits_for_an_idle_agent() {
     // 反向锚定：有缓存时面板照常渲染旧行，但"打开即刷新"（#147）不在
     // turn 进行中发请求——刷新**不排队**（不补发），下次打开面板自然会再刷。
+    use crate::shared::session_list::SessionCandidate;
     use crate::ui::popup::ActivePopup;
-    use crate::ui::popup::command::SessionCandidate;
 
     let mut app = test_app();
     app.popup.cache.sessions = vec![SessionCandidate {

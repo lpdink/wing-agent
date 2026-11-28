@@ -6,15 +6,15 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
+use super::session_row::{PIN_MARK, PIN_WIDTH, UNTITLED, crew_badges, format_last_active};
 use crate::config::{SidebarSide, ThemePalette};
 use crate::protocol::SessionStatus;
 use crate::render::markdown::elide_to_display_width;
 use crate::shared::session_list::SessionCandidate;
 use crate::shared::session_tree::Crew;
-use crate::ui::popup::selection::{crew_badges, format_last_active};
 use crate::util::title::dir_label;
 
-pub(crate) const ROW_HEIGHT: u16 = 2;
+const ROW_HEIGHT: u16 = 2;
 const HEADER_HEIGHT: u16 = 1;
 
 pub(crate) struct SidebarRow<'a> {
@@ -67,6 +67,9 @@ pub(crate) fn render<'a>(
     message: Option<&str>,
     rows: impl Iterator<Item = SidebarRow<'a>>,
 ) -> SidebarFrame {
+    if area.width < 2 || area.height == 0 {
+        return SidebarFrame::default();
+    }
     let edge = match side {
         SidebarSide::Left => area.right() - 1,
         SidebarSide::Right => area.x,
@@ -128,27 +131,25 @@ fn render_row(
         (true, false) => "▾",
         (false, _) => " ",
     };
-    let status = SessionStatus::parse(&candidate.status).unwrap_or(SessionStatus::Inactive);
+    let status = candidate.parsed_status().unwrap_or(SessionStatus::Inactive);
     let title = candidate.title.lines().next().unwrap_or_default().trim();
-    let title = if title.is_empty() {
-        "(untitled)"
-    } else {
-        title
-    };
-    let pin = if candidate.pinned { " ★" } else { "" };
+    let title = if title.is_empty() { UNTITLED } else { title };
+    let pin_width = usize::from(candidate.pinned) * PIN_WIDTH;
     let text_indent = indent + 4;
     let width = usize::from(area.width);
-    let title_width = width.saturating_sub(text_indent + pin.width() + 1);
-    let title_line = Line::from(vec![
+    let title_width = width.saturating_sub(text_indent + pin_width + 1);
+    let mut title_spans = vec![
         Span::styled(" ".repeat(indent), base),
         Span::styled(disclosure, dim),
         Span::styled(" ", base),
         Span::styled(status.icon(), base.fg(status.color(palette))),
         Span::styled(" ", base),
         Span::styled(elide_to_display_width(title, title_width), title_style),
-        Span::styled(pin, base.fg(palette.warning)),
-    ]);
-    buf.set_line(area.x, area.y, &title_line, area.width);
+    ];
+    if candidate.pinned {
+        title_spans.push(Span::styled(PIN_MARK, base.fg(palette.warning)));
+    }
+    buf.set_line(area.x, area.y, &Line::from(title_spans), area.width);
 
     let auxiliary_width = width.saturating_sub(text_indent + 1);
     let time = format_last_active(&candidate.last_interaction);
@@ -183,5 +184,84 @@ fn render_row(
         area,
         session_id: candidate.id.clone(),
         disclosure: expandable.then(|| Position::new(area.x + indent as u16, area.y)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::AppConfig;
+
+    #[test]
+    fn dense_rows_keep_status_pin_and_disclosure_inside_the_sidebar() {
+        let candidate = SessionCandidate {
+            id: "long-session".into(),
+            parent: None,
+            title: "非常长的会话标题".repeat(5),
+            workspace: format!("/projects/{}", "工作区".repeat(10)),
+            status: SessionStatus::Waiting.as_str().into(),
+            last_interaction: "2026-01-01T14:30:00".into(),
+            pinned: true,
+            pin_added_at: None,
+        };
+        let palette = ThemePalette::from_config(&AppConfig::default().colors);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 110, 6));
+        let area = Rect::new(80, 1, 30, 5);
+        let frame = render(
+            area,
+            &mut buf,
+            SidebarSide::Right,
+            &palette,
+            &candidate.id,
+            None,
+            std::iter::once(SidebarRow {
+                candidate: &candidate,
+                depth: 16,
+                crew: Crew {
+                    descendants: 20,
+                    waiting: 4,
+                    working: 3,
+                    activity: None,
+                },
+                collapsed: true,
+            }),
+        );
+        let text = |y| {
+            (area.x..area.right())
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        };
+        assert!(text(2).contains("▸ ? "));
+        assert!(text(2).contains("… ★"));
+        assert!(text(3).contains("▸20 ?4 ●3"));
+        assert_eq!(buf[(79, 2)].symbol(), " ");
+        assert_eq!(buf[(80, 2)].symbol(), "│");
+        assert_eq!(
+            frame.hit(Position::new(88, 2)),
+            Some(("long-session", RowAction::ToggleChildren))
+        );
+        assert_eq!(
+            frame.hit(Position::new(88, 3)),
+            Some(("long-session", RowAction::Open))
+        );
+        assert_eq!(frame.hit(Position::new(80, 2)), None);
+    }
+
+    #[test]
+    fn empty_area_has_no_rendered_targets() {
+        let area = Rect::new(3, 1, 0, 4);
+        let palette = ThemePalette::from_config(&AppConfig::default().colors);
+        let mut buf = Buffer::empty(area);
+        let frame = render(
+            area,
+            &mut buf,
+            SidebarSide::Left,
+            &palette,
+            "",
+            None,
+            std::iter::empty(),
+        );
+        assert!(frame.area.is_empty());
+        assert_eq!(frame.hit(Position::new(3, 2)), None);
     }
 }

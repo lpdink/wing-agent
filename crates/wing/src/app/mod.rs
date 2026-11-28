@@ -780,11 +780,9 @@ impl App {
         // the screen goes through the wire pass — see [`crate::ui::emoji_width`].
         crate::tui::draw_frame(terminal, |frame| {
             let area = frame.area();
-            let (main, sidebar_area) = session_sidebar::split(
-                area,
-                self.session_sidebar.open,
-                layout.session_sidebar.side,
-            );
+            let (main, sidebar_area) = self
+                .session_sidebar
+                .layout(area, layout.session_sidebar.side);
             self.geometry.record_area(area, main);
 
             // A selection is anchored to *content* coordinates, which only
@@ -980,7 +978,11 @@ impl App {
                 frame.set_cursor_position((cursor_x, cursor_y));
             }
 
-            self.draw_session_sidebar(sidebar_area, frame.buffer_mut());
+            self.draw_session_sidebar(
+                sidebar_area,
+                layout.session_sidebar.side,
+                frame.buffer_mut(),
+            );
 
             // 设置面板：居中**浮层卡片**（v2），垫在 toast *之前*（保存回执的 toast 要压在
             // 它上面）。卡片自己 `Clear` 自己那块——四周的聊天背景因此还在（v1 是全屏
@@ -1434,7 +1436,9 @@ pub async fn run_app(
         };
 
         let snapshot_deadline = app.snapshot_deadline();
-        let sidebar_deadline = app.session_sidebar.deadline(app.connected);
+        let sidebar_deadline = app
+            .session_sidebar
+            .deadline(app.connected && transport.is_some());
 
         // Select from term events and gateway events.
         tokio::select! {

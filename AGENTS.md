@@ -239,7 +239,7 @@ crates/wing/src/
 │   ├── runner.rs                    执行 AppIntent（HTTP/WS 副作用）
 │   ├── intent.rs / transport.rs     AppIntent 枚举 + 传输抽象（WS+HTTP+client_id 原子单元，含重连退避）
 │   ├── commands.rs / modal.rs       斜杠命令路由表 / 模态所有权与 Esc 阶梯（谁拥有键盘，唯一声明）
-│   ├── mouse.rs / selection_session.rs   指针所有权与优先级（滚动条 → composer → chat 带 → 状态栏）/ 选择手势生命周期（区域指纹失效 · 按下时的链接）
+│   ├── mouse.rs / selection_session.rs   指针所有权与优先级（滚动条 → 会话侧栏 → composer → chat 带 → 状态栏）/ 选择手势生命周期（区域指纹失效 · 按下时的链接）
 │   ├── frame.rs / projection.rs     上一帧几何记录（输入路径共读的契约）/ WingEvent → chat·turn·status 投影（唯一 match 事件变体处）
 │   ├── clipboard.rs                 粘贴通道边界（文本 → composer / 图片 → 单并发压缩流水线 → chip）
 │   ├── images/                     图片 lane：mod（能力/配置门 · ImageStore 持有 · 元数据表 · 帧末绘制（遮挡与选择门）· 新鲜度检查（1s 节流 · 可注入时钟））· media（媒体图的字节侧：屏幕目标集 · 抓取账本 · 字节 LRU）
@@ -249,9 +249,10 @@ crates/wing/src/
 │   ├── preview.rs                   整屏帧取样器（创作期工具的库侧：真 App::draw → Buffer → 文本 / ANSI / HTML）
 │   ├── session_sidebar.rs           会话侧栏状态、点击与列表刷新调度
 │   ├── settings.rs                  设置面板接线（开合生命周期 · Interface 实时预览 · 保存回执 · Ctrl+R 重启网关）
-│   └── tests/                       模块内单测（mod + 18 个主题文件：core / send / wire / frame / interaction / modal / composer / commands / projection / selection / scrollbar / settings / images / clipboard / usage / welcome / splash_frame / program_status + support）
+│   └── tests/                       模块内单测（mod + 19 个主题文件：core / send / wire / frame / interaction / modal / composer / commands / projection / selection / scrollbar / settings / images / clipboard / usage / welcome / splash_frame / program_status / session_sidebar + support）
 ├── ui/                              UI 组件
 │   ├── chat_view/                   Chat 视图：mod（ChatView 结构）· cell（ChatCell 渲染 + pending 条目）· model（内容模型）· media（消息里的图片：正文 + 引用 → 图块 / 标签行）· viewport（滚动·几何·高度缓存·绘制）· frame（帧快照·选择映射）· link（链接表·OSC8）· image（图片放置表与候选路径）
+│   ├── session_row.rs               会话列表共享的状态字形、徽章和时间格式
 │   ├── session_sidebar.rs           会话侧栏双行条目与实际帧的命中区域
 │   ├── selection.rs                 文本选择状态机（区域标签 / 内容坐标锚定 / 区间有序化 / 快照取文本，纯逻辑）
 │   ├── scrollbar.rs                 overlay 滚动条（几何 / 命中测试 / 拖拽状态机 / 绘制）

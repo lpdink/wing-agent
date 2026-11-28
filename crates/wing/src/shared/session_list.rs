@@ -41,6 +41,12 @@ impl From<SessionInfo> for SessionCandidate {
     }
 }
 
+impl SessionCandidate {
+    pub fn parsed_status(&self) -> Option<SessionStatus> {
+        SessionStatus::parse(&self.status)
+    }
+}
+
 pub fn session_forest(candidates: &[SessionCandidate]) -> Forest<'_> {
     let rows: Vec<_> = candidates
         .iter()
@@ -50,7 +56,7 @@ pub fn session_forest(candidates: &[SessionCandidate]) -> Forest<'_> {
             pinned: candidate.pinned,
             pin_added_at: candidate.pin_added_at.as_deref(),
             last_interaction: Some(&candidate.last_interaction),
-            status: SessionStatus::parse(&candidate.status),
+            status: candidate.parsed_status(),
         })
         .collect();
     Forest::build(&rows)

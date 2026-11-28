@@ -54,8 +54,7 @@ pub(super) enum PointerOwner {
     /// has to see the event before the band does.
     Scrollbar,
     SessionSidebar,
-    /// The composer block: the only region that reacts to a plain click (it
-    /// places the cursor), guarded by the modal lane's pointer guard.
+    /// The composer block places the cursor according to the modal pointer guard.
     Composer,
     /// The chat band: it keeps its drag-to-copy contract and the link click.
     Chat,
@@ -75,8 +74,7 @@ pub(super) const POINTER_PRIORITY: [PointerOwner; 5] = [
     PointerOwner::SessionSidebar,
     PointerOwner::Composer,
     PointerOwner::Chat,
-    // 状态栏只占自己的一行（不与上面三者重叠），位置只在该行被别的认领
-    // 命中时才可观察；追加在末尾，既有三者的相对优先级不变。
+    // 状态栏使用独立的一行。
     PointerOwner::StatusBar,
 ];
 
@@ -94,11 +92,7 @@ impl PointerOwner {
         }
         match self {
             PointerOwner::Scrollbar => app.scrollbar_at(column, row).is_some(),
-            PointerOwner::SessionSidebar => app
-                .session_sidebar
-                .frame
-                .area
-                .contains(Position::new(column, row)),
+            PointerOwner::SessionSidebar => app.sidebar_contains(column, row),
             // The composer sits below the chat band, and it is claimed only
             // while no modal owns the keyboard: the ask panel / model picker /
             // visible popup are typing into the draft, and placing a cursor or
@@ -122,16 +116,17 @@ pub(super) enum StatusBarHit {
 }
 
 impl App {
+    fn sidebar_contains(&self, column: u16, row: u16) -> bool {
+        self.session_sidebar
+            .frame
+            .area
+            .contains(Position::new(column, row))
+    }
+
     /// The owners that claim this position, in [`POINTER_PRIORITY`] order.
     ///
-    /// Today the three claims are pairwise disjoint — the bar's column lives in
-    /// the chat band's gutter, and the composer block sits below the band — so
-    /// the chain is empty or holds a single owner, and the declaration order is
-    /// only observable when two claims *do* overlap. That is exactly what it is
-    /// there for: it decides such a tie, so a future claim (say, a band that
-    /// also claimed the gutter) cannot silently reorder the dispatch. The
-    /// "at most one owner" invariant and the per-position verdicts are pinned
-    /// in `app::tests::frame`.
+    /// The frame uses disjoint hit regions, including a gutter for the chat scrollbar.
+    /// The pointer ordering and frame hits are asserted in `app::tests::frame`.
     pub(super) fn pointer_chain(
         &self,
         column: u16,
@@ -161,16 +156,12 @@ impl App {
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                 self.session_sidebar.cancel_press();
                 let down = mouse.kind == MouseEventKind::ScrollDown;
-                if self
-                    .session_sidebar
-                    .frame
-                    .area
-                    .contains(Position::new(mouse.column, mouse.row))
-                {
-                    if self.background_pointer_blocked() {
-                        return MouseOutcome::Ignored;
-                    }
-                    return self.session_sidebar.scroll(down);
+                if self.sidebar_contains(mouse.column, mouse.row) {
+                    return if PointerOwner::SessionSidebar.claims(self, mouse.column, mouse.row) {
+                        self.session_sidebar.scroll(down)
+                    } else {
+                        MouseOutcome::Ignored
+                    };
                 }
                 if down {
                     self.chat

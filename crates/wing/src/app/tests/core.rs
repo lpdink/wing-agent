@@ -5,7 +5,7 @@
 
 use super::support::*;
 use crate::app::*;
-use crate::ui::popup::command::SessionCandidate;
+use crate::shared::session_list::SessionCandidate;
 
 #[test]
 fn test_draw_gate_frame_interval() {

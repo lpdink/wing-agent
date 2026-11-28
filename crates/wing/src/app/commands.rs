@@ -569,7 +569,7 @@ impl App {
         self.popup.cache.copies = self.chat.collect_assistant_messages();
     }
 
-    /// Invalidate the cached session list so the next `/session` popup re-fetches.
+    /// Invalidate the picker candidates and schedule a refresh for the visible sidebar.
     ///
     /// Called after session-mutating operations (resume, create, fork, title
     /// update) succeed, ensuring the popup always shows fresh data. 复位的是
@@ -600,7 +600,8 @@ impl App {
     /// Apply a background fetch result to app state.
     ///
     /// Called from the main event loop when a spawned fetch task completes.
-    /// Discards stale results whose `session_id` doesn't match the current session.
+    /// Session-scoped results use the active session guard. The shared session
+    /// list tracks its picker waiter independently from the sidebar snapshot.
     pub(super) fn handle_fetch_result(&mut self, result: crate::app::intent::FetchResult) {
         use crate::app::intent::FetchPayload;
 
